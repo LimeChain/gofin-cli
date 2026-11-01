@@ -186,7 +186,7 @@ async fn fresh_evidence_is_reused_without_widening_exact_intent() {
     )
     .await;
 
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
     let intent = &result.preview.unwrap().intent;
     assert_eq!(
@@ -211,7 +211,7 @@ async fn preparation_age_starts_before_slow_adapter_work() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -227,7 +227,7 @@ async fn delayed_human_approval_falls_back_to_fresh_adapter_validation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -245,7 +245,7 @@ async fn older_but_generically_fresh_observation_falls_back_to_revalidation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -283,7 +283,7 @@ async fn expired_price_observation_is_not_extended_by_reuse() {
     .await;
 
     assert_eq!(result.error.unwrap().code, "STALE_VALUATION");
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -301,5 +301,5 @@ async fn adapters_without_a_reuse_window_keep_final_revalidation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }

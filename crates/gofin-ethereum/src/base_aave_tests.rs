@@ -157,7 +157,7 @@ async fn base_aave_reads_and_six_guarded_actions_use_exact_reviewed_profile() {
     }
     assert!(adapter.config.uniswap.is_none());
     let definitions = adapter.definitions();
-    assert!(!definitions.iter().any(|d| d.name.starts_with("uniswap.")));
+    assert!(definitions.iter().any(|d| d.name == "uniswap.quote"));
     for definition in definitions.iter().filter(|d| d.name.starts_with("aave.")) {
         assert_eq!(
             definition.semantics["deployment_compatibility"]["reviewed_token_revision"],

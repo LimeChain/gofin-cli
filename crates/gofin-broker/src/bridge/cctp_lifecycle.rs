@@ -185,14 +185,24 @@ impl BridgeAdapter {
             ));
         }
         if saved.quote.intent.solana_destination.is_some() {
-            return self
-                .prepare_cctp_solana_stage(input, record, saved, step, link, requested)
-                .await;
+            return Box::pin(
+                self.prepare_cctp_solana_stage(input, record, saved, step, link, requested),
+            )
+            .await;
         }
         let locator = cctp_locator(record)?;
-        let bounds: BridgeBounds =
-            serde_json::from_value(record.approved_bounds.clone().ok_or_else(internal_error)?)
-                .map_err(|_| internal_error())?;
+        let bounds: BridgeBounds = if let Some(original) = record.approved_bounds.clone() {
+            serde_json::from_value(original).map_err(|_| internal_error())?
+        } else {
+            // Compound stages carry their parent-approved bounds in the child
+            // candidate; the engine validates them before durable admission.
+            normalize_authorization_bounds(
+                Some(requested.clone().ok_or_else(|| {
+                    GoFinError::validation("CCTP mint requires its original native bounds.")
+                })?),
+                saved,
+            )?
+        };
         if requested.is_some() && normalize_authorization_bounds(requested, saved)? != bounds {
             return Err(GoFinError::validation(
                 "Mint must retain the original approved bounds and consumed fees.",
@@ -292,17 +302,16 @@ impl BridgeAdapter {
             expected: vec![],
             locks: vec![resource.clone()],
         };
-        let valuation = self.value_intent(&intent).await?;
+        let valuation = self.value_intent(&intent).await.ok();
         let mut plan = saved.plan.clone();
         plan.bounds = bounds.clone();
         plan.fixed_scope_digest = cctp::scope_digest(&saved.quote, &bounds, sender)?;
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),
             binding:json!({"resource":resource,"transaction":transaction,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,
                 (gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),
-            summary:self.summary(saved,&link.kind,alias), checks:vec![Check{name:"CCTP source and attestation".into(),status:CheckStatus::Passed,detail:"Verified original source message, attester signatures, exact destination call and gas bounds.".into()}], warnings:vec!["Mint submission is intermediate; transfer completion requires verified destination receipt.".into()], observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1,
+            summary:self.summary(saved,&link.kind,alias), checks:vec![Check{name:"CCTP source and attestation".into(),status:CheckStatus::Passed,detail:"Verified original source message, attester signatures, exact destination call and gas bounds.".into()}], warnings:vec!["Mint submission is intermediate; transfer completion requires verified destination receipt.".into()], observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation,intent,operation_version:1,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -399,8 +408,7 @@ impl BridgeAdapter {
             transaction.maximum_cost()?,
         )?;
         let mut fresh = prepared.clone();
-        fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
-        gofin_domain::value_bounds::carry_at(prepared, &mut fresh, self.clock.now())?;
+        fresh.valuation = self.value_intent(&fresh.intent).await.ok();
         Ok(fresh)
     }
 }
@@ -837,13 +845,13 @@ impl BridgeAdapter {
         let alias = transfer.metadata["wallet_alias"]
             .as_str()
             .ok_or_else(internal_error)?;
-        let bounds: BridgeBounds = serde_json::from_value(
-            transfer
-                .approved_bounds
-                .clone()
-                .ok_or_else(internal_error)?,
-        )
-        .map_err(|_| internal_error())?;
+        let bounds: BridgeBounds = if let Some(original) = transfer.approved_bounds.clone() {
+            serde_json::from_value(original).map_err(|_| internal_error())?
+        } else {
+            // Status only: estimate readiness against the saved quote bounds.
+            // Submission remains separately checked against parent authority.
+            saved.bounds.clone()
+        };
         let wallet = self.wallet(alias, chain)?;
         if runtime
             .balance(
@@ -1163,7 +1171,7 @@ mod tests {
             block_number: 10,
             confirmations: 5,
             success: true,
-            fee: U256::from(1),
+            fee: Some(U256::from(1)),
             receipt: json!({}),
         };
         let tx = json!({"hash":format!("{:#x}",receipt.hash),"blockHash":format!("{:#x}",receipt.block_hash),"blockNumber":"0xa","chainId":"0x2105","from":sender,"to":cctp::MESSAGE_TRANSMITTER,"input":call.data,"value":"0x0"});

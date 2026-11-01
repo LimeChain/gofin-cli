@@ -510,12 +510,6 @@ fn account_funding_pending_to_terminal_survives_store_restart_without_double_cre
             &operation.updated_at,
         )
         .unwrap();
-    store
-        .reserve(
-            &operation.id,
-            &store_reservations_for_intent(operation.preview.as_ref().unwrap()).unwrap(),
-        )
-        .unwrap();
     let engine = Engine::new(
         store,
         vec![],
@@ -559,87 +553,12 @@ fn account_funding_pending_to_terminal_survives_store_restart_without_double_cre
             .unwrap()
             .reservations(&pending_record.id)
             .unwrap()
-            .iter()
-            .any(|reservation| {
-                reservation.resource
-                    == resource_asset_key(&ResourceAmount {
-                        resource: wallet.clone(),
-                        amount: Amount {
-                            asset: native.clone(),
-                            atoms: quantity("0"),
-                        },
-                    })
-                    .unwrap()
-                    && reservation.units == "0"
-                    && reservation.fee_units == "20"
-            })
+            .is_empty()
     );
-
-    // The surviving pending fee row was produced by actual reconciliation.
-    // A separate write cannot reserve against the obsolete cost-key namespace
-    // or consume the cash already committed to that fee ceiling.
-    {
-        let mut store = engine.store.lock().unwrap();
-        let mut second = record(vec![], vec![]);
-        second.id = "next-cash-write".into();
-        second.request_id = "next-cash-request".into();
-        second.fingerprint = "next-cash-fingerprint".into();
-        second.status = Status::AwaitingApproval;
-        second.submission = None;
-        store
-            .create_request(
-                "next-cash-write",
-                "next-cash-request",
-                "next-cash-fingerprint",
-                "synthetic.transfer",
-                None,
-                "awaiting_approval",
-                &to_value(&second).unwrap(),
-                "next-cash-created",
-            )
-            .unwrap();
-        let current = store.list_records().unwrap();
-        let resource = resource_asset_key(&ResourceAmount {
-            resource: wallet.clone(),
-            amount: Amount {
-                asset: native.clone(),
-                atoms: quantity("95"),
-            },
-        })
-        .unwrap();
-        let rows = [ReservationRow {
-            resource,
-            units: "95".into(),
-            fee_units: "0".into(),
-        }];
-        let result = store.persist_operation_reservation_with_cash_capacities(
-            "next-cash-write",
-            &rows,
-            &to_value(&second).unwrap(),
-            &current,
-            "next-cash-reserved",
-            &[gofin_store::CashReservationCapacity {
-                resource: resource_asset_key(&ResourceAmount {
-                    resource: wallet.clone(),
-                    amount: Amount {
-                        asset: native.clone(),
-                        atoms: quantity("0"),
-                    },
-                })
-                .unwrap(),
-                maximum_total_units: "100".into(),
-            }],
-        );
-        assert!(
-            matches!(
-                result,
-                Err(gofin_store::StoreError::ConcurrentReservationAt {
-                    reason: "cash_capacity_exceeded"
-                })
-            ),
-            "expected the produced fee reserve to exhaust scoped cash capacity; got {result:?}"
-        );
-    }
+    assert_eq!(
+        pending_record.effects.as_ref().unwrap().submission,
+        submission
+    );
     drop(engine);
 
     // Recovery begins from the exact persisted cumulative proof, not from

@@ -31,6 +31,46 @@ use gofin_domain::{GoFinError, PreparedOperation, Result, Submission, Submission
 mod expiry;
 pub use expiry::ExpiredWithoutInclusionProof;
 
+/// Bind a complete finalized non-inclusion proof to the immutable submission.
+pub fn expired_without_inclusion_reconciliation(
+    submission: &Submission,
+    signature: &str,
+    message_sha256: &str,
+    reason: &str,
+    proof: &ExpiredWithoutInclusionProof,
+) -> Result<gofin_domain::Reconciliation> {
+    if submission.kind != "solana.transaction"
+        || submission.reference != format!("solana:message:{message_sha256}")
+        || submission.data["message_sha256"].as_str() != Some(message_sha256)
+        || submission.data["wallet_signature"].as_str() != Some(signature)
+        || submission.data["recent_blockhash"].as_str() != Some(proof.recent_blockhash.as_str())
+        || submission.data["last_valid_block_height"].as_u64()
+            != Some(proof.last_valid_block_height)
+        || proof.evidence_version != 1
+        || proof.minimum_rpc_origins_per_block != 2
+        || proof.finalized_block_height <= proof.last_valid_block_height
+    {
+        return Err(GoFinError::validation(
+            "Non-inclusion proof does not match the submitted Solana message and lifetime.",
+        ));
+    }
+    let evidence = json!({"state":"expired_without_inclusion","outcome_replay_safe":true,"signature":signature,"message_sha256":message_sha256,"reason":reason,"proof":proof,"financial_effects":[]});
+    let mut verified = gofin_domain::VerifiedEffects {
+        evidence_version: 1,
+        submission: submission.clone(),
+        effects: vec![],
+        evidence: evidence.clone(),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        proof_digest: String::new(),
+    };
+    verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
+    Ok(gofin_domain::Reconciliation {
+        status: gofin_domain::Status::Failed,
+        evidence,
+        verified: Some(verified),
+    })
+}
+
 const MAX_TRANSACTION_BYTES: usize = 1232;
 const RECONCILIATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const MAX_TRANSACTION_ACCOUNT_KEYS: usize = u8::MAX as usize + 1;

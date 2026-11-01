@@ -62,21 +62,6 @@ fn token(mint: &str) -> TokenInfo {
         token_program: TOKEN.into(),
     }
 }
-pub fn asset(mint: &str) -> AssetId {
-    let t = token(mint);
-    AssetId {
-        network: gofin_solana::NETWORK.into(),
-        reference: t.mint,
-        decimals: t.decimals,
-    }
-}
-pub fn native() -> AssetId {
-    AssetId {
-        network: gofin_solana::NETWORK.into(),
-        reference: "native".into(),
-        decimals: 9,
-    }
-}
 fn ata(owner: &str, mint: &str) -> String {
     gofin_solana::associated_token_address(owner, mint, TOKEN).unwrap()
 }
@@ -158,9 +143,6 @@ impl Chain {
     pub fn seed_balance(&self, mint: &str, atoms: u64) {
         assert_eq!(self.send_count.load(Ordering::SeqCst), 0);
         *self.state.lock().unwrap().balances.get_mut(mint).unwrap() = atoms;
-    }
-    pub fn resource(&self) -> ResourceId {
-        ResourceId(format!("solana:mainnet-beta:{}", self.owner))
     }
     pub fn remove_empty_share_account(&self, family: VaultFamily) -> String {
         assert_eq!(self.send_count.load(Ordering::SeqCst), 0);
@@ -442,6 +424,11 @@ pub struct RpcEndpoint {
 }
 impl RpcEndpoint {
     pub async fn new(chain: Arc<Chain>) -> Self {
+        Self::new_with_history(chain, None).await
+    }
+    /// Two fixture endpoints may relay one owned Surfpool for real slot and
+    /// blockhash expiry. This is local simulator evidence, not independent RPC providers.
+    pub async fn new_with_history(chain: Arc<Chain>, history: Option<String>) -> Self {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -450,6 +437,7 @@ impl RpcEndpoint {
         let history_available = Arc::new(AtomicBool::new(true));
         let available = history_available.clone();
         let task = tokio::spawn(async move {
+            let history_client = reqwest::Client::new();
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut reader = BufReader::new(stream);
@@ -486,7 +474,7 @@ impl RpcEndpoint {
                 {
                     count.fetch_add(1, Ordering::SeqCst);
                 }
-                let result = if method == "getBlock"
+                let mut result = if method == "getBlock"
                     && request["params"][1]["transactionDetails"] == "signatures"
                     && !available.load(Ordering::SeqCst)
                 {
@@ -496,9 +484,44 @@ impl RpcEndpoint {
                         "Synthetic second endpoint has no block history.",
                         "Retain the reservation.",
                     ))
+                } else if let Some(url) = history.as_ref().filter(|_| {
+                    matches!(
+                        method,
+                        "getSlot"
+                            | "getBlockHeight"
+                            | "getLatestBlockhash"
+                            | "isBlockhashValid"
+                            | "getBlocks"
+                            | "getBlock"
+                            | "getSignatureStatuses"
+                            | "getTransaction"
+                            | "getEpochInfo"
+                    )
+                }) {
+                    match history_client.post(url).json(&request).send().await {
+                        Ok(response) => match response.json::<Value>().await {
+                            Ok(value) if value["error"].is_null() => Ok(value["result"].clone()),
+                            _ => Err(GoFinError::validation(
+                                "Owned Surfpool history unavailable.",
+                            )),
+                        },
+                        Err(_) => Err(GoFinError::validation("Owned Surfpool RPC unavailable.")),
+                    }
                 } else {
                     chain.request(method, request["params"].clone()).await
                 };
+                if let (Some(url), Ok(value)) = (history.as_ref(), &mut result)
+                    && value.get("context").and_then(Value::as_object).is_some()
+                    && !matches!(
+                        method,
+                        "getLatestBlockhash" | "isBlockhashValid" | "getSignatureStatuses"
+                    )
+                    && let Ok(response)=history_client.post(url).json(&json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"finalized"}]})).send().await
+                        && let Ok(slot)=response.json::<Value>().await
+                        && let Some(number)=slot["result"].as_u64() {value["context"]["slot"]=json!(number)}
+                if history.is_some() && result.is_err() {
+                    eprintln!("owned Surfpool {method} failed: {result:?}");
+                }
                 let body=match result {
                     Ok(value)=>json!({"jsonrpc":"2.0","id":request["id"],"result":value}),
                     Err(error)=>json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":if method=="getBlock" {-32004}else{-32000},"message":error.message}}),

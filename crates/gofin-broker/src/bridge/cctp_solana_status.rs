@@ -130,11 +130,27 @@ impl BridgeAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => {
+                if preview.binding["solana_message_sha256"].as_str()
+                    != Some(message_sha256.as_str())
+                {
+                    return Err(GoFinError::validation(
+                        "CCTP expiry evidence does not match the approved Solana message.",
+                    ));
+                }
+                gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                    submission,
+                    &signature,
+                    &message_sha256,
+                    &reason,
+                    &proof,
+                )
+            }
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),
@@ -508,13 +524,13 @@ impl BridgeAdapter {
                 json!({"provider":"cctp","settled":false,"status":"mint_recovery_required","next_action":"Use bridge.recovery for a new mint attempt after proven failure; retain the original burn."}),
             );
         }
-        let bounds: BridgeBounds = serde_json::from_value(
-            transfer
-                .approved_bounds
-                .clone()
-                .ok_or_else(internal_error)?,
-        )
-        .map_err(|_| internal_error())?;
+        let bounds: BridgeBounds = if let Some(original) = transfer.approved_bounds.clone() {
+            serde_json::from_value(original).map_err(|_| internal_error())?
+        } else {
+            // Status only: estimate readiness against the saved quote bounds.
+            // Submission remains separately checked against parent authority.
+            saved.bounds.clone()
+        };
         if let Err(failure) = self
             .validate_cctp_solana_gas(&saved.quote, &bounds, transfer)
             .await

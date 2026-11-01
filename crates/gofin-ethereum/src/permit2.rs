@@ -583,6 +583,15 @@ impl EthereumAdapter {
         {
             Some(r) => r,
             None => {
+                if let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    self.runtime
+                        .finalized_nonce_replacement(submission, &b.transaction),
+                )
+                .await
+                {
+                    return Ok(proof);
+                }
                 return Ok(Reconciliation {
                     status: Status::Pending,
                     evidence: json!({"original_hash":submission.reference,"canonical_confirmed":false}),
@@ -599,14 +608,17 @@ impl EthereumAdapter {
                 verified: None,
             });
         }
-        let mut effects = vec![FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: b.resource.clone(),
-            },
-            amount: amount(&self.native_asset(), receipt.fee),
-            category: "ethereum_gas".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        }];
+        let mut effects = Vec::new();
+        if let Some(fee) = receipt.fee {
+            effects.push(FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: b.resource.clone(),
+                },
+                amount: amount(&self.native_asset(), fee),
+                category: "ethereum_gas".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            });
+        }
         let success = receipt.success;
         let state = allowance_state(
             allowance_raw(
@@ -664,7 +676,7 @@ impl EthereumAdapter {
                 verified: None,
             });
         }
-        let evidence = json!({"original_hash":submission.reference,"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"success":success,"fee_wei":quantity(receipt.fee),"allowance":state,"finality":self.config.finality_label()});
+        let evidence = json!({"original_hash":submission.reference,"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"success":success,"outcome_replay_safe":!success,"outcome_reporting":if receipt.fee.is_none() {"partial"} else {"complete"},"fee_wei":receipt.fee.map(quantity),"allowance":state,"finality":self.config.finality_label()});
         let mut verified = VerifiedEffects {
             evidence_version: 1,
             submission: submission.clone(),

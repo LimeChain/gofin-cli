@@ -131,7 +131,7 @@ async fn native_market_support_and_market_lot_filters_are_enforced_before_approv
 }
 
 #[tokio::test]
-async fn resting_reservations_survive_restart_and_cancel_response_loss_without_replay() {
+async fn resting_original_identity_survives_restart_and_cancel_response_loss_without_replay() {
     for kind in ["LIMIT", "LIMIT_MAKER"] {
         for partial in [false, true] {
             let mut fill = if partial {
@@ -154,14 +154,6 @@ async fn resting_reservations_survive_restart_and_cancel_response_loss_without_r
             let original = engine.execute(operation.clone()).await.unwrap();
             assert_eq!(original.status, Status::Pending, "{original:?}");
             assert!(original.effects.is_none());
-            let reserved = Store::open(&path)
-                .unwrap()
-                .reservations(&original.id)
-                .unwrap();
-            assert!(
-                !reserved.is_empty(),
-                "Resting orders retain their original reservations"
-            );
             assert_eq!(venue.cancels.load(Ordering::SeqCst), 0);
             {
                 let seen = venue.seen.lock().unwrap();
@@ -188,13 +180,6 @@ async fn resting_reservations_survive_restart_and_cancel_response_loss_without_r
             let pending = restarted.status(&original.id, true).await.unwrap();
             assert_eq!(pending.status, Status::Pending, "{pending:?}");
             assert_eq!(pending.submission, Some(identity.clone()));
-            assert_eq!(
-                Store::open(&path)
-                    .unwrap()
-                    .reservations(&original.id)
-                    .unwrap(),
-                reserved
-            );
             let cancel = OperationRequest {
                 request_id: "native-cancel".into(),
                 operation: "binance.spot.order-cancel".into(),
@@ -221,13 +206,6 @@ async fn resting_reservations_survive_restart_and_cancel_response_loss_without_r
             );
             assert_eq!(settled.submission, Some(identity));
             assert!(settled.effects.is_some());
-            assert_eq!(
-                Store::open(&path)
-                    .unwrap()
-                    .reservation_count(&original.id)
-                    .unwrap(),
-                0
-            );
             assert_eq!(restarted.execute(operation).await.unwrap().id, original.id);
             assert_eq!(restarted.execute(cancel).await.unwrap().id, cancelled.id);
             assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
@@ -260,7 +238,7 @@ async fn native_orders_preserve_approval_denial_and_expiry_without_dispatch() {
 }
 
 #[tokio::test]
-async fn native_market_evidence_cannot_exceed_budget_quantity_or_fee_authority() {
+async fn native_market_evidence_preserves_identity_and_reports_native_bound_breaches() {
     for mismatch in [
         "budget_identity",
         "executed_quantity",
@@ -305,22 +283,25 @@ async fn native_market_evidence_cannot_exceed_budget_quantity_or_fee_authority()
         }
         venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
         let unresolved = engine.status(&original.id, true).await.unwrap();
-        assert_eq!(
-            unresolved.status,
-            Status::Unknown,
-            "{mismatch}: {unresolved:?}"
-        );
-        assert!(
-            unresolved.effects.is_none(),
-            "{mismatch}: unproven fills must not settle"
-        );
-        assert!(
-            Store::open(&path)
-                .unwrap()
-                .reservation_count(&original.id)
-                .unwrap()
-                > 0
-        );
+        if matches!(mismatch, "overspend" | "fee_cap") {
+            assert_eq!(
+                unresolved.status,
+                Status::Completed,
+                "{mismatch}: {unresolved:?}"
+            );
+            assert!(unresolved.effects.is_some());
+            assert_eq!(
+                engine.operation_view(&unresolved).unwrap()["outcome"]["attention"]["kind"],
+                "discrepancy"
+            );
+        } else {
+            assert_eq!(
+                unresolved.status,
+                Status::Unknown,
+                "{mismatch}: {unresolved:?}"
+            );
+            assert!(unresolved.effects.is_none());
+        }
         assert_eq!(engine.execute(operation).await.unwrap().id, original.id);
         assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);

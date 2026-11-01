@@ -707,6 +707,19 @@ impl Ui {
                 "{}",
                 safe_text(value["nextAction"].as_str().unwrap_or(""))
             )
+        } else if matches!(command, "execute" | "status" | "operations")
+            && !self.is_verbose()
+            && let Some(summary) = render_outcome(value)
+        {
+            let color = match value["outcome"]["phase"].as_str() {
+                Some("done") if value["outcome"]["attention"]["kind"] == "none" => "32",
+                Some("failed") => "31",
+                _ => "33",
+            };
+            for text in summary.lines() {
+                writeln!(output, "{}", self.styled(text, color))?;
+            }
+            Ok(())
         } else if matches!(command, "execute" | "status")
             && !self.is_verbose()
             && let Some(summary) = render_uncertain_operation(value, status_command)
@@ -962,6 +975,12 @@ pub fn safe_text(text: &str) -> String {
 /// Render concise human guidance where supported. Verbose mode preserves every
 /// result field without numeric conversion or loss of unknown fields.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
+    if !verbose
+        && matches!(command, "execute" | "status" | "operations")
+        && let Some(rendered) = render_outcome(value)
+    {
+        return rendered;
+    }
     let mut output = String::new();
     if command == "reservations" && !verbose {
         let review = value.get("review").unwrap_or(value);
@@ -1338,6 +1357,15 @@ fn operation_history_rows(value: &Value) -> Vec<(String, &'static str)> {
     }
     let mut rows = Vec::new();
     for record in records {
+        if let Some(rendered) = render_outcome(record) {
+            let color = match record["outcome"]["phase"].as_str() {
+                Some("done") => "32",
+                Some("failed") => "31",
+                _ => "33",
+            };
+            rows.extend(rendered.lines().map(|line| (line.to_owned(), color)));
+            continue;
+        }
         let id = record["id"].as_str().unwrap_or("unavailable");
         let operation = record["operation"].as_str().unwrap_or("operation");
         let status = record["status"].as_str().unwrap_or("unknown");
@@ -1366,6 +1394,95 @@ fn operation_history_rows(value: &Value) -> Vec<(String, &'static str)> {
         }
     }
     rows
+}
+
+fn render_outcome(value: &Value) -> Option<String> {
+    let outcome = &value["outcome"];
+    if outcome["version"] != 1 {
+        return None;
+    }
+    let operation = safe_text(value["operation"].as_str()?);
+    let phase = outcome["phase"].as_str()?;
+    let headline = match phase {
+        "done" if outcome["result"] == "cancelled" => "Cancelled",
+        "done" => "Executed",
+        "failed" => "Failed",
+        "needs_you" => "Needs your attention",
+        "unconfirmed" => "Unconfirmed",
+        _ if outcome["dispatch"] == "not_dispatched" => "Not submitted",
+        _ => "In progress",
+    };
+    let mut output = format!("{operation}: {headline}.\n");
+    if let Some(transfer) = outcome["transfer"].as_str() {
+        let text = match transfer {
+            "source_pending" => "Waiting for source confirmation or a verified refund.",
+            "in_transit" => "Funds are in transit; destination credit is not yet verified.",
+            "credited" => "Destination credit is verified.",
+            "available" => "Funds are available at the destination.",
+            "returned_to_source" => "Funds returned to the source.",
+            _ => "The transfer's destination or refund is not yet confirmed.",
+        };
+        line(&mut output, 0, text);
+    }
+    for effect in value["effects"]["effects"].as_array().into_iter().flatten() {
+        let (label, amount) = match effect["kind"].as_str() {
+            Some("conversion") => ("Received", &effect["received"]),
+            Some("transfer") => ("Received", &effect["credit"]),
+            Some("cost") => ("Cost", &effect["amount"]),
+            _ => continue,
+        };
+        if let Some(amount) = display_amount(amount) {
+            line(&mut output, 0, &format!("{label}: {}.", safe_text(&amount)));
+        }
+    }
+    match outcome["attention"]["kind"].as_str() {
+        Some("action_required") => {
+            for field in ["venue", "reason", "where_to_act"] {
+                if let Some(text) = outcome["attention"][field].as_str() {
+                    line(&mut output, 0, &safe_text(text));
+                }
+            }
+        }
+        Some("discrepancy") => {
+            line(&mut output, 0, "Execution differs from the approved terms.");
+            for field in ["approved", "actual"] {
+                line(
+                    &mut output,
+                    0,
+                    &format!(
+                        "{field}: {}",
+                        safe_text(&outcome["attention"][field].to_string())
+                    ),
+                );
+            }
+        }
+        _ => {}
+    }
+    if outcome["reporting"] == "partial" {
+        line(
+            &mut output,
+            0,
+            "Amount, fee or optional USD reporting is incomplete.",
+        );
+    } else if outcome["reporting"] == "unavailable" {
+        line(&mut output, 0, "Financial reporting is not yet available.");
+    }
+    if value["human_dismissed"] == true {
+        line(
+            &mut output,
+            0,
+            "Human-dismissed; financial facts and replay protection are unchanged.",
+        );
+    }
+    if let Some(id) = value["id"].as_str() {
+        line(&mut output, 0, &format!("Operation ID: {}", safe_text(id)));
+    }
+    if outcome["next_action"]["code"] != "none"
+        && let Some(next) = outcome["next_action"]["message"].as_str()
+    {
+        line(&mut output, 0, &format!("Next: {}", safe_text(next)));
+    }
+    Some(output)
 }
 
 fn render_operation_result(value: &Value, status_command: Option<&str>) -> Option<String> {
@@ -2763,6 +2880,32 @@ mod tests {
         assert_eq!(
             bridge_provider_name(Some("cctp"), Some(42161)),
             Some("Circle CCTP V2")
+        );
+    }
+
+    #[test]
+    fn outcome_reporting_and_refund_progress_do_not_relabel_execution() {
+        let mut value = json!({"id":"original","operation":"wallet.transfer","status":"completed",
+            "outcome":{"version":1,"phase":"done","dispatch":"dispatched","result":"executed",
+                "transfer":"available","reporting":"partial","replay_safe":false,
+                "attention":{"kind":"none"},"next_action":{"code":"none","message":"No action needed"}}});
+        let original = value.clone();
+        let output = render_human("status", &value, false);
+        assert!(output.contains("Executed"));
+        assert!(output.contains("reporting is incomplete"));
+        assert!(!output.contains("unlock"));
+        assert_eq!(value, original);
+        value["outcome"]["phase"] = json!("failed");
+        value["outcome"]["result"] = json!("failed");
+        value["outcome"]["transfer"] = json!("source_pending");
+        let output = render_human("status", &value, false);
+        assert!(output.contains("Failed"));
+        assert!(output.contains("verified refund"));
+        assert!(!output.contains("Funds returned"));
+        value["human_dismissed"] = json!(true);
+        assert!(
+            render_human("status", &value, false)
+                .contains("financial facts and replay protection are unchanged")
         );
     }
 

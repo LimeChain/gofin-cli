@@ -9,8 +9,7 @@ use gofin_bridge::*;
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
 use gofin_domain::{
     Adapter, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer,
-    BridgeStepKind as DomainStepKind, OperationRequest, Quantity, Result, Status,
-    boundaries::BoundaryAuthorizationRequest, now,
+    BridgeStepKind as DomainStepKind, OperationRequest, Quantity, Result, Status, now,
 };
 use gofin_engine::{Engine, EngineOptions};
 use gofin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection};
@@ -365,7 +364,7 @@ impl Harness {
                 allowed_solana_refund_assets: vec![],
                 amount: q(amount),
             },
-            bounds: BridgeBounds::default(),
+            bounds: self.bounds(),
             refresh_transfer_id: refresh,
         }
     }
@@ -435,22 +434,6 @@ impl Harness {
         omit_nulls(&mut value);
         value
     }
-    async fn grant(&self, t: &str, s: &str) -> String {
-        let mut bounds = serde_json::to_value(self.bounds()).unwrap();
-        omit_nulls(&mut bounds);
-        self.engine
-            .authorize_boundary(BoundaryAuthorizationRequest {
-                request_id: format!("approve-{t}"),
-                operation: "bridge.transfer".into(),
-                input: self.step_input(t, s),
-                bounds,
-                valid_for_seconds: 600,
-                replaces: None,
-            })
-            .await
-            .unwrap()
-            .id
-    }
 }
 #[tokio::test]
 async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
@@ -471,7 +454,6 @@ async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
                 h.adapter.snapshot().await.unwrap().complete,
                 "read-only options are not pending funds"
             );
-            let grant = h.grant(&transfer, &step).await;
             let refreshed = h
                 .adapter
                 .read(
@@ -495,7 +477,7 @@ async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(outside.code, "BRIDGE_REFRESH_AMOUNT_OUT_OF_BOUNDS");
+            assert_eq!(outside.code, "BRIDGE_BOUNDS_VIOLATED");
             // Change the fresh quote during execution, after its initial preview.
             h.prices
                 .switch_at
@@ -506,16 +488,9 @@ async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
                 input: h.step_input(&transfer, &step),
                 run_id: None,
             };
-            let op = h
-                .engine
-                .execute_boundary(&grant, request.clone())
-                .await
-                .unwrap();
+            let op = h.engine.execute(request.clone()).await.unwrap();
             assert_eq!(op.status, Status::Completed, "error={:?}", op.error);
-            assert_eq!(
-                h.engine.execute_boundary(&grant, request).await.unwrap().id,
-                op.id
-            );
+            assert_eq!(h.engine.execute(request).await.unwrap().id, op.id);
             assert_eq!(h.source.broadcasts.load(Ordering::SeqCst), 1);
             assert_eq!(
                 h.approval.0.load(Ordering::SeqCst),

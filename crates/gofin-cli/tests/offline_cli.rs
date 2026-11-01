@@ -38,47 +38,51 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn recovery_commands_expose_review_and_fresh_authentication_without_service() {
-    for command in ["recovery", "recover", "resolve-preview", "force-resolve"] {
+fn continuation_and_dismissal_discovery_preserve_original_identity() {
+    for command in ["continue", "reauthorize", "dismiss"] {
         let help = run(&["operations", command, "--help"]);
         assert!(help.status.success());
         assert!(help.stderr.is_empty());
         assert!(String::from_utf8_lossy(&help.stdout).contains("OPERATION_ID"));
         let name = format!("operations.{command}");
-        let output = run(&["explain", &name, "--json"]);
+        let output = run(&["schema", &name, "--json"]);
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
         assert!(!output.stdout.contains(&0x1b));
         let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if command == "force-resolve" {
-            assert_eq!(definition["semantics"]["requires_fresh_touch_id"], true);
-            assert_eq!(definition["semantics"]["yolo_bypass"], false);
-            let schema = run(&["schema", &name, "--json"]);
-            assert!(schema.status.success());
-            let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-            for field in ["operation_id", "request_id", "review_hash", "input"] {
-                assert!(
-                    schema["input"]["required"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|value| value == field)
-                );
-            }
+        assert!(
+            definition["input"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "id")
+        );
+        if command == "dismiss" {
+            assert_eq!(definition["semantics"]["human_terminal_required"], true);
+            assert_eq!(definition["semantics"]["financial_movement"], false);
+            assert_eq!(definition["semantics"]["replay_safe_unchanged"], true);
+        } else {
+            assert_eq!(definition["semantics"]["idempotent"], true);
+            assert_eq!(definition["semantics"]["same_identity"], true);
+            assert!(
+                definition["input"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "token")
+            );
+            assert!(
+                definition["output"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "outcome")
+            );
         }
     }
-    let missing_review = run(&[
-        "operations",
-        "force-resolve",
-        "original-operation",
-        "--input",
-        "{}",
-        "--id",
-        "resolution-request",
-        "--json",
-    ]);
-    assert!(!missing_review.status.success());
-    let error: Value = serde_json::from_slice(&missing_review.stdout).unwrap();
+    let missing_token = run(&["operations", "continue", "original-operation", "--json"]);
+    assert!(!missing_token.status.success());
+    let error: Value = serde_json::from_slice(&missing_token.stdout).unwrap();
     assert_eq!(error["error"]["code"], "INVALID_COMMAND");
 }
 
@@ -102,10 +106,8 @@ fn kamino_borrowing_discovery_exposes_debt_risk_and_finite_repayment_authority()
     ] {
         assert!(required.iter().any(|v| v == name), "missing {name}");
     }
-    assert_eq!(
-        schema["semantics"]["plan_permission"]["requires_adapter_scope"],
-        true
-    );
+    assert!(schema["semantics"].get("plan_permission").is_none());
+    assert!(schema["input"]["properties"]["risk_limits"].is_object());
     let output = run(&["explain", "kamino.lending.repay", "--json"]);
     assert!(output.status.success());
     let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -297,12 +299,7 @@ fn execute_discovery_supports_permanent_operations_without_runs() {
     );
     public_request["run_id"] = Value::String("synthetic-legacy-run".into());
     assert!(serde_json::from_value::<gofin_discovery::ExecuteInput>(public_request).is_err());
-    assert!(
-        semantics["allocation_scope"]
-            .as_str()
-            .unwrap()
-            .contains("No run")
-    );
+    assert!(semantics.get("allocation_scope").is_none());
     for retired in ["run.begin", "run.replan", "run.finish", "run.status"] {
         assert!(
             !commands
@@ -824,17 +821,17 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
     }
     let result = run(&["explain", "binance.spot.order-place", "--json"]);
     let definition: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(
-        definition["semantics"]["scopedTimeInForce"],
-        serde_json::json!(["FOK"])
+    assert!(definition["semantics"].get("scopedTimeInForce").is_none());
+    assert!(
+        definition["semantics"]
+            .get("boundary_authorization")
+            .is_none()
     );
-    assert_eq!(
-        definition["semantics"]["approval"],
-        "Fresh standalone approval; LIMIT IOC/FOK may also use remaining authority under an explicitly approved operation-boundary grant."
-    );
-    assert_eq!(
-        definition["semantics"]["boundary_authorization"]["default_consent_seconds"],
-        600
+    assert!(
+        definition["semantics"]["approval"]
+            .as_str()
+            .unwrap()
+            .contains("Native action approval")
     );
     for name in [
         "binance.spot.markets",
@@ -889,7 +886,7 @@ fn generic_withdrawal_discovery_explains_routes_targets_and_receipt_limits_offli
         schema["semantics"]["ordinaryExecution"]
             .as_str()
             .unwrap()
-            .contains("restoration")
+            .contains("original submission identity")
     );
 }
 
@@ -929,95 +926,45 @@ fn address_book_discovery_exposes_reads_and_human_mutation_handoff_without_servi
 }
 
 #[test]
-fn policy_discovery_and_machine_handoff_are_offline_and_noninteractive() {
-    let help = run(&["policy", "set", "--help"]);
-    assert!(help.status.success());
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("--max-movement-usd") && help.contains("--max-run-allocation-usd"));
-    assert!(help.contains("--allow-unpriced-exchange-assets"));
-    for name in ["policy.show", "policy.set"] {
-        let output = run(&["schema", name, "--json"]);
-        assert!(output.status.success());
-        let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(schema["output"]["properties"]["max_movement_usd"].is_object());
-        assert!(schema["output"]["properties"]["allow_unpriced_exchange_assets"].is_object());
-        if name == "policy.set" {
-            assert!(schema["input"]["properties"]["allow_unpriced_exchange_assets"].is_object());
-        }
-    }
-    for extra in [
-        vec![],
-        vec!["--verbose"],
-        vec!["--allow-unpriced-exchange-assets", "true"],
-        vec!["--allow-unpriced-exchange-assets", "false"],
-    ] {
-        let mut args = vec![
+fn retired_policy_is_read_only_and_cannot_reintroduce_limits() {
+    let output = run(&["schema", "policy.show", "--json"]);
+    assert!(output.status.success());
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(schema["semantics"]["retired"], true);
+    assert_eq!(schema["semantics"]["read_only"], true);
+    for amount in ["0", "1000"] {
+        let output = run(&[
             "policy",
             "set",
             "--max-movement-usd",
-            "1000",
+            amount,
             "--max-run-allocation-usd",
-            "5000",
+            amount,
             "--json",
-        ];
-        args.extend(extra);
-        let output = run(&args);
+        ]);
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stderr.is_empty());
         assert!(!output.stdout.contains(&0x1b));
         assert_eq!(
             serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
-            "HUMAN_TERMINAL_REQUIRED"
+            "PERSONAL_LIMITS_RETIRED"
         );
     }
-    let output = run(&[
-        "policy",
-        "set",
-        "--max-movement-usd",
-        "1000",
-        "--max-run-allocation-usd",
-        "5000",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let message = String::from_utf8_lossy(&output.stderr);
-    assert!(message.starts_with("✗ "));
-    assert!(message.contains("human-owned interactive terminal"));
-    assert!(!message.contains("HUMAN_TERMINAL_REQUIRED"));
-    assert!(!output.stderr.contains(&0x1b));
-    for bad in ["-1", "1e3", "NaN", "0.0000001", "18446744073709.551616"] {
-        let output = run(&[
-            "policy",
-            "set",
-            &format!("--max-movement-usd={bad}"),
-            "--max-run-allocation-usd",
-            "5000",
-        ]);
-        assert!(!output.status.success());
-        let message = String::from_utf8_lossy(&output.stderr);
-        assert!(message.starts_with("✗ "));
-        assert!(message.contains("USD limits must be nonnegative exact decimals"));
-        assert!(!message.contains("INVALID_POLICY_AMOUNT"));
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("Mac login password"));
-    }
+    let output = run(&["schema", "policy.set", "--json"]);
+    assert!(!output.status.success());
 }
 
 #[test]
-fn setup_discovers_limit_prompts_and_zero_keeps_machine_handoff() {
+fn setup_has_no_retired_limit_prompts_and_keeps_human_boundary() {
     let help = run(&["setup", "--help"]);
-    assert!(String::from_utf8_lossy(&help.stdout).contains("0 means no personal limit"));
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("personal limit"));
     let schema = run(&["explain", "setup", "--json"]);
     let value: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(value["semantics"]["financial_limits"]["default_usd"], "100");
-    let output = run(&[
-        "policy",
-        "set",
-        "--max-movement-usd",
-        "0",
-        "--max-run-allocation-usd",
-        "0",
-        "--json",
-    ]);
+    assert!(value["semantics"].get("financial_limits").is_none());
+    assert_eq!(value["semantics"]["requires_human_terminal"], true);
+    assert_eq!(value["semantics"]["financial_movement"], false);
+    let output = run(&["setup", "--json"]);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
         "HUMAN_TERMINAL_REQUIRED"

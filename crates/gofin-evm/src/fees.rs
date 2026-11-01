@@ -586,9 +586,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!receipt.success);
-        assert_eq!(receipt.fee, U256::from(3_142_007));
+        assert_eq!(receipt.fee, Some(U256::from(3_142_007)));
         // L1 actual exceeded the 150-wei reservation: retain the actual cost.
-        assert!(receipt.fee > u256(&transaction.rollup_fee.unwrap().maximum_l1_data_fee).unwrap());
+        assert!(
+            receipt.fee.unwrap()
+                > u256(&transaction.rollup_fee.as_ref().unwrap().maximum_l1_data_fee).unwrap()
+        );
+        rpc.receipt
+            .lock()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("l1Fee");
+        let missing_fee = runtime
+            .receipt(&submission, &transaction, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!missing_fee.success);
+        assert_eq!(missing_fee.fee, None);
     }
     #[tokio::test]
     async fn omitted_zero_operator_fields_require_verified_parameters() {

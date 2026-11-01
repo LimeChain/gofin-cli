@@ -54,44 +54,6 @@
     ]
   },
   {
-    "id": "cross-provider-named-plan",
-    "group": "bridge",
-    "environment": "mock",
-    "description": "Kraken, Aave, Relay and Hyperliquid successful named-plan workflow through CLI",
-    "requires": [],
-    "env": {
-      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
-      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
-    },
-    "prepare": [
-      [
-        "cargo",
-        "build",
-        "--locked",
-        "-p",
-        "gofin-cli",
-        "--example",
-        "gofin-dev"
-      ]
-    ],
-    "run": [
-      [
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "gofin-broker",
-        "--test",
-        "full_plan_workflow",
-        "kraken_aave_bridge_hyperliquid_complete_under_one_plan",
-        "--",
-        "--exact"
-      ]
-    ],
-    "expected_tests": 1
-  },
-  {
     "id": "aave-v3-ethereum-core",
     "group": "evm",
     "environment": "anvil",
@@ -808,5 +770,20 @@
         "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
     ]
+  } ,
+  {
+    "id": "cross-provider-four-actions",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Public CLI: Hyperliquid close and withdrawal, Relay Arbitrum to Ethereum bridge, and Uniswap swap under four native approvals",
+    "requires": ["cargo"],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [["cargo", "build", "--locked", "-p", "gofin-cli", "--example", "gofin-dev"]],
+    "run": [["cargo", "test", "--locked", "-p", "gofin-broker", "--test", "reverse_four_actions", "reverse_close_withdraw_bridge_then_swap_via_public_cli", "--", "--exact", "--ignored"]],
+    "expected_tests": 1
   }
 ]

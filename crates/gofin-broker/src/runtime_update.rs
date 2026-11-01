@@ -307,9 +307,83 @@ fn refused(message: &str) -> GoFinError {
     )
 }
 
-/// The public updater holds this lock until runtime replacement finishes.
-/// Exact schema equality deliberately prevents migrations before rollback is
-/// committed. Versioned journal migrations need a separately reviewed updater.
+const EXECUTION_REVIEW_PATH: &str = "/Library/GoFin/private/execution-contract.json";
+
+/// The update review is a configuration acknowledgement, not a financial grant.
+/// It deliberately preserves an already enabled Yolo activation identity.
+pub async fn review_execution_migration(ui: &gofin_presentation::Ui) -> gofin_domain::Result<()> {
+    let uid = crate::yolo_management_uid()?;
+    let _guard = crate::try_lock_protected_configuration(true)?
+        .ok_or_else(|| refused("Configuration maintenance is active; retry after it finishes."))?;
+    let path = Path::new(EXECUTION_REVIEW_PATH);
+    if path
+        .try_exists()
+        .map_err(|_| refused("The prior update review could not be inspected."))?
+    {
+        crate::validate_metadata(path, false)?;
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path)
+                .map_err(|_| refused("The prior update review could not be read."))?,
+        )
+        .map_err(|_| refused("The prior update review is invalid."))?;
+        if receipt["execution_contract"] == 1 && receipt["acknowledged"] == true {
+            return Ok(());
+        }
+        return Err(refused(
+            "The stored execution update acknowledgement is invalid.",
+        ));
+    }
+    let binding = serde_json::json!({"action":"runtime_update", "execution_contract":1,
+        "retire_personal_limits":true,"preserve_enabled_yolo":true,
+        "financial_movement":false,"future_financial_authority":false,
+        "target_schema":gofin_store::supported_schema_version()});
+    let challenge = crate::enrollment::approve_and_audit(
+        uid,
+        &binding,
+        "Acknowledge GoFin's native-unit approval and no-limits Yolo execution contract",
+        ui,
+    )
+    .await?;
+    let receipt = serde_json::to_vec(&serde_json::json!({"execution_contract":1,
+        "acknowledged":true,"binding_hash":challenge.binding_hash,"reviewed_at":gofin_domain::now(),
+        "target_schema":gofin_store::supported_schema_version()}))
+    .map_err(|_| refused("The update acknowledgement could not be encoded."))?;
+    crate::atomic_replace(Path::new("/Library/GoFin/private"), path, &receipt)
+}
+
+/// Require the human's execution-contract acknowledgement before opening a
+/// legacy journal with a broker that can migrate it.
+pub fn require_execution_review_before_migration() -> gofin_domain::Result<()> {
+    let schema = gofin_store::update_compatibility::inspect_update_schema(
+        Path::new(crate::OPERATIONS_PATH),
+        0,
+    )
+    .map_err(|_| refused("The protected journal schema could not be inspected safely."))?;
+    if (25..gofin_store::supported_schema_version()).contains(&schema) {
+        let path = Path::new(EXECUTION_REVIEW_PATH);
+        crate::validate_metadata(path, false)?;
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(|_| {
+                refused("Review the execution contract before migrating the journal.")
+            })?)
+            .map_err(|_| refused("The execution update acknowledgement is invalid."))?;
+        if receipt["execution_contract"] != 1 || receipt["acknowledged"] != true {
+            return Err(refused(
+                "Review the execution contract before migrating the journal.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn supported_update_schema(schema: i64) -> bool {
+    schema == gofin_store::supported_schema_version()
+        || (25..gofin_store::supported_schema_version()).contains(&schema)
+}
+
+/// Hold maintenance through runtime replacement. Schema migration starts only
+/// after the new runtime has been committed, so recovery cannot restore an old
+/// binary over a newer authoritative financial journal.
 pub async fn hold(parent: u32) -> gofin_domain::Result<()> {
     use std::io::Write;
     if unsafe { libc::geteuid() } != 0 || parent <= 1 || unsafe { libc::getppid() } as u32 != parent
@@ -318,20 +392,22 @@ pub async fn hold(parent: u32) -> gofin_domain::Result<()> {
             "Run this helper only from the protected runtime updater.",
         ));
     }
-    let _guard = crate::try_lock_protected_configuration(true)?.ok_or_else(|| {
-        refused("GoFin is busy. Finish active operations or enrollment and retry.")
-    })?;
+    let _guard = crate::try_lock_protected_configuration(true)?
+        .ok_or_else(|| refused("Configuration maintenance is active. Retry after it finishes."))?;
     let schema = gofin_store::update_compatibility::inspect_update_schema(
         Path::new(crate::OPERATIONS_PATH),
         0,
     )
     .map_err(|_| refused("The protected journal schema could not be inspected safely."))?;
-    if schema != gofin_store::supported_schema_version() {
+    if !supported_update_schema(schema) {
         return Err(refused(
             "This release requires a journal migration; automatic runtime update was refused.",
         ));
     }
-    println!("compatible");
+    println!(
+        "schema={schema}\ntarget={}\ncompatible",
+        gofin_store::supported_schema_version()
+    );
     std::io::stdout()
         .flush()
         .map_err(|_| refused("The update guard could not report readiness."))?;

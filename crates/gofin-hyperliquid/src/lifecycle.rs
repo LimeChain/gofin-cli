@@ -1,6 +1,5 @@
 use crate::{profile::*, read_profile::native_error, types::InvalidateNonceInput, writes::*};
 use async_trait::async_trait;
-use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::*;
 use gofin_exchange::ccxt::{HyperliquidAction as Action, HyperliquidActionEnvelope as Envelope};
 use gofin_exchange::{ExchangeProfile, PlannedSubmission};
@@ -55,15 +54,7 @@ impl ExchangeProfile for HyperliquidProfile {
         self.financial_snapshot().await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
-        let mut prepared = self.prepare_action(operation, input).await?;
-        if prepared
-            .valuation
-            .as_ref()
-            .is_some_and(|valuation| !valuation.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut prepared);
-        }
-        Ok(prepared)
+        self.prepare_action(operation, input).await
     }
     async fn refresh_prepared(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         let mut refreshed = self
@@ -88,13 +79,6 @@ impl ExchangeProfile for HyperliquidProfile {
                 );
                 preserve_cloid(&mut refreshed.binding, &renamed, &legacy);
             }
-        }
-        if prepared
-            .binding
-            .product_get(gofin_domain::value_bounds::KEY)?
-            .is_some()
-        {
-            gofin_domain::value_bounds::carry(prepared, &mut refreshed)?;
         }
         Ok(refreshed)
     }
@@ -153,39 +137,8 @@ impl ExchangeProfile for HyperliquidProfile {
         Ok(Some(recovery))
     }
     fn valuation_matches(&self, approved: &PreparedOperation, fresh: &PreparedOperation) -> bool {
-        if gofin_domain::product_names::validate(&approved.binding).is_err()
-            || gofin_domain::product_names::validate(&fresh.binding).is_err()
-        {
-            return false;
-        }
-        if approved
-            .binding
-            .product_get(gofin_domain::value_bounds::KEY)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return approved
-                .binding
-                .product_get(gofin_domain::value_bounds::KEY)
-                .ok()
-                .flatten()
-                == fresh
-                    .binding
-                    .product_get(gofin_domain::value_bounds::KEY)
-                    .ok()
-                    .flatten()
-                && gofin_domain::value_bounds::validate(fresh).is_ok();
-        }
-        match (&approved.valuation, &fresh.valuation) {
-            (Some(a), Some(b)) => {
-                b.movement_usd_micros <= a.movement_usd_micros
-                    && b.maximum_fee_usd_micros <= a.maximum_fee_usd_micros
-                    && b.additional_allocation_usd_micros <= a.additional_allocation_usd_micros
-            }
-            (None, None) => true,
-            _ => false,
-        }
+        gofin_domain::product_names::validate(&approved.binding).is_ok()
+            && gofin_domain::product_names::validate(&fresh.binding).is_ok()
     }
     async fn plan_submission(
         &self,

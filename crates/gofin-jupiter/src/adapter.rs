@@ -390,6 +390,11 @@ fn quote_intent(input: &Value) -> Result<SwapIntent> {
 
 #[async_trait]
 impl Adapter for JupiterAdapter {
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // Advisory polling usefulness only; expiry does not prove nonexecution or authorize replay.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         swap_operation_definitions()
     }
@@ -472,7 +477,7 @@ impl Adapter for JupiterAdapter {
             output: output_asset.clone(),
             minimum_output: gofin_domain::Quantity::from_u64(minimum_atoms),
         };
-        let (mut valuation, fee_bound) = valuation(
+        let mut valuation = valuation(
             self.prices.clone(),
             input_asset.clone(),
             input_atoms,
@@ -481,20 +486,33 @@ impl Adapter for JupiterAdapter {
             intent.maximum_network_fee_lamports,
             wallet.address(),
         )
-        .await?;
+        .await
+        .ok()
+        .map(|(valuation, _)| valuation);
         let native = AssetId {
             network: NETWORK.into(),
             reference: "native".into(),
             decimals: 9,
         };
-        let native_price = valuation
-            .prices
-            .iter()
-            .find(|price| price.asset == native)
-            .ok_or_else(bad_provider_response)?;
-        valuation.additional_allocation_usd_micros =
-            gofin_domain::Quantity::from_u64(wallet_account_funding_lamports)
-                .mul_div_ceil(&native_price.usd_micros_per_unit, &native_price.unit_atoms)?;
+        let fee_bound = CostBound {
+            location: AccountingLocation::Cash {
+                resource: resource.clone(),
+            },
+            amount: Amount {
+                asset: native.clone(),
+                atoms: gofin_domain::Quantity::from_u64(intent.maximum_network_fee_lamports),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        if let Some(value) = valuation.as_mut() {
+            if let Some(price) = value.prices.iter().find(|price| price.asset == native) {
+                value.additional_allocation_usd_micros =
+                    gofin_domain::Quantity::from_u64(wallet_account_funding_lamports)
+                        .mul_div_ceil(&price.usd_micros_per_unit, &price.unit_atoms)?;
+            } else {
+                valuation = None;
+            }
+        }
         let submission_data = json!({"provider_trust":true,"order_response":candidate.order_response,"wallet_address":wallet.address(),"fee_payer":frozen.fee_payer(),"request_id":candidate.request_id,"router":candidate.router,"message_sha256":frozen.message_sha256(),"last_valid_block_height":frozen.last_valid_block_height(),"provider_expire_at":frozen.provider_expire_at(),"recent_blockhash":frozen.recent_blockhash(),"transaction_base64":candidate.tx_base64,"actual_slippage_bps":candidate.actual_slippage_bps,"platform_fee_bps":candidate.platform_fee_bps,"platform_fee_mint":candidate.platform_fee_mint,"input_atoms":input_atoms.to_string(),"expected_output_atoms":candidate.expected_output_atoms.to_string(),"minimum_output_atoms":minimum_atoms.to_string(),"maximum_network_fee_lamports":intent.maximum_network_fee_lamports.to_string(),"maximum_account_funding_lamports":intent.maximum_account_funding_lamports,"input_token_program":input_token_program,"output_token_program":output_token_program,"wallet_network_fee_lamports":candidate.wallet_network_fee_lamports,"wallet_account_funding_lamports":candidate.wallet_account_funding_lamports});
         let mut submission_data = submission_data;
         if !approval_asset_metadata.is_empty() {
@@ -524,7 +542,7 @@ impl Adapter for JupiterAdapter {
             warnings: vec!["Jupiter constructs the transaction; GoFin checks order limits without inspecting or simulating its instructions.".into(), "Settlement is reported only after finalized chain evidence proves the financial effects.".into()],
             observed_at: Utc::now().to_rfc3339(),
             expires_at: bounded_expiry(candidate.provider_expire_at.as_deref())?,
-            valuation: Some(valuation),
+            valuation,
             intent: FinancialIntent {
                 debits: {
                     let mut debits = vec![ResourceAmount {
@@ -759,6 +777,72 @@ impl Adapter for JupiterAdapter {
         (prepared.operation == OP_SWAP).then_some(Duration::from_secs(30))
     }
 
+    fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
+        prepared.operation == OP_SWAP
+    }
+
+    fn validate_approved_candidate(
+        &self,
+        approved: &PreparedOperation,
+        candidate: &PreparedOperation,
+    ) -> Result<()> {
+        if approved.operation != OP_SWAP
+            || candidate.operation != OP_SWAP
+            || approved.operation_version != candidate.operation_version
+            || approved.input != candidate.input
+            || approved.intent != candidate.intent
+            || approved.action_deadline != candidate.action_deadline
+        {
+            return Err(GoFinError::validation(
+                "The refreshed Jupiter candidate changed the approved native intent.",
+            ));
+        }
+        let intent = Self::intent(&approved.input)?;
+        let wallet = self.wallet(&approved.input)?;
+        for key in [
+            "wallet_address",
+            "input_atoms",
+            "minimum_output_atoms",
+            "maximum_network_fee_lamports",
+            "maximum_account_funding_lamports",
+            "input_token_program",
+            "output_token_program",
+        ] {
+            if approved.binding.get(key) != candidate.binding.get(key) {
+                return Err(GoFinError::validation(
+                    "The refreshed Jupiter candidate changed an approved native binding.",
+                ));
+            }
+        }
+        let bound = Candidate::from_binding(&candidate.binding)?;
+        let checked =
+            Candidate::from_order(&intent, wallet.address(), bound.order_response.clone())?;
+        if candidate.binding["expected_output_atoms"].as_str()
+            != Some(checked.expected_output_atoms.to_string().as_str())
+            || candidate.binding["actual_slippage_bps"].as_u64()
+                != Some(checked.actual_slippage_bps as u64)
+            || candidate.binding["platform_fee_bps"].as_u64()
+                != Some(checked.platform_fee_bps as u64)
+            || candidate.binding["wallet_address"].as_str() != Some(wallet.address())
+            || bound.tx_base64 != checked.tx_base64
+            || bound.request_id != checked.request_id
+            || bound.router != checked.router
+            || bound.last_valid_block_height != checked.last_valid_block_height
+            || bound.provider_expire_at != checked.provider_expire_at
+            || bound.expected_output_atoms != checked.expected_output_atoms
+            || bound.wallet_network_fee_lamports != checked.wallet_network_fee_lamports
+            || bound.wallet_account_funding_lamports != checked.wallet_account_funding_lamports
+            || bound.actual_slippage_bps != checked.actual_slippage_bps
+            || bound.platform_fee_bps != checked.platform_fee_bps
+            || bound.platform_fee_mint != checked.platform_fee_mint
+        {
+            return Err(GoFinError::validation(
+                "The refreshed Jupiter payload differs from its validated order.",
+            ));
+        }
+        Ok(())
+    }
+
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         if prepared.operation != OP_SWAP {
             return Err(unknown_operation());
@@ -925,11 +1009,18 @@ impl Adapter for JupiterAdapter {
                     verified: Some(verified),
                 })
             }
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),

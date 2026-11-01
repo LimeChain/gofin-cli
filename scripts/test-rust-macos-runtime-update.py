@@ -46,7 +46,9 @@ for argument in (args[1:] if name == "awk" and not args[0].startswith("-") else 
         lock_open = name == "python3" and argument.endswith("/private/maintenance.lock")
         if protected_state and not (lock_metadata or lock_open):
             sys.exit("Refusing access to private state or service socket: " + argument)
-if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
+if name == "sync":
+    sys.exit(0)
+elif name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
     if name == "chmod" and args[0] == "-RN":
         sys.exit(0)
     if name == "cp" and args[-2] == str(root / "new bundle/gofin") and options.get("race_symlink"):
@@ -76,6 +78,10 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
             sys.exit(1)
         if ("/restore/" in args[-2] or pathlib.Path(args[-2]).name == "restore-GoFin") and options.get("fail_restore"):
             sys.exit(1)
+        if activation and options.get("kill_activation") == activation_count:
+            os.replace(args[-2], args[-1])
+            os.kill(os.getppid(), signal.SIGKILL)
+            sys.exit(0)
         if activation and options.get("signal_activation") == activation_count:
             os.replace(args[-2], args[-1])
             os.kill(os.getppid(), signal.SIGTERM)
@@ -220,7 +226,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
                                for path in self.private.rglob("*") if path.is_file()}
         driver = "#!" + sys.executable + "\n" + DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown", "python3", "dirname",
-                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo", "launchctl", "sleep", "plutil", "tr", "grep"):
+                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sync", "awk", "shasum", "cmp", "sudo", "launchctl", "sleep", "plutil", "tr", "grep"):
             self.bin.joinpath(name).write_text(driver)
             self.bin.joinpath(name).chmod(0o755)
         source = SCRIPT.read_text()
@@ -467,14 +473,19 @@ elif sys.argv[1:2] == ['--verify-update-bundle']:
     with (root / 'events.jsonl').open('a') as log:
         log.write(json.dumps(['verify-bundle', sys.argv[2:]]) + '\n')
     sys.exit(1 if options.get('bad_public_libraries') else 0)
+elif sys.argv[1:] == ['--review-runtime-update']:
+    with (root / 'events.jsonl').open('a') as log: log.write(json.dumps(['review-execution', []]) + '\n')
+    sys.exit(1 if options.get('fail_execution_review') else 0)
 elif sys.argv[1:2] == ['--hold-runtime-update']:
     if options.get('fail_public_compatibility'): sys.exit(1)
     lock = (root / 'Library/GoFin/private/maintenance.lock').open('rb')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with sqlite3.connect('file:' + str(root / 'Library/GoFin/private/operations.sqlite') + '?mode=ro&immutable=1', uri=True) as db:
-        if db.execute('PRAGMA user_version').fetchone()[0] != int(os.environ.get('GOFIN_TEST_SCHEMA', '4')): sys.exit(1)
+        schema = db.execute('PRAGMA user_version').fetchone()[0]
+        supported = int(os.environ.get('GOFIN_TEST_SCHEMA', '4'))
+        if schema != supported and not (25 <= schema < supported): sys.exit(1)
     db.close()
-    print('compatible', flush=True)
+    print('schema=' + str(schema) + '\ntarget=' + str(supported) + '\ncompatible', flush=True)
     while os.getppid() == int(sys.argv[2]): time.sleep(0.05)
 else: sys.exit(2)
 """
@@ -708,6 +719,81 @@ else: sys.exit(2)
         result = self.run_update(from_runtime=True, public_release=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(any(name == "launchctl" and args[0] == "kickstart" for name, args in self.events()))
+
+    def test_execution_upgrade_reviews_before_restart_and_never_rolls_back_after_commit(self):
+        self.prepare_public_update(running=True)
+        self.options.update(supported_schema=27, fail_public_kickstart_once=True)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=25")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.new)
+        self.assertIn("will not be rolled back", result.stderr)
+        events = self.events()
+        review = next(i for i, (name, _) in enumerate(events) if name == "review-execution")
+        boot = next(i for i, (name, args) in enumerate(events) if name == "launchctl" and args[0] == "bootstrap")
+        self.assertLess(review, boot)
+        self.assertTrue(any(path.joinpath("forward-only").is_file() for path in (self.runtime.parent).glob("runtime-backup.*")))
+
+    def test_execution_upgrade_preserves_pending_submission_without_gate(self):
+        self.prepare_public_update(running=True)
+        self.options.update(supported_schema=27)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=25")
+            db.execute("CREATE TABLE IF NOT EXISTS pending_fixture(id TEXT, submission TEXT)")
+            db.execute("INSERT INTO pending_fixture VALUES('unconfirmed','original-submission')")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            self.assertEqual(db.execute("SELECT * FROM pending_fixture").fetchall(), [("unconfirmed", "original-submission")])
+
+    def test_execution_upgrade_recovers_after_sigkill_during_replacement(self):
+        self.prepare_public_update(running=True)
+        self.options.update(supported_schema=27, kill_activation=2)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=25")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        interrupted = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertTrue(self.lock.exists())
+        self.options.pop("kill_activation")
+        recovered = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("update recovered", recovered.stdout)
+        self.assert_runtime_matches(self.new)
+        self.assertFalse(self.lock.exists())
+
+    def test_execution_upgrade_recovers_forward_after_restart_failure(self):
+        self.prepare_public_update(running=True)
+        self.options.update(supported_schema=27, fail_public_kickstart_once=True)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=25")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        interrupted = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assert_runtime_matches(self.new)
+        # Model the daemon committing the schema before its start response is lost.
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=27")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        self.options.pop("fail_public_kickstart_once")
+        recovered = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("update recovered", recovered.stdout)
+        self.assert_runtime_matches(self.new)
+
+    def test_execution_upgrade_failed_review_restores_pre_migration_runtime(self):
+        self.prepare_public_update(running=True)
+        self.options.update(supported_schema=27, fail_execution_review=True)
+        with sqlite3.connect(self.private / "operations.sqlite") as db:
+            db.execute("PRAGMA user_version=25")
+        self.private_before["operations.sqlite"] = (self.private / "operations.sqlite").read_bytes()
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("Previous runtime restored", result.stderr)
 
     def test_public_update_partial_failure_restores_runtime_and_prior_service(self):
         self.prepare_public_update(running=True)
@@ -965,6 +1051,15 @@ else: sys.exit(2)
         self.lock.mkdir()
         self.assert_refused("Another runtime update or an interrupted update")
         self.assertTrue(self.lock.is_dir())
+
+    def test_dead_preparation_lock_can_be_recovered_without_touching_unknown_locks(self):
+        self.lock.mkdir()
+        self.lock.joinpath("pid").write_text("99999999\n")
+        self.lock.joinpath("phase").write_text("preparation\n")
+        result=self.run_update()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assert_runtime_matches(self.new)
+        self.assertFalse(self.lock.exists())
 
     def test_partial_file_failure_restores_old_runtime_and_modes(self):
         self.options["fail_activation"] = 2

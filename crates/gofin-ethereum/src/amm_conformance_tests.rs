@@ -85,7 +85,7 @@ fn signed_engine(
         .unwrap(),
     );
     let owner = format!("{:#x}", signer.address());
-    let config = EthereumConfig {
+    let mut config = EthereumConfig {
         weth: Some(format!("{:#x}", addr(100))),
         snapshot_tokens: vec![format!("{:#x}", addr(101))],
         uniswap: Some(UniswapConfig {
@@ -101,6 +101,7 @@ fn signed_engine(
         }),
         ..Default::default()
     };
+    crate::tests::install_sushi_fixture(&mut config, rpc);
     let adapter = Arc::new(
         EthereumAdapter::new(
             config,
@@ -150,306 +151,64 @@ fn candidate() -> Value {
     input
 }
 
-async fn expect_boundary_rejection(
-    engine: &Engine,
-    id: &str,
-    operation: &str,
-    input: &Value,
-    expected_code: &str,
-) {
-    let error = engine
-        .preview_boundary(id, operation, input)
-        .await
-        .expect_err(&format!("candidate unexpectedly passed: {input}"));
-    assert_eq!(
-        error.code, expected_code,
-        "unexpected rejection for {input}: {error:?}"
-    );
-}
-
 #[tokio::test]
-async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revokes() -> Result<()> {
+async fn retired_swap_boundary_is_rejected_before_authorization() -> Result<()> {
     let rpc = Arc::new(Fixture::new());
-    *rpc.allowance.lock().unwrap() = gofin_evm::u256(&Quantity::from_decimal("0.01", 18)?)?;
-    let (engine, directory) = engine(&rpc);
-    let mut initial = candidate();
-    initial["request_id"] = json!("SYNTHETIC-conformance-grant-preview");
+    let (engine, _directory) = engine(&rpc);
     let request = BoundaryAuthorizationRequest {
-        request_id: "SYNTHETIC-conformance-boundary-grant".into(),
+        request_id: "SYNTHETIC-retired-boundary".into(),
         operation: "uniswap.swap".into(),
-        input: initial,
+        input: candidate(),
         bounds: bounds(),
-        // Keep the authority valid longer than the adapter's 600-second
-        // transaction deadline cap so this over-cap case reaches the adapter
-        // and deterministically reports DEADLINE_INVALID.
-        valid_for_seconds: 1_200,
+        valid_for_seconds: 600,
         replaces: None,
     };
-    let review = engine
-        .preview_boundary_authorization(request.clone())
-        .await
-        .unwrap_or_else(|error| panic!("boundary review failed: {error:?}"));
-    assert_eq!(review["operation"], "uniswap.swap");
-    let authorization = engine
-        .authorize_boundary(request)
-        .await
-        .unwrap_or_else(|error| panic!("boundary authorization failed: {error:?}"));
-    let accepted = candidate();
-    let preview = engine
-        .preview_boundary(&authorization.id, "uniswap.swap", &accepted)
-        .await
-        .unwrap_or_else(|error| panic!("plan authorization failed: {error:?}"));
-    assert_eq!(preview.prepared.operation, "uniswap.swap");
-
-    let mut too_much = accepted.clone();
-    too_much["request_id"] = json!("SYNTHETIC-amount-over-cap");
-    too_much["amount"] = json!("0.003");
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &too_much,
-        "BOUNDARY_VIOLATION",
-    )
-    .await;
-
-    let mut excess_fee = accepted.clone();
-    excess_fee["request_id"] = json!("SYNTHETIC-fee-over-cap");
-    excess_fee["max_fee_eth"] = json!("0.0003");
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &excess_fee,
-        "BOUNDARY_VIOLATION",
-    )
-    .await;
-
-    let mut excess_slippage = accepted.clone();
-    excess_slippage["request_id"] = json!("SYNTHETIC-slippage-over-cap");
-    excess_slippage["slippage_bps"] = json!(101);
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &excess_slippage,
-        "BOUNDARY_VIOLATION",
-    )
-    .await;
-
-    let mut excess_impact = accepted.clone();
-    excess_impact["request_id"] = json!("SYNTHETIC-impact-over-cap");
-    excess_impact["max_price_impact_bps"] = json!(10001);
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &excess_impact,
-        "INVALID_INPUT",
-    )
-    .await;
-
-    let mut understated_impact = accepted.clone();
-    understated_impact["request_id"] = json!("SYNTHETIC-actual-impact-over-cap");
-    understated_impact["max_price_impact_bps"] = json!(100);
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &understated_impact,
-        "PRICE_IMPACT_LIMIT",
-    )
-    .await;
-
-    let mut weak_floor = accepted.clone();
-    weak_floor["request_id"] = json!("SYNTHETIC-rate-floor-underflow");
-    weak_floor["min_output"] = json!("2.97");
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &weak_floor,
-        "BOUNDARY_VIOLATION",
-    )
-    .await;
-
-    let mut disallowed_tier = accepted.clone();
-    disallowed_tier["request_id"] = json!("SYNTHETIC-fee-tier-outside-scope");
-    disallowed_tier["fee_tier"] = json!(3000);
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &disallowed_tier,
-        "QUOTE_UNAVAILABLE",
-    )
-    .await;
-
-    let mut wrong_recipient = accepted.clone();
-    wrong_recipient["request_id"] = json!("SYNTHETIC-recipient-tamper");
-    wrong_recipient["recipient"] = json!(format!("{:#x}", addr(2)));
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &wrong_recipient,
-        "SWAP_RECIPIENT_UNSUPPORTED",
-    )
-    .await;
-
-    let mut wrong_protocol = accepted.clone();
-    wrong_protocol["request_id"] = json!("SYNTHETIC-protocol-tamper");
-    wrong_protocol["protocol"] = json!("v4");
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &wrong_protocol,
-        "INVALID_INPUT",
-    )
-    .await;
-
-    let mut long_deadline = accepted.clone();
-    long_deadline["request_id"] = json!("SYNTHETIC-deadline-over-cap");
-    // Leave ample distance from the ten-minute boundary: crossing a wall-clock
-    // second during preparation must not change which guard this test exercises.
-    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 1200);
-    expect_boundary_rejection(
-        &engine,
-        &authorization.id,
-        "uniswap.swap",
-        &long_deadline,
-        "DEADLINE_INVALID",
-    )
-    .await;
-
-    let database = directory.path().join("amm-conformance.sqlite");
-    drop(engine);
-    let engine = engine_at(&rpc, database);
     assert_eq!(
         engine
-            .boundary_status(&authorization.id)
-            .await?
-            .authorization
-            .status,
-        gofin_domain::boundaries::BoundaryAuthorizationStatus::Active
-    );
-    engine.revoke_boundary(&authorization.id).await?;
-    assert!(
-        engine
-            .preview_boundary(&authorization.id, "uniswap.swap", &accepted)
+            .preview_boundary_authorization(request.clone())
             .await
-            .is_err()
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert_eq!(
+        engine.authorize_boundary(request).await.unwrap_err().code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction")
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn engine_plan_authorizes_adapter_reviewed_swap_variations() -> Result<()> {
-    use gofin_domain::financial_plans::{
-        FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-        FinancialPlanStepSpec, FinancialStepCompletion,
-    };
-
+async fn standalone_swap_approval_rejects_changed_financial_intent() -> Result<()> {
     let rpc = Arc::new(Fixture::new());
     *rpc.allowance.lock().unwrap() = gofin_evm::u256(&Quantity::from_decimal("0.01", 18)?)?;
-    let (engine, directory) = engine(&rpc);
-    let input = candidate();
-    let resource = ResourceId(format!("ethereum:1:{:#x}", crate::tests::addr(1)));
-    let token_in = AssetId {
-        network: "ethereum:1".into(),
-        reference: format!("{:#x}", crate::tests::addr(100)),
-        decimals: 18,
-    };
-    let native = AssetId {
-        network: "ethereum:1".into(),
-        reference: "native".into(),
-        decimals: 18,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "SYNTHETIC bounded AMM conformance".into(),
-        summary: None,
-        steps: vec![FinancialPlanStepSpec {
-            action_deadline_seconds: None,
-            step_id: "swap".into(),
-            operation: "uniswap.swap".into(),
-            input,
-            permitted_variations: bounds(),
-            completion: FinancialStepCompletion {
-                principal_spend: None,
-                minimum_net_receipt: None,
-                operation_succeeded: true,
-            },
-            funding_dependencies: vec![],
-        }],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: vec![ResourceAmount {
-                resource: resource.clone(),
-                amount: Amount {
-                    asset: token_in,
-                    atoms: Quantity::from_decimal("0.002", 18)?,
-                },
-            }],
-            maximum_costs: vec![CostBound {
-                location: AccountingLocation::Cash {
-                    resource: resource.clone(),
-                },
-                amount: Amount {
-                    asset: native,
-                    atoms: Quantity::from_decimal("0.0002", 18)?,
-                },
-                treatment: CostTreatment::AdditionalDebit,
-            }],
-        },
-    };
-    let authorization = engine
-        .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-            request_id: "SYNTHETIC-conformance-plan-authorization".into(),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        })
-        .await?;
-    assert_eq!(authorization.revision.spec.steps.len(), 1);
-    let attempt = candidate();
-    let prepared = engine
-        .preview_financial_plan_step(&authorization.plan_id, "swap", "uniswap.swap", &attempt)
-        .await
-        .unwrap_or_else(|error| panic!("plan candidate preview failed: {error:?}"));
-    assert_eq!(prepared.operation, "uniswap.swap");
-    let mut changed_recipient = attempt.clone();
-    changed_recipient["recipient"] = json!(format!("{:#x}", addr(2)));
-    assert!(
-        engine
-            .preview_financial_plan_step(
-                &authorization.plan_id,
-                "swap",
-                "uniswap.swap",
-                &changed_recipient,
-            )
-            .await
-            .is_err()
-    );
-    let database = directory.path().join("amm-conformance.sqlite");
-    drop(engine);
-    let engine = engine_at(&rpc, database);
-    assert_eq!(
-        engine
-            .financial_plan_status(&authorization.plan_id)
-            .await?
-            .revision
-            .status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Active
-    );
-    engine.revoke_financial_plan(&authorization.plan_id).await?;
-    assert!(
-        engine
-            .preview_financial_plan_step(&authorization.plan_id, "swap", "uniswap.swap", &attempt,)
-            .await
-            .is_err()
-    );
+    let adapter = crate::tests::local_sushi_adapter(rpc);
+    let mut input = candidate();
+    input["dex"] = json!("sushi");
+    input["allowed_dexes"] = json!(["sushi"]);
+    let approved = adapter.prepare("swap.execute", &input).await?;
+    adapter.validate_approved_candidate(&approved, &approved)?;
+    for (field, value) in [
+        ("recipient", json!(format!("{:#x}", addr(2)))),
+        ("amount", json!("0.002")),
+        ("max_fee_eth", json!("0.0002")),
+    ] {
+        let mut altered = approved.clone();
+        altered.input[field] = value;
+        assert!(
+            adapter
+                .validate_approved_candidate(&approved, &altered)
+                .is_err(),
+            "{field}"
+        );
+    }
     Ok(())
 }
 
@@ -462,38 +221,21 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("uncertain-amm.sqlite");
     let (engine, owner, approvals) = signed_engine(&rpc, &database);
-    let mut initial = candidate();
-    initial["recipient"] = json!(owner);
-    initial["request_id"] = json!("SYNTHETIC-uncertain-grant-preview");
-    let grant = BoundaryAuthorizationRequest {
-        request_id: "SYNTHETIC-uncertain-grant".into(),
-        operation: "uniswap.swap".into(),
-        input: initial,
-        bounds: bounds(),
-        valid_for_seconds: 600,
-        replaces: None,
-    };
-    let authorization = engine.authorize_boundary(grant).await?;
-    assert_eq!(
-        approvals.load(Ordering::SeqCst),
-        1,
-        "one fresh grant approval"
-    );
     let mut input = candidate();
     input["recipient"] = json!(owner);
     input["request_id"] = json!("SYNTHETIC-uncertain-write");
     let request = OperationRequest {
         request_id: "SYNTHETIC-uncertain-write".into(),
-        operation: "uniswap.swap".into(),
+        operation: "sushi.swap".into(),
         input: input.clone(),
         run_id: None,
     };
-    let first = engine
-        .execute_boundary(&authorization.id, request.clone())
-        .await?;
-    assert_eq!(
-        first.status,
-        gofin_domain::Status::Unknown,
+    let first = engine.execute(request.clone()).await?;
+    assert!(
+        matches!(
+            first.status,
+            gofin_domain::Status::Pending | gofin_domain::Status::Unknown
+        ),
         "receipt is intentionally unavailable: {first:?}"
     );
     let submission = first
@@ -517,9 +259,7 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
         "first attempt reaches the deterministic synthetic RPC once"
     );
 
-    let duplicate = engine
-        .execute_boundary(&authorization.id, request.clone())
-        .await?;
+    let duplicate = engine.execute(request.clone()).await?;
     assert_eq!(duplicate.id, first.id);
     assert_eq!(
         approvals.load(Ordering::SeqCst),
@@ -539,9 +279,7 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
     drop(engine);
 
     let (reopened, _, _) = signed_engine(&rpc, &database);
-    let after_restart = reopened
-        .execute_boundary(&authorization.id, request)
-        .await?;
+    let after_restart = reopened.execute(request).await?;
     assert_eq!(after_restart.id, first.id);
     assert_eq!(
         rpc.calls
@@ -559,14 +297,14 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
 struct RepublishingPrices(AtomicU64);
 
 #[tokio::test]
-async fn swap_usd_buffer_is_reserved_under_personal_limits_before_approval() -> Result<()> {
-    for (movement, allocation, expected) in [
+async fn standalone_swap_is_not_blocked_by_retired_usd_policy() -> Result<()> {
+    for (movement, allocation, _expected) in [
         ("3020000", "100000000", "MOVEMENT_LIMIT"),
         ("100000000", "3020000", "ALLOCATION_LIMIT"),
     ] {
         let rpc = Arc::new(Fixture::new());
         *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
-        let adapter = Arc::new(adapter(rpc.clone()));
+        let adapter = Arc::new(crate::tests::local_sushi_adapter(rpc.clone()));
         let approvals = Arc::new(AtomicUsize::new(0));
         let engine = Engine::new(
             Store::in_memory().unwrap(),
@@ -581,14 +319,14 @@ async fn swap_usd_buffer_is_reserved_under_personal_limits_before_approval() -> 
         let result = engine
             .execute(OperationRequest {
                 request_id: "SYNTHETIC-buffer-policy".into(),
-                operation: "uniswap.swap".into(),
+                operation: "sushi.swap".into(),
                 input: candidate(),
                 run_id: None,
             })
             .await?;
         assert_eq!(result.status, gofin_domain::Status::Failed);
-        assert_eq!(result.error.unwrap().code, expected);
-        assert_eq!(approvals.load(Ordering::SeqCst), 0);
+        assert_eq!(result.error.unwrap().code, "PROTECTED_SIGNER_REQUIRED");
+        assert_eq!(approvals.load(Ordering::SeqCst), 1);
         assert!(result.submission.is_none());
         assert!(
             !rpc.calls
@@ -636,8 +374,7 @@ impl gofin_domain::SubmissionJournal for NoBroadcastJournal {
 }
 
 #[tokio::test]
-async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_excess_or_identity_changes()
--> Result<()> {
+async fn historical_usd_ceiling_remains_enforced_without_new_standalone_ceiling() -> Result<()> {
     use gofin_domain::Adapter;
     let rpc = Arc::new(Fixture::new());
     *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
@@ -649,32 +386,10 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
             .with_wallet_valuation(prices.clone())
             .with_uniswap_api(crate::uniswap_api::tests::classic_fixture_client()),
     );
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![adapter.clone()],
-        Arc::new(SyntheticApproval),
-        EngineOptions::default(),
-    )?;
     let mut input = candidate();
     input.as_object_mut().unwrap().remove("fee_tier");
     input["min_output"] = json!("2.97");
-    let mut api_bounds = bounds();
-    api_bounds["allowed_fee_tiers"] = json!([]);
-    api_bounds["minimum_rate"]["output_atoms"] = json!("2970000000");
-    let grant = engine
-        .authorize_boundary(BoundaryAuthorizationRequest {
-            request_id: "SYNTHETIC-republication-grant".into(),
-            operation: "uniswap.swap".into(),
-            input: input.clone(),
-            bounds: api_bounds,
-            valid_for_seconds: 600,
-            replaces: None,
-        })
-        .await?;
-    let preview = engine
-        .preview_boundary(&grant.id, "uniswap.swap", &input)
-        .await?
-        .prepared;
+    let preview = adapter.prepare("uniswap.swap", &input).await?;
     assert!(
         preview
             .binding
@@ -685,10 +400,6 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
     prices.0.fetch_add(1, Ordering::SeqCst);
     let fresh = adapter.revalidate(&preview).await?;
     assert_eq!(fresh.binding, preview.binding);
-    assert_ne!(
-        fresh.valuation.as_ref().unwrap().prices[0].source,
-        preview.valuation.as_ref().unwrap().prices[0].source
-    );
     let blocked = adapter
         .submit(&preview, Arc::new(NoBroadcastJournal))
         .await
@@ -764,7 +475,7 @@ impl Authorizer for NativeApiPlanApproval {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn hosted_uniswap_preparation_and_named_plan_render_in_native_review() -> Result<()> {
+async fn hosted_uniswap_preparation_renders_and_retired_plan_is_rejected() -> Result<()> {
     let rpc = Arc::new(Fixture::new());
     *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
     let adapter = Arc::new(
@@ -795,7 +506,14 @@ async fn hosted_uniswap_preparation_and_named_plan_render_in_native_review() -> 
     request.plan.steps[0].permitted_variations["allowed_fee_tiers"] = json!([]);
     request.plan.steps[0].permitted_variations["minimum_rate"]["output_atoms"] =
         json!("2970000000");
-    engine.authorize_financial_plan(request).await?;
+    assert_eq!(
+        engine
+            .authorize_financial_plan(request)
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
     Ok(())
 }
 
@@ -808,22 +526,6 @@ impl ManualClock {
 impl gofin_domain::clock::Clock for ManualClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         *self.0.lock().unwrap()
-    }
-}
-struct ClockApproval(Arc<ManualClock>);
-#[async_trait::async_trait]
-impl Authorizer for ClockApproval {
-    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        use gofin_domain::clock::Clock;
-        Ok(ApprovalAudit {
-            source: None,
-            yolo_provenance: None,
-            mechanism: "synthetic-clock-only".into(),
-            binding_hash: challenge.binding_hash.clone(),
-            challenge_nonce: challenge.nonce.clone(),
-            approved_at: self.0.now().to_rfc3339(),
-            expires_at: challenge.expires_at.clone(),
-        })
     }
 }
 
@@ -884,153 +586,29 @@ fn relative_swap_request(
 }
 
 #[tokio::test]
-async fn long_plan_resolves_short_swap_after_eleven_minutes_and_rejects_insufficient_time_before_rpc()
--> Result<()> {
+async fn standalone_swap_deadline_and_preview_expiry_remain_bound() -> Result<()> {
     use gofin_domain::clock::Clock;
-    let clock = Arc::new(ManualClock(std::sync::Mutex::new(
-        chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    )));
+    let clock = Arc::new(ManualClock(std::sync::Mutex::new(chrono::Utc::now())));
     let rpc = Arc::new(Fixture::new());
     *rpc.allowance.lock().unwrap() = gofin_evm::u256(&Quantity::from_decimal("0.01", 18)?)?;
-    let adapter = Arc::new(adapter(rpc.clone()).with_clock(clock.clone()));
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("timing.sqlite");
-    let engine = Engine::new(
-        Store::open(&database).unwrap(),
-        vec![adapter.clone()],
-        Arc::new(ClockApproval(clock.clone())),
-        EngineOptions::default(),
-    )?
-    .with_clock(clock.clone());
+    let adapter = crate::tests::local_sushi_adapter(rpc.clone()).with_clock(clock.clone());
     let mut input = candidate();
-    input.as_object_mut().unwrap().remove("deadline");
-    let request = relative_swap_request(input.clone());
-    let review = engine.preview_financial_plan(request.clone()).await?;
-    assert_eq!(review.valid_for_seconds, 2700);
-    assert_eq!(
-        review.permissions[0]
-            .permission
-            .as_ref()
-            .unwrap()
-            .authorization_seconds,
-        None
-    );
-    assert!(review.plan.steps[0].input.get("deadline").is_none());
-    let mut automatic = request.clone();
-    automatic.valid_for_seconds = None;
-    assert_eq!(
-        engine
-            .preview_financial_plan(automatic.clone())
-            .await
-            .unwrap_err()
-            .code,
-        "PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW"
-    );
-    automatic.plan.steps[0].action_deadline_seconds = Some(300);
-    assert_eq!(
-        engine
-            .preview_financial_plan(automatic)
-            .await?
-            .valid_for_seconds,
-        600
-    );
-    let mut short = request.clone();
-    short.valid_for_seconds = Some(300);
-    short.plan.steps[0].action_deadline_seconds = Some(120);
-    assert_eq!(
-        engine.preview_financial_plan(short).await?.timing_warnings[0].code,
-        "PLAN_DURATION_BELOW_BUDGET"
-    );
-    let authorized = engine.authorize_financial_plan(request).await?;
-    clock.advance(661);
-    let prepared = engine
-        .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
-        .await?;
-    assert_eq!(
-        prepared.input["deadline"],
-        clock.now().timestamp() as u64 + 600
-    );
-    assert_eq!(
-        prepared.action_deadline.as_ref().unwrap().resolved_at,
-        clock.now().to_rfc3339()
-    );
-    let original_hash = gofin_domain::binding_hash(
-        &gofin_domain::financial_plans::financial_plan_attempt_binding(
-            &prepared,
-            &authorized.plan_id,
-            &authorized.revision.revision_id,
-            "swap",
-        ),
-    )?;
-    let mut rewritten = prepared.clone();
-    rewritten.input["deadline"] = json!(clock.now().timestamp() as u64 + 601);
-    assert_ne!(
-        original_hash,
-        gofin_domain::binding_hash(
-            &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                &rewritten,
-                &authorized.plan_id,
-                &authorized.revision.revision_id,
-                "swap"
-            )
-        )?
-    );
+    input["deadline"] = json!(clock.now().timestamp() as u64 + 600);
+    let prepared = adapter.prepare("sushi.swap", &input).await?;
+    let mut changed = prepared.clone();
+    changed.input["deadline"] = json!(clock.now().timestamp() as u64 + 601);
+    assert!(adapter.revalidate(&changed).await.is_err());
     clock.advance(300);
     assert_eq!(
         adapter.revalidate(&prepared).await.unwrap_err().code,
         "PREVIEW_EXPIRED"
     );
-    clock.advance(2700 - 661 - 300 - 599);
-    let before = rpc.calls.lock().unwrap().len();
-    let error = engine
-        .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "PLAN_INSUFFICIENT_AUTHORIZATION_TIME");
-    assert_eq!(error.details.as_ref().unwrap()["remaining_seconds"], 599);
-    assert_eq!(
-        error.details.as_ref().unwrap()["plan_id"],
-        authorized.plan_id
-    );
-    assert_eq!(
-        rpc.calls.lock().unwrap().len(),
-        before,
-        "insufficient time must not prepare through RPC"
-    );
-    let status = engine.financial_plan_status(&authorized.plan_id).await?;
     assert!(
-        !status
-            .authorization_timing
-            .as_ref()
+        !rpc.calls
+            .lock()
             .unwrap()
-            .can_prepare_next_action
-    );
-    assert!(status.usage.reservations.is_empty());
-    clock.advance(600);
-    let restarted = Engine::new(
-        Store::open(&database).unwrap(),
-        vec![adapter],
-        Arc::new(ClockApproval(clock.clone())),
-        EngineOptions::default(),
-    )?
-    .with_clock(clock);
-    assert_eq!(
-        restarted
-            .financial_plan_status(&authorized.plan_id)
-            .await?
-            .revision
-            .status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
-    );
-    assert_eq!(
-        restarted
-            .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
-            .await
-            .unwrap_err()
-            .code,
-        "PLAN_AUTHORIZATION_INACTIVE"
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction")
     );
     Ok(())
 }

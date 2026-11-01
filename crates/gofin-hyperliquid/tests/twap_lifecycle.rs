@@ -327,7 +327,15 @@ async fn changed_slice_receipt_preserves_verified_partial_without_replay() {
 
     venue.fills.lock().unwrap()[2]["fill"]["px"] = json!("11");
     let mismatch = engine.status(&submitted.id, true).await.unwrap();
-    assert_eq!(mismatch.status, Status::Unknown);
+    assert_eq!(mismatch.status, Status::Pending);
+    assert!(
+        mismatch
+            .last_reconciliation_evidence
+            .as_ref()
+            .is_some_and(|e| e.get("conflicting_observations").is_some()),
+        "{:?}",
+        mismatch.last_reconciliation_evidence
+    );
     assert_eq!(mismatch.effects, Some(verified));
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 2);
 }

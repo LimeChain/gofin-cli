@@ -1637,50 +1637,34 @@ fn exact_operation_plan(
     }
 }
 
-async fn authorize_plan(
+async fn prepare_action(
     client: &SocketClient,
     request_id: &str,
-    plan: FinancialPlanSpec,
+    fixture: FinancialPlanSpec,
 ) -> String {
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: request_id.into(),
-        plan,
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
+    // This fixture describes expected native terms; it issues no reusable authority.
+    assert_eq!(fixture.steps.len(), 1);
+    let action = &fixture.steps[0];
     let preview = client
-        .call(BrokerRequest::PreviewPlan {
-            request: request.clone(),
+        .call(BrokerRequest::Preview {
+            operation: action.operation.clone(),
+            input: action.input.clone(),
         })
         .await;
     assert!(preview.ok, "{:?}", preview.error);
-    request.expected_review_hash = Some(
-        preview.result.unwrap()["review_hash"]
-            .as_str()
-            .unwrap()
-            .into(),
-    );
-    let authorized = client.call(BrokerRequest::AuthorizePlan { request }).await;
-    assert!(authorized.ok, "{:?}", authorized.error);
-    authorized.result.unwrap()["plan_id"]
-        .as_str()
-        .unwrap()
-        .into()
+    request_id.into()
 }
 
-async fn execute_plan_step(
+async fn execute_action(
     client: &SocketClient,
-    plan_id: &str,
-    step_id: &str,
+    _scope: &str,
+    _step: &str,
     operation: &str,
     request_id: &str,
     input: Value,
 ) -> gofin_protocol::BrokerResponse {
     client
-        .call(BrokerRequest::ExecutePlanStep {
-            plan_id: plan_id.into(),
-            step_id: step_id.into(),
+        .call(BrokerRequest::Execute {
             request: OperationRequest {
                 request_id: request_id.into(),
                 operation: operation.into(),
@@ -1700,18 +1684,15 @@ async fn run_named_step(
     input: Value,
     plan: FinancialPlanSpec,
 ) -> Value {
-    let plan_id = authorize_plan(client, plan_request_id, plan).await;
+    let plan_id = prepare_action(client, plan_request_id, plan).await;
     let preview = client
-        .call(BrokerRequest::PreviewPlanStep {
-            plan_id: plan_id.clone(),
-            step_id: step_id.into(),
+        .call(BrokerRequest::Preview {
             operation: operation.into(),
             input: input.clone(),
         })
         .await;
     assert!(preview.ok, "{operation} preview: {:?}", preview.error);
-    let mut result =
-        execute_plan_step(client, &plan_id, step_id, operation, request_id, input).await;
+    let mut result = execute_action(client, &plan_id, step_id, operation, request_id, input).await;
     assert!(result.ok, "{operation} execution: {:?}", result.error);
     if result
         .result
@@ -1908,74 +1889,11 @@ impl SocketClient {
                 } => {
                     args.extend(["read".into(), operation, "--input".into(), input(&value)]);
                 }
-                BrokerRequest::PreviewPlan { request } => {
-                    args.extend([
-                        "plans".into(),
-                        "preview".into(),
-                        "--input".into(),
-                        input(&json!(request.plan)),
-                    ]);
-                    if let Some(seconds) = request.valid_for_seconds {
-                        args.extend(["--valid-for".into(), format!("{seconds}s")]);
-                    }
-                }
-                BrokerRequest::AuthorizePlan { request } => {
-                    args.extend([
-                        "plans".into(),
-                        "authorize".into(),
-                        "--input".into(),
-                        input(&json!(request.plan)),
-                        "--id".into(),
-                        request.request_id,
-                    ]);
-                    if let Some(seconds) = request.valid_for_seconds {
-                        args.extend(["--valid-for".into(), format!("{seconds}s")]);
-                    }
-                    if let Some(hash) = request.expected_review_hash {
-                        args.extend(["--review-hash".into(), hash]);
-                    }
-                    if let Some(revision) = request.replaces_revision_id {
-                        args.extend(["--replaces".into(), revision]);
-                    }
-                }
-                BrokerRequest::PreviewPlanStep {
-                    plan_id,
-                    step_id,
+                BrokerRequest::Preview {
                     operation,
                     input: value,
                 } => {
-                    args.extend([
-                        "execute".into(),
-                        operation,
-                        "--input".into(),
-                        input(&value),
-                        "--plan".into(),
-                        plan_id,
-                        "--step".into(),
-                        step_id,
-                        "--dry-run".into(),
-                    ]);
-                }
-                BrokerRequest::ExecutePlanStep {
-                    plan_id,
-                    step_id,
-                    request,
-                } => {
-                    args.extend([
-                        "execute".into(),
-                        request.operation,
-                        "--input".into(),
-                        input(&request.input),
-                        "--id".into(),
-                        request.request_id,
-                        "--plan".into(),
-                        plan_id,
-                        "--step".into(),
-                        step_id,
-                    ]);
-                }
-                BrokerRequest::PlanStatus { plan_id } => {
-                    args.extend(["plans".into(), "status".into(), plan_id]);
+                    args.extend(["preview".into(), operation, "--input".into(), input(&value)]);
                 }
                 BrokerRequest::Status { id } => args.extend(["status".into(), id]),
                 BrokerRequest::Execute { request } => args.extend([
@@ -2053,7 +1971,8 @@ impl Drop for SocketClient {
 }
 
 #[test]
-fn real_papertrade_adapter_named_plan_accepts_exact_principal_but_rejects_asset_substitution() {
+fn real_papertrade_adapter_native_action_preserves_exact_principal_and_rejects_asset_substitution()
+{
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2095,54 +2014,10 @@ fn real_papertrade_adapter_named_plan_accepts_exact_principal_but_rejects_asset_
                 "the exact current protocol minimum must be enforced"
             );
 
-            let valid_plan = plan(
-                paper_asset(),
-                ResourceId(format!("papertrade:mainnet:{OWNER}:paper_wallet")),
-            );
-            let mut request = FinancialPlanAuthorizationRequest {
-                request_id: "papertrade-principal-quota".into(),
-                plan: valid_plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            };
-            let preview = client
-                .call(BrokerRequest::PreviewPlan {
-                    request: request.clone(),
-                })
-                .await;
-            assert!(preview.ok, "{:?}", preview.error);
-            request.expected_review_hash = Some(
-                preview.result.unwrap()["review_hash"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-            );
-            let authorized = client.call(BrokerRequest::AuthorizePlan { request }).await;
-            assert!(authorized.ok, "{:?}", authorized.error);
-            assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-            let plan_id = authorized.result.unwrap()["plan_id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            let step = client
-                .call(BrokerRequest::PreviewPlanStep {
-                    plan_id: plan_id.clone(),
-                    step_id: "stake".into(),
-                    operation: "papertrade.stake".into(),
-                    input: json!({"amount":"1000"}),
-                })
-                .await;
-            assert!(
-                step.ok,
-                "exact 1000 PAPER step is below the configured $0.000001 movement ceiling: {:?}",
-                step.error
-            );
-            assert_eq!(
-                step.result.unwrap()["valuation"]["movement_usd_micros"],
-                "0"
-            );
-
+            let preview=client.call(BrokerRequest::Preview {operation:"papertrade.stake".into(),input:json!({"amount":"1000"})}).await;
+            assert!(preview.ok,"{:?}",preview.error);
+            assert_eq!(approval.0.load(Ordering::SeqCst),0);
+            assert!(prepared.intent.debits.iter().any(|debit|debit.amount.asset==paper_asset() && debit.amount.atoms==Quantity::from_decimal("1000",18).unwrap()));
             let execute_request = OperationRequest {
                 request_id: "papertrade-stake-attempt".into(),
                 operation: "papertrade.stake".into(),
@@ -2150,9 +2025,7 @@ fn real_papertrade_adapter_named_plan_accepts_exact_principal_but_rejects_asset_
                 run_id: None,
             };
             adapter.revalidate(&prepared).await.unwrap();
-            let execute = || BrokerRequest::ExecutePlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "stake".into(),
+            let execute = || BrokerRequest::Execute {
                 request: execute_request.clone(),
             };
             let first = client.call(execute()).await;
@@ -2180,54 +2053,10 @@ fn real_papertrade_adapter_named_plan_accepts_exact_principal_but_rejects_asset_
                 "uncertain submission recovery must not replay a write"
             );
 
-            let counterfeit = AssetId {
-                network: "ethereum:999".into(),
-                reference: "0x000000000000000000000000000000000000dead".into(),
-                decimals: 18,
-            };
-            let counterfeit_plan = plan(
-                counterfeit,
-                ResourceId(format!("papertrade:mainnet:{OWNER}:paper_wallet")),
-            );
-            let mut bad_request = FinancialPlanAuthorizationRequest {
-                request_id: "papertrade-counterfeit-principal".into(),
-                plan: counterfeit_plan,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            };
-            let bad_preview = client
-                .call(BrokerRequest::PreviewPlan {
-                    request: bad_request.clone(),
-                })
-                .await;
-            // The user-supplied exact scope may be reviewed, but cannot authorize
-            // an adapter candidate that actually debits the reviewed PAPER token.
-            assert!(bad_preview.ok, "{:?}", bad_preview.error);
-            bad_request.expected_review_hash = Some(
-                bad_preview.result.unwrap()["review_hash"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-            );
-            let bad_auth = client
-                .call(BrokerRequest::AuthorizePlan {
-                    request: bad_request,
-                })
-                .await;
-            assert!(bad_auth.ok, "{:?}", bad_auth.error);
-            let bad_step = client
-                .call(BrokerRequest::PreviewPlanStep {
-                    plan_id: bad_auth.result.unwrap()["plan_id"].as_str().unwrap().into(),
-                    step_id: "stake".into(),
-                    operation: "papertrade.stake".into(),
-                    input: json!({"amount":"1000"}),
-                })
-                .await;
-            assert!(
-                !bad_step.ok,
-                "counterfeit principal must not match exact Papertrade effect identity"
-            );
+            let counterfeit=client.call(BrokerRequest::Preview {operation:"papertrade.stake".into(),input:json!({"amount":"1000","asset":{"network":"ethereum:999","reference":"0x000000000000000000000000000000000000dead","decimals":18}})}).await;
+            assert!(!counterfeit.ok,"fixed Papertrade principal cannot be substituted by an input field");
+            assert_eq!(approval.0.load(Ordering::SeqCst),1);
+
         });
 }
 
@@ -2538,8 +2367,8 @@ fn papertrade_cli_local_funding_key_failure_is_terminal_without_replay() {
                     asset: trading_usdc_asset(),
                 }],
             );
-            let plan_id = authorize_plan(&client, "papertrade-core-key-recovery-plan", plan).await;
-            let first = execute_plan_step(
+            let plan_id = prepare_action(&client, "papertrade-core-key-recovery-plan", plan).await;
+            let first = execute_action(
                 &client,
                 &plan_id,
                 "deposit",
@@ -2575,7 +2404,7 @@ fn papertrade_cli_local_funding_key_failure_is_terminal_without_replay() {
 
             // Replaying the same logical request returns its immutable terminal
             // record and never calls the funding transport again.
-            let duplicate = execute_plan_step(
+            let duplicate = execute_action(
                 &client,
                 &plan_id,
                 "deposit",
@@ -2593,7 +2422,7 @@ fn papertrade_cli_local_funding_key_failure_is_terminal_without_replay() {
             assert_eq!(runtime.funding_dispatches.load(Ordering::SeqCst), 1);
 
             // A deliberate new attempt has a new request and durable route id.
-            let second = execute_plan_step(
+            let second = execute_action(
                 &client,
                 &plan_id,
                 "deposit",
@@ -2608,8 +2437,12 @@ fn papertrade_cli_local_funding_key_failure_is_terminal_without_replay() {
             assert_eq!(second["status"], "completed", "new attempt: {second:?}");
             assert_eq!(runtime.funding_dispatches.load(Ordering::SeqCst), 2);
             let funding_ids = runtime.funding_operation_ids.lock().unwrap();
-            assert_eq!(funding_ids.len(), 2);
-            assert_ne!(funding_ids[0], funding_ids[1]);
+            assert_eq!(
+                funding_ids.len(),
+                3,
+                "one preview and two explicit attempts prepare separate route identities"
+            );
+            assert_ne!(funding_ids[1], funding_ids[2]);
         });
 }
 
@@ -2654,11 +2487,9 @@ fn real_papertrade_adapter_cli_core_deposit_effects_match_controlled_receipt() {
                     asset: trading_usdc_asset(),
                 }],
             );
-            let plan_id = authorize_plan(&client, "papertrade-core-deposit", plan).await;
+            let plan_id = prepare_action(&client, "papertrade-core-deposit", plan).await;
             let preview = client
-                .call(BrokerRequest::PreviewPlanStep {
-                    plan_id: plan_id.clone(),
-                    step_id: "deposit".into(),
+                .call(BrokerRequest::Preview {
                     operation: "papertrade.deposit".into(),
                     input: deposit_input.clone(),
                 })
@@ -2674,7 +2505,7 @@ fn real_papertrade_adapter_cli_core_deposit_effects_match_controlled_receipt() {
                 preview_value["valuation"]["movement_usd_micros"],
                 "10000000"
             );
-            let executed = execute_plan_step(
+            let executed = execute_action(
                 &client,
                 &plan_id,
                 "deposit",
@@ -2702,7 +2533,7 @@ fn real_papertrade_adapter_cli_core_deposit_effects_match_controlled_receipt() {
                 effect["kind"] == "settlement" && effect["delta"] == "10000000000000000000"
             }));
             assert_eq!(runtime.funding_dispatches.load(Ordering::SeqCst), 1);
-            let recovered = execute_plan_step(
+            let recovered = execute_action(
                 &client,
                 &plan_id,
                 "deposit",
@@ -2717,7 +2548,7 @@ fn real_papertrade_adapter_cli_core_deposit_effects_match_controlled_receipt() {
 }
 
 #[test]
-fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay() {
+fn real_papertrade_adapter_native_actions_settle_open_and_full_close_without_replay() {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2750,8 +2581,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 }],
                 vec![],
             );
-            let open_plan_id = authorize_plan(&client, "papertrade-open-plan", open_plan).await;
-            let opened = execute_plan_step(
+            let open_plan_id = prepare_action(&client, "papertrade-open-plan", open_plan).await;
+            let opened = execute_action(
                 &client,
                 &open_plan_id,
                 "open",
@@ -2799,8 +2630,11 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                     && effect["delta"] == "1000000000000000000000"
             }));
             let opened_status = client
-                .call(BrokerRequest::PlanStatus {
-                    plan_id: open_plan_id.clone(),
+                .call(BrokerRequest::Status {
+                    id: opened.result.as_ref().unwrap()["id"]
+                        .as_str()
+                        .unwrap()
+                        .into(),
                 })
                 .await;
             assert!(opened_status.ok, "{:?}", opened_status.error);
@@ -2822,8 +2656,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 vec![],
             );
             let second_open_plan_id =
-                authorize_plan(&client, "papertrade-open-second-plan", second_open_plan).await;
-            let second_opened = execute_plan_step(
+                prepare_action(&client, "papertrade-open-second-plan", second_open_plan).await;
+            let second_opened = execute_action(
                 &client,
                 &second_open_plan_id,
                 "open",
@@ -2869,8 +2703,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                     },
                 ],
             );
-            let close_plan_id = authorize_plan(&client, "papertrade-close-plan", close_plan).await;
-            let closed = execute_plan_step(
+            let close_plan_id = prepare_action(&client, "papertrade-close-plan", close_plan).await;
+            let closed = execute_action(
                 &client,
                 &close_plan_id,
                 "close",
@@ -2923,7 +2757,7 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                     .iter()
                     .any(|row| row["positionId"] == "43")
             );
-            let repeat = execute_plan_step(
+            let repeat = execute_action(
                 &client,
                 &close_plan_id,
                 "close",
@@ -2961,8 +2795,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 ],
             );
             let close_second_plan_id =
-                authorize_plan(&client, "papertrade-close-second-plan", close_second_plan).await;
-            let closed_second = execute_plan_step(
+                prepare_action(&client, "papertrade-close-second-plan", close_second_plan).await;
+            let closed_second = execute_action(
                 &client,
                 &close_second_plan_id,
                 "close-second",
@@ -2994,8 +2828,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 vec![],
             );
             let eth_short_plan_id =
-                authorize_plan(&client, "papertrade-eth-short-plan", eth_short_plan).await;
-            let eth_short = execute_plan_step(
+                prepare_action(&client, "papertrade-eth-short-plan", eth_short_plan).await;
+            let eth_short = execute_action(
                 &client,
                 &eth_short_plan_id,
                 "eth-short",
@@ -3051,8 +2885,8 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 ],
             );
             let eth_close_plan_id =
-                authorize_plan(&client, "papertrade-eth-short-close-plan", eth_close_plan).await;
-            let eth_closed = execute_plan_step(
+                prepare_action(&client, "papertrade-eth-short-close-plan", eth_close_plan).await;
+            let eth_closed = execute_action(
                 &client,
                 &eth_close_plan_id,
                 "eth-short-close",
@@ -3103,7 +2937,7 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 ],
             );
             let legacy_close_plan_id =
-                authorize_plan(&client, "papertrade-close-legacy-plan", legacy_close_plan).await;
+                prepare_action(&client, "papertrade-close-legacy-plan", legacy_close_plan).await;
             let legacy_preview = adapter
                 .prepare("papertrade.close", &legacy_close_input)
                 .await
@@ -3117,7 +2951,7 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                     .iter()
                     .all(|anchor| anchor["position"] == "papertrade:position_id:44")
             );
-            let legacy_closed = execute_plan_step(
+            let legacy_closed = execute_action(
                 &client,
                 &legacy_close_plan_id,
                 "close-legacy",
@@ -3159,9 +2993,9 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                     vec![],
                 );
                 let open_plan_id =
-                    authorize_plan(&client, &format!("papertrade-{label}-open-plan"), open_plan)
+                    prepare_action(&client, &format!("papertrade-{label}-open-plan"), open_plan)
                         .await;
-                let opened = execute_plan_step(
+                let opened = execute_action(
                     &client,
                     &open_plan_id,
                     &open_step,
@@ -3221,13 +3055,13 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                         },
                     ],
                 );
-                let close_plan_id = authorize_plan(
+                let close_plan_id = prepare_action(
                     &client,
                     &format!("papertrade-{label}-close-plan"),
                     close_plan,
                 )
                 .await;
-                let closed = execute_plan_step(
+                let closed = execute_action(
                     &client,
                     &close_plan_id,
                     &close_step,
@@ -3267,8 +3101,11 @@ fn real_papertrade_adapter_named_plan_settles_open_and_full_close_without_replay
                 );
             }
             let status = client
-                .call(BrokerRequest::PlanStatus {
-                    plan_id: close_plan_id,
+                .call(BrokerRequest::Status {
+                    id: closed.result.as_ref().unwrap()["id"]
+                        .as_str()
+                        .unwrap()
+                        .into(),
                 })
                 .await;
             assert!(status.ok, "{:?}", status.error);
@@ -3301,13 +3138,13 @@ fn papertrade_cancel_requires_terminal_target_state_and_rejects_execution_race()
                 )
             };
             let cancelled_target = format!("0x{}", "11".repeat(32));
-            let cancelled_plan = authorize_plan(
+            let cancelled_plan = prepare_action(
                 &client,
                 "papertrade-cancel-confirmed-plan",
                 cancel_step("cancel-confirmed", &cancelled_target),
             )
             .await;
-            let accepted_only = execute_plan_step(
+            let accepted_only = execute_action(
                 &client,
                 &cancelled_plan,
                 "cancel-confirmed",
@@ -3352,7 +3189,7 @@ fn papertrade_cancel_requires_terminal_target_state_and_rejects_execution_race()
             // accepted. The target's exact terminal state is surfaced as a
             // rejection, never mistaken for a successful cancellation.
             let raced_target = format!("0x{}", "22".repeat(32));
-            let raced_plan = authorize_plan(
+            let raced_plan = prepare_action(
                 &client,
                 "papertrade-cancel-race-plan",
                 cancel_step("cancel-race", &raced_target),
@@ -3367,7 +3204,7 @@ fn papertrade_cancel_requires_terminal_target_state_and_rejects_execution_race()
                 account_revision: None,
                 indexed_through_block: None,
             });
-            let raced = execute_plan_step(
+            let raced = execute_action(
                 &client,
                 &raced_plan,
                 "cancel-race",

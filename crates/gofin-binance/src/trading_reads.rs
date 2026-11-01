@@ -126,6 +126,10 @@ async fn request(
         .map_err(|cause| {
             use crate::{HttpFailureKind, TransportError};
             let (code, message) = match cause {
+                TransportError::OrderNotFound => (
+                    "VENUE_ORDER_NOT_FOUND",
+                    "Binance reports that the selected order was not found.",
+                ),
                 TransportError::RateLimited
                 | TransportError::HttpFailure {
                     kind: HttpFailureKind::RateLimited,

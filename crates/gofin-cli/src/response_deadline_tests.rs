@@ -1,5 +1,24 @@
 use super::*;
 use gofin_domain::execution_progress::{self, Stage};
+
+#[test]
+fn status_observations_remain_bounded_after_rpc_negotiation() {
+    for request in [
+        BrokerRequest::Status {
+            id: "original".into(),
+        },
+        BrokerRequest::StatusSide {
+            id: "original".into(),
+            side: "destination".into(),
+        },
+    ] {
+        let mut deadline = response_deadline::ResponseDeadline::new(Some(&request));
+        let original = deadline.at();
+        assert!(original.is_some());
+        deadline.allow_rpc_read();
+        assert_eq!(deadline.at(), original);
+    }
+}
 #[cfg(target_os = "macos")]
 use std::sync::{
     Arc,
@@ -7,9 +26,7 @@ use std::sync::{
 };
 
 fn execution_request() -> BrokerRequest {
-    BrokerRequest::ExecutePlanStep {
-        plan_id: "synthetic-plan".into(),
-        step_id: "transfer".into(),
+    BrokerRequest::Execute {
         request: OperationRequest {
             request_id: "logical-execution".into(),
             operation: "synthetic.trade".into(),
@@ -60,8 +77,7 @@ async fn financial_response_without_progress_keeps_original_deadline() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(start_paused = true)]
-async fn unix_financial_response_survives_three_bounded_engine_preparations() {
-    use gofin_domain::financial_plans::*;
+async fn unix_financial_response_reports_bounded_native_preparation_failure() {
     use gofin_domain::{
         Adapter, OperationRecord, PreparedOperation, Reconciliation, Submission, SubmissionJournal,
     };
@@ -80,9 +96,9 @@ async fn unix_financial_response_survives_three_bounded_engine_preparations() {
             self.prepares.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_secs(119)).await;
             Err(GoFinError::new(
-                "PRICE_STALE",
-                "valuation",
-                "Synthetic provider quote remains stale.",
+                "REQUIRED_QUOTE_UNAVAILABLE",
+                "preparation",
+                "Synthetic executable quote is unavailable.",
                 "Wait for fresh provider evidence.",
             ))
         }
@@ -113,31 +129,6 @@ async fn unix_financial_response_survives_three_bounded_engine_preparations() {
         )
         .unwrap(),
     );
-    let debit = json!({"resource":"synthetic:cash","amount":{"asset":{"network":"synthetic","reference":"USD","decimals":6},"atoms":"1000000"}});
-    let mut plan: FinancialPlanSpec = serde_json::from_str(sample_plan_json()).unwrap();
-    plan.steps[0].operation = "synthetic.trade".into();
-    plan.steps[0].input = json!({"account":"synthetic-account","units":"1"});
-    plan.steps[0].permitted_variations =
-        json!({"mode":"exact","maximum_debits":[debit],"maximum_costs":[],"possible_credits":[]});
-    plan.aggregate_bounds.maximum_debits = serde_json::from_value(json!([debit])).unwrap();
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "synthetic-plan-authority".into(),
-        plan,
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    authorization.expected_review_hash = Some(
-        engine
-            .preview_financial_plan(authorization.clone())
-            .await
-            .unwrap()
-            .review_hash,
-    );
-    let plan = engine
-        .authorize_financial_plan(authorization)
-        .await
-        .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("broker.sock");
     let listener = UnixListener::bind(&path).unwrap();
@@ -150,23 +141,20 @@ async fn unix_financial_response_survives_three_bounded_engine_preparations() {
             .unwrap();
         assert!(envelope.progress);
         assert!(!envelope.cancellable_read());
-        let BrokerRequest::ExecutePlanStep {
-            plan_id,
-            step_id,
-            request,
-        } = envelope.request
-        else {
+        let BrokerRequest::Execute { request } = envelope.request else {
             panic!("unexpected request")
         };
-        let result = gofin_protocol::progress::observe_request(
+        let result = gofin_protocol::progress::observe_financial_request(
             reader.get_mut(),
             true,
             false,
-            engine.execute_financial_plan_step(&plan_id, &step_id, request),
+            engine.execute(request),
         )
-        .await
-        .unwrap();
-        let response = BrokerResponse::failure(result.unwrap_err());
+        .await;
+        let response = match result {
+            Ok(record) => BrokerResponse::success(engine.operation_view(&record).unwrap()),
+            Err(error) => BrokerResponse::failure(error),
+        };
         reader
             .get_mut()
             .write_all(&gofin_protocol::encode_response(&response).unwrap())
@@ -178,28 +166,38 @@ async fn unix_financial_response_survives_three_bounded_engine_preparations() {
         path,
         expected_uid: unsafe { libc::geteuid() },
     };
-    let mut request = execution_request();
-    if let BrokerRequest::ExecutePlanStep { plan_id, .. } = &mut request {
-        *plan_id = plan.plan_id;
-    }
-    // This deliberately has no presentation observer. Internal transport progress
-    // must protect plain --json just as it protects terminal/stream output.
+    let request = execution_request();
+    // Plain JSON negotiates real engine progress without a presentation observer.
+    // Unix socket readiness is driven outside Tokio's timer queue. Keep the
+    // paused clock from jumping to the response deadline while the OS delivers
+    // a ready frame, and advance only the adapter's controlled preparation.
+    let clock_driver = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let started = tokio::time::Instant::now();
     let client = tokio::spawn(async move { Transport::call(&transport, request).await });
-    // Drive the real engine's bounded retry path while allowing local socket I/O.
-    // Paused Tokio time advances independently of provider/authority wall clocks.
-    let error = client.await.unwrap().unwrap_err();
-    assert!(started.elapsed() > FINANCIAL_WRITE_TIMEOUT);
-    assert_eq!(error.code, "PRICE_STALE");
-    assert_eq!(error.details.as_ref().unwrap()["refresh_count"], 2);
-    assert_eq!(adapter.prepares.load(Ordering::SeqCst), 3);
-    assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+    while adapter.prepares.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(119)).await;
+    let result = client.await.unwrap();
+    clock_driver.abort();
+    let code = match result {
+        Ok(value) => value["error"]["code"].as_str().unwrap().to_owned(),
+        Err(error) => error.code,
+    };
+    assert!(started.elapsed() <= FINANCIAL_WRITE_TIMEOUT);
+    assert_eq!(code, "REQUIRED_QUOTE_UNAVAILABLE");
+    assert_eq!(adapter.prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
     server.await.unwrap();
 }
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn lost_unix_financial_response_checks_plan_status_without_replaying_execution() {
+async fn lost_unix_financial_response_checks_history_without_replaying_execution() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("broker.sock");
     let listener = UnixListener::bind(&path).unwrap();
@@ -217,10 +215,7 @@ async fn lost_unix_financial_response_checks_plan_status_without_replaying_execu
             "plain JSON execution negotiates internal progress"
         );
         assert!(!envelope.cancellable_read());
-        assert!(matches!(
-            envelope.request,
-            BrokerRequest::ExecutePlanStep { .. }
-        ));
+        assert!(matches!(envelope.request, BrokerRequest::Execute { .. }));
         dispatched.fetch_add(1, Ordering::SeqCst);
         drop(reader); // Lost response says nothing about whether financial work ran.
         let (stream, _) = listener.accept().await.unwrap();
@@ -229,12 +224,11 @@ async fn lost_unix_financial_response_checks_plan_status_without_replaying_execu
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(envelope.request, BrokerRequest::PlanStatus { .. }));
+        assert!(matches!(envelope.request, BrokerRequest::Operations));
         reader
             .get_mut()
             .write_all(
-                &gofin_protocol::encode_response(&BrokerResponse::success(json!({"steps":[]})))
-                    .unwrap(),
+                &gofin_protocol::encode_response(&BrokerResponse::success(json!([]))).unwrap(),
             )
             .await
             .unwrap();
@@ -244,15 +238,10 @@ async fn lost_unix_financial_response_checks_plan_status_without_replaying_execu
         path,
         expected_uid: unsafe { libc::geteuid() },
     };
-    let BrokerRequest::ExecutePlanStep {
-        plan_id,
-        step_id,
-        request,
-    } = execution_request()
-    else {
+    let BrokerRequest::Execute { request } = execution_request() else {
         unreachable!()
     };
-    let error = execute_plan_step_with_recovery(&transport, plan_id, step_id, request)
+    let error = execute_with_recovery(&transport, request)
         .await
         .unwrap_err();
     assert_eq!(error.code, "OUTCOME_UNKNOWN");

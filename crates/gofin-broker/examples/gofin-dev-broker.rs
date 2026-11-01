@@ -761,32 +761,6 @@ fn prepare_storage(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn reject_import_with_unresolved_records(database: &Path) -> Result<(), String> {
-    if !database.exists() {
-        return Ok(());
-    }
-    let store = Store::open(database)
-        .map_err(|_| "development journal could not be inspected".to_owned())?;
-    for record in store
-        .list_records()
-        .map_err(|_| "development journal could not be inspected".to_owned())?
-    {
-        let status = record
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if !matches!(
-            status,
-            "rejected" | "expired" | "cancelled" | "completed" | "failed"
-        ) {
-            return Err(
-                "credential replacement is blocked while an operation is unresolved".into(),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn config() -> BrokerConfigV2 {
     BrokerConfigV2 {
         version: 2,
@@ -827,10 +801,6 @@ async fn run(args: Args) -> Result<(), String> {
     let _lifetime_lock = EnvironmentLifetimeLock::acquire(environment_dir)?;
     prepare_storage(&args)?;
     if let Some(env_file) = &args.import_credentials {
-        let existing = profile::EnvironmentConfig::read(&args.config, &args.environment_id)?;
-        if !existing.credentials_is_empty() {
-            reject_import_with_unresolved_records(&args.database)?;
-        }
         profile::import(
             &args.config,
             &args.environment_id,
@@ -1160,7 +1130,7 @@ async fn build_runtime(
         .iter()
         .flat_map(|adapter| adapter.definitions())
         .map(|mut definition| {
-            gofin_broker::annotate_plan_discovery(&mut definition);
+            gofin_broker::annotate_execution_discovery(&mut definition);
             definition
         })
         .collect::<Vec<_>>();
@@ -1352,7 +1322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn development_auto_approval_does_not_bypass_financial_policy() {
+    async fn development_native_approval_ignores_retired_personal_usd_policy() {
         let directory = tempfile::tempdir().unwrap();
         let receipt_dir = directory.path().join("receipts");
         let adapter = Arc::new(SyntheticAdapter {
@@ -1384,15 +1354,9 @@ mod tests {
             })
             .await;
         assert!(response.ok);
-        assert_eq!(response.result.as_ref().unwrap()["status"], "failed");
-        assert_eq!(
-            response.result.as_ref().unwrap()["error"]["code"],
-            "MOVEMENT_LIMIT"
-        );
-        assert!(
-            !receipt_dir.exists(),
-            "over-limit action must not be submitted"
-        );
+        assert_eq!(response.result.as_ref().unwrap()["status"], "completed");
+        assert!(response.result.as_ref().unwrap()["submission"].is_object());
+        assert_eq!(fs::read_dir(&receipt_dir).unwrap().count(), 1);
     }
 }
 
@@ -1483,7 +1447,24 @@ async fn serve_peer(mut stream: UnixStream, environment: Arc<DevEnvironment>) {
                     let cancellable_read = request.cancel_on_disconnect
                         && operation.may_use_rpc_reads()
                         && runtime.request_uses_rpc_reads(&operation);
-                    let Some(mut response) =
+                    let financial_invocation = request.cancel_on_disconnect
+                        && matches!(
+                            operation,
+                            BrokerRequest::Execute { .. }
+                                | BrokerRequest::ContinueOperation { .. }
+                                | BrokerRequest::ReauthorizeOperation { .. }
+                        );
+                    let response = if financial_invocation {
+                        Some(
+                            gofin_protocol::progress::observe_financial_request(
+                                reader.get_mut(),
+                                request.progress,
+                                request.progress_details,
+                                runtime.handle_client_request(operation, false),
+                            )
+                            .await,
+                        )
+                    } else {
                         gofin_protocol::progress::observe_request_with_details(
                             reader.get_mut(),
                             request.progress,
@@ -1492,7 +1473,8 @@ async fn serve_peer(mut stream: UnixStream, environment: Arc<DevEnvironment>) {
                             runtime.handle_client_request(operation, cancellable_read),
                         )
                         .await
-                    else {
+                    };
+                    let Some(mut response) = response else {
                         return;
                     };
                     if is_capabilities

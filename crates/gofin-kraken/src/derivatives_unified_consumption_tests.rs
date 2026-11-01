@@ -192,7 +192,6 @@ async fn composed_overrun(grouped: bool, initially_corrupt: bool) {
             store.unresolved_consumption_usd(&mutation.id).unwrap(),
             None
         );
-        assert!(store.reservation_count(&mutation.id).unwrap() > 0);
         assert_eq!(
             running.status(&original.id, false).await.unwrap().effects,
             original_proofs
@@ -224,15 +223,11 @@ async fn composed_overrun(grouped: bool, initially_corrupt: bool) {
         .unwrap()
         .clone();
     let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&mutation.id).unwrap(),
-        Some("500000".into())
-    );
-    assert!(store.reservation_count(&mutation.id).unwrap() > 0);
-    let consumption = store
-        .unresolved_consumption_proof(&mutation.id)
-        .unwrap()
-        .unwrap();
+    let consumption = gofin_domain::unresolved_consumption::read(
+        mutation.last_reconciliation_evidence.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         consumption.scope,
         gofin_domain::unresolved_consumption::ConsumptionScope::NewMutationFinancialScope
@@ -273,12 +268,13 @@ async fn composed_overrun(grouped: bool, initially_corrupt: bool) {
         );
     }
     assert_eq!(running.execute(request).await.unwrap().id, mutation.id);
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&mutation.id).unwrap(),
-        Some("500000".into())
+    assert!(
+        gofin_domain::unresolved_consumption::read(
+            recovered.last_reconciliation_evidence.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_some()
     );
-    assert!(store.reservation_count(&mutation.id).unwrap() > 0);
     assert_eq!(
         running.status(&original.id, false).await.unwrap().effects,
         original_proofs

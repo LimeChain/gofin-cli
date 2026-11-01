@@ -447,7 +447,7 @@ impl KrakenProfile {
         );
         current.observed_at = gofin_domain::now();
         current.expires_at = (Utc::now() + Duration::seconds(90)).to_rfc3339();
-        gofin_domain::value_bounds::bind(&mut current);
+
         Ok(current)
     }
     pub(crate) async fn reconcile_derivative_batch(

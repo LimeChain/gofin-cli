@@ -308,6 +308,52 @@ async fn account_reads_keep_exact_decimal_strings_and_reject_unknown_parameters(
     assert_eq!(api.calls.lock().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn native_order_not_found_is_typed_without_concluding_client_id_nonexecution() {
+    struct MissingOrder;
+    #[async_trait]
+    impl CoinbaseApi for MissingOrder {
+        async fn request(
+            &self,
+            endpoint: CoinbaseEndpoint,
+            _: CoinbaseRequest,
+            _: Option<DispatchGuard>,
+        ) -> Result<CoinbaseResponse, CoinbaseError> {
+            assert!(matches!(endpoint, CoinbaseRoute::Order { .. }));
+            Ok(CoinbaseResponse::new(
+                404,
+                br#"{"error":"NOT_FOUND"}"#.to_vec(),
+            ))
+        }
+    }
+    let account = CoinbaseAccount {
+        name: "primary".into(),
+        resource: gofin_domain::ResourceId("coinbase:portfolio:p-1".into()),
+        credential_ref: "credential:1".into(),
+        physical_identity: "p-1".into(),
+        identity_verified: true,
+        portfolio_id: Some("p-1".into()),
+        product: CoinbaseProduct::Advanced,
+    };
+    let profile = CoinbaseProfile::new(
+        vec![account],
+        BTreeMap::from([(
+            "credential:1".into(),
+            Arc::new(MissingOrder) as Arc<dyn CoinbaseApi>,
+        )]),
+    )
+    .unwrap();
+    let error = profile
+        .read(
+            "coinbase.get-order",
+            &json!({"account":"primary","id":"missing-venue-order"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "VENUE_ORDER_NOT_FOUND");
+    assert_eq!(error.details.unwrap()["http_status"], 404);
+}
+
 #[test]
 fn order_schema_hides_multi_child_configs_without_an_authoritative_child_fill_graph() {
     let definition = contracts::definitions()

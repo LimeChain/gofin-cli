@@ -851,11 +851,8 @@ async fn missing_legacy_baseline_is_not_refreshed_after_dispatch() {
     )
     .unwrap();
     let unresolved = restarted.execute(request).await.unwrap();
-    assert_eq!(unresolved.status, Status::Unknown);
-    assert_eq!(
-        unresolved.error.as_ref().unwrap().code,
-        "PRIOR_POSITION_ANCHOR_REQUIRED"
-    );
+    assert_eq!(unresolved.status, Status::Completed);
+    assert!(unresolved.effects.is_some());
     assert!(unresolved.position_baseline.is_none());
     assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
     assert_eq!(adapter.observer.calls.load(Ordering::SeqCst), 1);

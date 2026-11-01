@@ -84,14 +84,16 @@
       "enrollment_dtos_reject_secret_fields_and_unknown_flags",
       "rpc_rejects_a_peer_that_is_not_the_expected_uid",
       "enrollment_fails_closed_before_privileged_action_without_terminal",
-      "policy_machine_mode_requires_human_even_with_a_terminal",
+      "retired_policy_set_refuses_without_privileged_or_broker_access",
       "administrator_notice_output_failure_prevents_exec",
       "machine_mode_refuses_privilege_even_with_terminal",
       "installed_cli_does_not_expose_development_mode_flags",
       "generate_requires_supported_network_and_explicit_name_only",
       "generate_machine_mode_and_invalid_names_never_use_broker_rpc",
       "privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata",
-      "development_enrollment_is_separate_from_financial_rpc_and_validates_names"
+      "development_enrollment_is_separate_from_financial_rpc_and_validates_names",
+      "dismissal_requires_human_confirmation_and_never_uses_financial_rpc",
+      "reauthorization_preserves_original_identity_token_and_explicit_terms"
     ]
   },
   {
@@ -119,19 +121,17 @@
     "target": [
       "--lib"
     ],
-    "reason": "Reject nonfinancial or changed authority, revoked execution, broadened plan scope and unauthorized reservation overrides.",
+    "reason": "Preserve native approval binding, one-use submission identity, Yolo admission cutoff and explicit continuation safety.",
     "tests": [
-      "sudo_configuration_authority_cannot_create_financial_writes_or_boundary_grants",
-      "stored_sudo_boundary_authority_is_rejected_before_relabeling",
+      "configuration_requires_human_route_and_observes_original_uncertain_submission",
       "financial_challenge_cannot_authorize_material_changes_on_revalidation",
-      "final_observation_refresh_runs_after_reservation_and_rejects_financial_tampering",
-      "sudo_cannot_create_or_reuse_named_plan_authority",
-      "generic_exact_dispatch_rejects_changed_protected_connection_identity",
-      "cumulative_parent_scope_cannot_be_widened_by_a_plan_revision",
-      "status_and_revoke_bypass_blocked_plan_preparation_and_revoke_prevents_dispatch",
-      "manual_resolution_rejects_wrong_authority_cancel_expiry_and_changed_snapshot",
-      "override_rejects_nonbiometric_authority_stale_review_and_concurrent_change",
-      "a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue"
+      "final_observation_refresh_rejects_financial_tampering_without_reservations",
+      "standalone_rejects_changed_protected_account_before_submission",
+      "fresh_candidate_outside_approved_terms_is_not_submitted",
+      "yolo_disable_blocks_unadmitted_write_but_admitted_identity_recovers",
+      "concurrent_requests_deduplicate_identity_without_cross_action_budget",
+      "unsubmitted_attempt_can_continue_with_original_approval_once",
+      "claimed_unsubmitted_attempt_recovers_under_exclusive_lease"
     ]
   },
   {
@@ -140,20 +140,16 @@
     "target": [
       "--lib"
     ],
-    "reason": "Reject fabricated credit, concealed loss, fee overruns, duplicated accounting and replay of uncertain submissions.",
+    "reason": "Retain original submission correlation, immutable proof checks and honest native-bound discrepancy reporting.",
     "tests": [
-      "failed_reconciliation_rejects_claimed_success_transfer",
-      "mismatched_approval_binding_cannot_settle_valid_receipt_effects",
-      "transaction_scoped_identity_without_verified_credit_cannot_settle_transfer",
-      "reverted_overrun_keeps_exact_proof_across_restart_and_blocks_new_authority_dispatch",
-      "completed_overrun_is_not_success_and_invalid_proof_is_not_claimed_verified",
-      "unrelated_credit_cannot_hide_inside_a_valid_conversion_cycle_step",
-      "pending_request_credit_rejects_recipient_asset_amount_and_duplicate_tampering",
-      "account_funding_budget_rejects_aggregate_overflow_even_with_larger_refunds",
-      "account_funding_budget_rejects_mismatched_missing_and_duplicate_pairs",
-      "cumulative_proofs_cannot_retract_reverse_or_change_asset_identity",
-      "uncertain_plan_child_is_reconciled_after_restart_without_replay",
-      "bridge_grant_cannot_renew_after_source_deposit_broadcast_is_uncertain"
+      "persisted_submit_error_survives_proofless_reconciliation_until_terminal_proof",
+      "invalid_receipt_is_not_claimed_and_verified_execution_remains_done",
+      "failed_over_cap_keeps_original_proof_and_does_not_block_unrelated_writes",
+      "missing_submission_in_legacy_unknown_is_not_replay_safe",
+      "corrupted_proof_digest_is_not_terminal_evidence",
+      "bridge_receipt_identity_accepts_explicit_transaction_scope_without_event_index",
+      "bridge_solana_receipt_identity_and_target_are_exact",
+      "cumulative_proofs_cannot_retract_reverse_or_change_asset_identity"
     ]
   },
   {
@@ -200,7 +196,8 @@
     "tests": [
       "request_is_typed_denies_unknown_methods_and_requires_newline",
       "request_frame_is_size_bounded",
-      "failed_or_unread_progress_cannot_cancel_or_repeat_financial_work"
+      "failed_or_unread_progress_cannot_cancel_or_repeat_financial_work",
+      "disconnected_compound_invocation_finishes_admitted_work_but_closes_admission"
     ]
   },
   {
@@ -220,7 +217,8 @@
       "failed_verified_transfer_discloses_credit_without_implying_a_safe_replay",
       "cctp_burn_and_waiting_states_do_not_claim_destination_completion",
       "generated_wallet_success_has_full_public_address_and_semantic_rows",
-      "enrollment_human_rows_stay_quiet_in_machine_mode_and_reject_invalid_results"
+      "enrollment_human_rows_stay_quiet_in_machine_mode_and_reject_invalid_results",
+      "outcome_reporting_and_refund_progress_do_not_relabel_execution"
     ]
   },
   {
@@ -289,12 +287,12 @@
       "--example",
       "gofin-dev-broker"
     ],
-    "reason": "Reject malformed example-only enrollment, uncertain configuration publication and mutation with unresolved operations.",
+    "reason": "Validate isolated enrollment and preserve uncertain publication without letting operation history block configuration.",
     "tests": [
       "example_enrollment_wire_is_strict_and_absent_from_production_protocol",
       "generation_rejects_bad_requests_before_staging",
       "failed_publication_reconciles_runtime_and_key_cleanup_without_guessing",
-      "unresolved_submissions_block_generation_and_removal"
+      "unresolved_submissions_do_not_block_generation_or_removal"
     ]
   },
   {
@@ -316,16 +314,12 @@
     "target": [
       "--lib"
     ],
-    "reason": "Preserve pending account and derived signer mappings, honor only verified human dispositions without retained holds, and permit unrelated wallet enrollment.",
+    "reason": "Preserve historical records while allowing protected connection changes independently of unresolved or malformed operations.",
     "tests": [
-      "enrollment_guards_honor_persisted_human_success_and_failure_after_restart",
-      "enrollment_guards_preserve_unresolved_work_after_reservation_release",
-      "enrollment_guards_preserve_retained_lifecycle_holds_after_human_resolution",
-      "enrollment_guards_reject_invalid_and_failed_human_resolutions",
       "enrollment_mapping_guard_allows_unrelated_wallet_lifecycle_with_unknown_owner",
-      "enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes",
-      "enrollment_mapping_guard_retains_resolution_holds_only_on_affected_mappings",
-      "enrollment_mapping_guard_fails_closed_on_corrupt_touched_operation"
+      "enrollment_changes_remain_available_with_pending_owner",
+      "enrollment_changes_preserve_attested_history_without_holding_configuration",
+      "enrollment_changes_do_not_parse_corrupt_operation_history"
     ]
   }
 ]

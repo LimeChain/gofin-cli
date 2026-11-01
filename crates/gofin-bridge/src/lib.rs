@@ -132,6 +132,58 @@ pub struct FeeCap {
     pub maximum_usd_micros: Option<u64>,
 }
 
+/// Public schemas expose native bounds while the wire types retain historical
+/// fields so old signed records can still be decoded and reconciled.
+pub fn native_bridge_input_schema(mut schema: serde_json::Value) -> serde_json::Value {
+    if let Some(properties) = schema
+        .pointer_mut("/$defs/BridgeBounds/properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in [
+            "input_usd_micros",
+            "source_usd_per_unit_micros",
+            "maximum_total_usd_micros",
+        ] {
+            properties.remove(field);
+        }
+    }
+    if let Some(properties) = schema
+        .pointer_mut("/$defs/FeeCap/properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("maximum_usd_micros");
+    }
+    schema
+}
+
+#[cfg(test)]
+mod native_schema_tests {
+    use super::*;
+    #[test]
+    fn public_quote_and_transfer_schemas_exclude_retired_usd_bounds() {
+        for schema in [
+            schemars::schema_for!(BridgeQuoteInput),
+            schemars::schema_for!(BridgeTransferInput),
+        ] {
+            let schema = native_bridge_input_schema(serde_json::to_value(schema).unwrap());
+            let bounds = &schema["$defs"]["BridgeBounds"]["properties"];
+            for field in [
+                "input_usd_micros",
+                "source_usd_per_unit_micros",
+                "maximum_total_usd_micros",
+            ] {
+                assert!(bounds.get(field).is_none());
+            }
+            assert!(
+                schema["$defs"]["FeeCap"]["properties"]
+                    .get("maximum_usd_micros")
+                    .is_none()
+            );
+            assert!(bounds.get("minimum_net_receipt").is_some());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuoteClass {
@@ -417,6 +469,12 @@ pub struct BridgeTransferInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BridgeExecuteIntentInput {
+    /// Latest Unix second at which this action may admit another stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_deadline: Option<u64>,
+    /// Optional CCTP mode; omission selects standard mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp: Option<cctp::CctpOptions>,
     pub intent: BridgeExecuteIntent,
     pub allowed_providers: std::collections::BTreeSet<String>,
     pub bounds: BridgeBounds,
@@ -427,8 +485,12 @@ pub struct BridgeExecuteIntentInput {
 pub struct BridgeExecuteIntent {
     pub wallet: String,
     pub source: BridgeAssetInput,
+    #[serde(default)]
     pub destination_chain_id: u64,
+    #[serde(default)]
     pub destination_assets: Vec<BridgeAssetInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_destination: Option<SolanaDestinationInput>,
     pub recipient: String,
     pub refund_to: String,
     pub allowed_refund_assets: Vec<BridgeAssetInput>,
@@ -438,6 +500,10 @@ pub struct BridgeExecuteIntent {
 /// The plan declaration uses the intent form; each execution uses one saved
 /// child nomination. The disjoint field sets keep both contracts explicit.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Public untagged input retains its historical wire shape."
+)]
 #[serde(untagged)]
 pub enum BridgeExecuteInput {
     Intent(BridgeExecuteIntentInput),
@@ -805,6 +871,26 @@ impl BridgeStep {
 #[cfg(test)]
 mod binding_tests {
     use super::{BridgeStepBinding, BridgeStepKind, BridgeTransferRef};
+
+    #[test]
+    fn compound_intent_accepts_explicit_solana_destination_and_preserves_evm_shape() {
+        let common = serde_json::json!({"wallet":"source","source":{"chainId":8453,"token":"usdc"},"recipient":"owner","refundTo":"sender","allowedRefundAssets":[],"amount":{"minimum":"10","maximum":"10"}});
+        let mut solana = common.clone();
+        solana["solanaDestination"] = serde_json::json!({"network":"solana:mainnet-beta","wallet":"destination","mint":"usdc-mint"});
+        let parsed: super::BridgeExecuteIntent = serde_json::from_value(solana).unwrap();
+        assert_eq!(parsed.destination_chain_id, 0);
+        assert!(parsed.destination_assets.is_empty());
+        assert_eq!(
+            parsed.solana_destination.unwrap().wallet.as_deref(),
+            Some("destination")
+        );
+        let mut evm = common;
+        evm["destinationChainId"] = serde_json::json!(42161);
+        evm["destinationAssets"] = serde_json::json!([{"chainId":42161,"token":"usdc"}]);
+        let parsed: super::BridgeExecuteIntent = serde_json::from_value(evm).unwrap();
+        assert_eq!(parsed.destination_chain_id, 42161);
+        assert!(parsed.solana_destination.is_none());
+    }
 
     #[test]
     fn engine_step_binding_is_exact_and_stable() {

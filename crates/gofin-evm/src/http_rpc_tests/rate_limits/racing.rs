@@ -1,6 +1,42 @@
 use super::*;
 
 #[tokio::test]
+async fn read_http_499_does_not_cancel_slower_healthy_provider() {
+    let mut cancelled = Reply::result("0x0");
+    cancelled.status = 499;
+    let primary = Server::new(vec![Reply::result("0x1"), cancelled]);
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2a").delayed(Duration::from_millis(40)),
+    ]);
+    let rpc =
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap();
+    assert_eq!(
+        rpc.request("eth_getBalance", balance_params())
+            .await
+            .unwrap(),
+        json!("0x2a")
+    );
+    assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-2");
+    let mut write_cancelled = Reply::result("0x0");
+    write_cancelled.status = 499;
+    let write_server = Server::new(vec![write_cancelled]);
+    let failure = rpc
+        .at_once(
+            &write_server.url,
+            "eth_sendRawTransaction",
+            json!(["0x00"]),
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !failure.retryable,
+        "a write must never treat HTTP 499 as retryable"
+    );
+}
+
+#[tokio::test]
 async fn bytecode_server_rejection_waits_for_validated_fallback_without_retry() {
     for (backup_reply, expected) in [
         (Reply::result("0x6000"), Ok(json!("0x6000"))),

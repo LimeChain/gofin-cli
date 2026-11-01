@@ -573,16 +573,11 @@ async fn native_correlated_fee_overrun_keeps_gross_watermark_without_settlement_
         unresolved.preview.as_ref().unwrap().input["maximumFees"]["USD"],
         "0.4"
     );
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&unresolved.id).unwrap(),
-        Some("100000".into())
-    );
-    assert!(store.reservation_count(&unresolved.id).unwrap() > 0);
-    let proof = store
-        .unresolved_consumption_proof(&unresolved.id)
-        .unwrap()
-        .unwrap();
+    let proof = gofin_domain::unresolved_consumption::read(
+        unresolved.last_reconciliation_evidence.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(proof.submission, unresolved.submission.clone().unwrap());
     let gross = proof
         .costs
@@ -603,18 +598,18 @@ async fn native_correlated_fee_overrun_keeps_gross_watermark_without_settlement_
         "0.5"
     );
     assert!(proof.costs.iter().any(|effect|matches!(effect,FinancialEffect::Cost{category,amount,..} if category=="krakenfutures_commission"&&amount.atoms.to_decimal(36)=="0.5")));
-    drop(store);
     drop(running);
     let restarted = engine(&path, venue.clone());
     let duplicate = restarted.status(&unresolved.id, true).await.unwrap();
     assert_eq!(duplicate.status, Status::Unknown);
     assert!(duplicate.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&unresolved.id).unwrap(),
-        Some("100000".into())
+    assert!(
+        gofin_domain::unresolved_consumption::read(
+            duplicate.last_reconciliation_evidence.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_some()
     );
-    assert!(store.reservation_count(&unresolved.id).unwrap() > 0);
     assert_eq!(
         venue
             .inner

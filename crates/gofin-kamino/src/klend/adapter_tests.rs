@@ -433,7 +433,7 @@ async fn collateral_withdrawal_receipt_plan_preserves_existing_permission_after_
     wrong = target.clone();
     wrong.amount.asset = asset(&token(9));
     assert!(!adapter.plan_has_finite_non_cash_source(OP_WITHDRAW, &permission, &wrong));
-    let mut request: gofin_domain::financial_plans::FinancialPlanAuthorizationRequest = serde_json::from_value(json!({
+    let request: gofin_domain::financial_plans::FinancialPlanAuthorizationRequest = serde_json::from_value(json!({
         "request_id":"withdraw-finite-source","valid_for_seconds":600,
         "plan":{"version":1,"name":"Synthetic collateral withdrawal","steps":[{
             "step_id":"withdraw","operation":OP_WITHDRAW,"input":raw,"permitted_variations":b,
@@ -447,24 +447,12 @@ async fn collateral_withdrawal_receipt_plan_preserves_existing_permission_after_
         gofin_engine::EngineOptions::default(),
     )
     .unwrap();
-    let review = engine
+    let error = engine
         .preview_financial_plan(request.clone())
         .await
-        .unwrap();
-    request.expected_review_hash = Some(review.review_hash);
-    let status = engine.authorize_financial_plan(request).await.unwrap();
-    assert_eq!(status.next_eligible_step_id.as_deref(), Some("withdraw"));
-    assert_eq!(
-        status.revision.permissions[0].permission.as_ref().unwrap(),
-        &permission
-    );
-    // Public status reloads the durable plan rather than preparing new metadata.
-    let reloaded = engine
-        .financial_plan_status(&status.revision.plan_id)
-        .await
-        .unwrap();
-    assert_eq!(reloaded.revision, status.revision);
-    assert_eq!(reloaded.next_eligible_step_id.as_deref(), Some("withdraw"));
+        .unwrap_err();
+    assert_eq!(error.code, "EXECUTION_INTERFACE_RETIRED");
+    assert_eq!(permission.spec.parameters["maximum_amount_atoms"], "200");
 }
 
 #[tokio::test]
@@ -517,23 +505,18 @@ async fn engine_previews_and_authorizes_zero_and_positive_fee_borrow_permissions
             gofin_engine::EngineOptions::default(),
         )
         .unwrap();
-        let mut request: gofin_domain::financial_plans::FinancialPlanAuthorizationRequest = serde_json::from_value(json!({
+        let request: gofin_domain::financial_plans::FinancialPlanAuthorizationRequest = serde_json::from_value(json!({
             "request_id":format!("borrow-fee-{fee}"),"valid_for_seconds":600,
             "plan":{"version":1,"name":"Synthetic native borrow","steps":[{
                 "step_id":"borrow","operation":OP_BORROW,"input":raw,"permitted_variations":permission_bounds,
                 "completion":{"operation_succeeded":true},"funding_dependencies":[]
             }],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":permission.spec.maximum_costs}}
         })).unwrap();
-        let review = engine
+        let error = engine
             .preview_financial_plan(request.clone())
             .await
-            .unwrap();
-        request.expected_review_hash = Some(review.review_hash);
-        let authorized = engine.authorize_financial_plan(request).await.unwrap();
-        assert_eq!(
-            authorized.revision.status,
-            gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Active
-        );
+            .unwrap_err();
+        assert_eq!(error.code, "EXECUTION_INTERFACE_RETIRED");
 
         // The missing zero-valued accounting row grants no fee authority:
         // canonical parameters still reject a candidate that raises its cap.

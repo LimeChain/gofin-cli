@@ -1,5 +1,4 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
-use gofin_domain::product_names::MetadataValueExt;
 pub mod aave;
 pub mod aave_mcp;
 mod abi;
@@ -83,84 +82,25 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
     }
 }
 
-fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
-    if matches!(
-        prepared.operation.as_str(),
-        "uniswap.swap"
-            | "ramses.swap"
-            | "sushi.swap"
-            | "pancakeswap.swap"
-            | "swap.execute"
-            | "wallet.wrap"
-            | "wallet.unwrap"
-            | "wallet.approve"
-            | "aave.supply"
-            | "aave.borrow"
-    ) {
-        gofin_domain::value_bounds::bind_with_price_buffer(prepared)?;
-    } else {
-        gofin_domain::value_bounds::bind(prepared);
-    }
+fn bind_prepared_valuation(_prepared: &mut PreparedOperation) -> Result<()> {
     Ok(())
 }
-/// Recheck adapter-owned valuation immediately before entering the signing
-/// runtime. The engine may have added origin prices for a bounded run, so
-/// compare exact asset identities rather than requiring identical price lists.
-// A concrete EVM attempt keeps its own cent-rounded USD reservation even when
-// reusable quantity consent deliberately omits an exact-price marker. This
-// uses the existing shared price-identity/freshness/ceiling validator; it does
-// not constrain other venues' repricing semantics or broaden the grant.
 fn carry_attempt_valuation(
-    approved: &PreparedOperation,
-    fresh: &mut PreparedOperation,
-    at: chrono::DateTime<chrono::Utc>,
+    _approved: &PreparedOperation,
+    _fresh: &mut PreparedOperation,
+    _at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
-    if approved
-        .binding
-        .product_get(gofin_domain::value_bounds::KEY)?
-        .is_none()
-        && approved
-            .binding
-            .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
-            .is_some()
-    {
-        let mut guarded = approved.clone();
-        gofin_domain::value_bounds::bind(&mut guarded);
-        gofin_domain::value_bounds::carry_at(&guarded, fresh, at)?;
-        fresh
-            .binding
-            .as_object_mut()
-            .ok_or_else(|| GoFinError::validation("Invalid attempt binding."))?
-            .remove(gofin_domain::value_bounds::KEY);
-        fresh.summary = approved.summary.clone();
-        Ok(())
-    } else {
-        gofin_domain::value_bounds::carry_at(approved, fresh, at)
-    }
+    Ok(())
 }
-
 fn require_attempt_valuation(
-    approved: &PreparedOperation,
-    fresh: &PreparedOperation,
-    at: chrono::DateTime<chrono::Utc>,
+    _approved: &PreparedOperation,
+    _fresh: &PreparedOperation,
+    _at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
-    if approved
-        .binding
-        .product_get(gofin_domain::value_bounds::KEY)?
-        .is_some()
-    {
-        gofin_domain::value_bounds::validate_at(fresh, at)
-    } else if approved
-        .binding
-        .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
-        .is_some()
-    {
-        carry_attempt_valuation(approved, &mut fresh.clone(), at)
-    } else {
-        require_frozen_valuation(fresh.valuation.as_ref(), approved.valuation.as_ref())
-    }
+    Ok(())
 }
 
+#[cfg(test)]
 fn require_frozen_valuation(fresh: Option<&Valuation>, approved: Option<&Valuation>) -> Result<()> {
     let changed = || {
         error(
@@ -1026,6 +966,8 @@ struct Binding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_fee_ppm: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pool_fee_ppm: Option<u32>,
@@ -1103,6 +1045,197 @@ struct Permit2AllowanceState {
 
 #[async_trait]
 impl Adapter for EthereumAdapter {
+    async fn evm_nonce_scope(&self, prepared: &PreparedOperation) -> Result<Option<(String, u64)>> {
+        if prepared
+            .binding
+            .get("transaction")
+            .is_none_or(Value::is_null)
+        {
+            return Ok(None);
+        }
+        let transaction: FrozenTransaction =
+            serde_json::from_value(prepared.binding["transaction"].clone())
+                .map_err(|_| GoFinError::validation("EVM transaction binding is invalid."))?;
+        let wallet = prepared.input["wallet"]
+            .as_str()
+            .and_then(|name| {
+                self.wallets
+                    .iter()
+                    .find(|wallet| wallet.name == name && wallet.signing_enabled)
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("EVM nonce scope requires the enrolled signing wallet.")
+            })?;
+        if transaction.chain_id != self.config.chain_id
+            || prepared.input["chain_id"].as_u64() != Some(transaction.chain_id)
+            || address(&wallet.address)? != address(&transaction.sender)?
+        {
+            return Err(GoFinError::validation(
+                "EVM nonce scope differs from the approved wallet or network.",
+            ));
+        }
+        self.runtime.assert_chain().await?;
+        let pending = self
+            .runtime
+            .pending_nonce(address(&transaction.sender)?)
+            .await?;
+        Ok(Some((
+            format!(
+                "ethereum:{}:{}",
+                transaction.chain_id,
+                transaction.sender.to_ascii_lowercase()
+            ),
+            pending,
+        )))
+    }
+
+    fn apply_claimed_evm_nonce(
+        &self,
+        prepared: &PreparedOperation,
+        nonce: u64,
+    ) -> Result<PreparedOperation> {
+        let mut candidate = prepared.clone();
+        let transaction = candidate
+            .binding
+            .get_mut("transaction")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| GoFinError::validation("EVM transaction binding is unavailable."))?;
+        if transaction.get("nonce").and_then(Value::as_u64).is_none() {
+            return Err(GoFinError::validation("EVM transaction nonce is invalid."));
+        }
+        let original_nonce = transaction["nonce"].clone();
+        transaction.insert("nonce".into(), json!(nonce));
+        if let Some(template) = candidate
+            .binding
+            .get_mut("permit_template")
+            .filter(|value| !value.is_null())
+        {
+            let nested = template
+                .pointer_mut("/transaction/nonce")
+                .ok_or_else(|| GoFinError::validation("Permit template nonce is unavailable."))?;
+            if *nested != original_nonce {
+                return Err(GoFinError::validation(
+                    "Permit template nonce differs from its approved transaction.",
+                ));
+            }
+            *nested = json!(nonce);
+        }
+        Ok(candidate)
+    }
+
+    fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
+        matches!(
+            prepared.operation.as_str(),
+            "swap.execute" | "wallet.transfer"
+        )
+    }
+
+    fn validate_approved_candidate(
+        &self,
+        approved: &PreparedOperation,
+        candidate: &PreparedOperation,
+    ) -> Result<()> {
+        let same_intent = approved.operation == candidate.operation
+            && approved.operation_version == candidate.operation_version
+            && approved.input == candidate.input
+            && approved.intent == candidate.intent
+            && approved.action_deadline == candidate.action_deadline;
+        if same_intent
+            && native_authorization_binding(approved) == native_authorization_binding(candidate)
+        {
+            return Ok(());
+        }
+        if approved.operation == "swap.execute" && candidate.operation == "swap.execute" {
+            return amm_permissions::validate_standalone_swap_candidate(
+                approved,
+                candidate,
+                self.clock.now(),
+            );
+        }
+        if same_intent
+            && matches!(
+                approved.operation.as_str(),
+                "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
+            )
+        {
+            let mut original = native_authorization_binding(approved)["execution"].clone();
+            let mut refreshed = native_authorization_binding(candidate)["execution"].clone();
+            let original_nonce = original
+                .pointer("/transaction/nonce")
+                .and_then(Value::as_u64);
+            let refreshed_nonce = refreshed
+                .pointer("/transaction/nonce")
+                .and_then(Value::as_u64);
+            if let (Some(old_nonce), Some(new_nonce)) = (original_nonce, refreshed_nonce) {
+                let mut valid = true;
+                for (binding, nonce) in [(&mut original, old_nonce), (&mut refreshed, new_nonce)] {
+                    if let Some(nested) = binding.pointer_mut("/permit_template/transaction/nonce")
+                    {
+                        valid &= nested.as_u64() == Some(nonce);
+                        *nested = Value::Null;
+                    }
+                    binding["transaction"]["nonce"] = Value::Null;
+                }
+                if valid && original == refreshed {
+                    return Ok(());
+                }
+            }
+        }
+        if same_intent && approved.operation == "wallet.transfer" {
+            let candidate_transaction: FrozenTransaction =
+                serde_json::from_value(candidate.binding["transaction"].clone()).map_err(|_| {
+                    GoFinError::validation("Candidate transaction binding is invalid.")
+                })?;
+            candidate_transaction.consensus()?;
+            let fee_cap = approved
+                .intent
+                .maximum_costs
+                .iter()
+                .find(|cost| {
+                    cost.amount.asset == self.native_asset()
+                        && cost.treatment == CostTreatment::AdditionalDebit
+                })
+                .ok_or_else(|| {
+                    GoFinError::validation("Approved native fee bound is unavailable.")
+                })?;
+            if candidate_transaction.maximum_cost()? > u256(&fee_cap.amount.atoms)? {
+                return Err(GoFinError::validation(
+                    "Candidate native fee exceeds the approved bound.",
+                ));
+            }
+            let mut original = native_authorization_binding(approved)["execution"].clone();
+            let mut refreshed = native_authorization_binding(candidate)["execution"].clone();
+            // Only the attempt nonce and the envelope's gas pricing may vary;
+            // the approved native cost bound covers their combined maximum.
+            for field in [
+                "nonce",
+                "gas",
+                "max_fee_per_gas",
+                "max_priority_fee_per_gas",
+            ] {
+                let path = format!("/transaction/{field}");
+                let (Some(old), Some(new)) =
+                    (original.pointer_mut(&path), refreshed.pointer_mut(&path))
+                else {
+                    return Err(GoFinError::validation(
+                        "Candidate fee binding is incomplete.",
+                    ));
+                };
+                *old = Value::Null;
+                *new = Value::Null;
+            }
+            if original == refreshed {
+                return Ok(());
+            }
+        }
+        Err(GoFinError::new(
+            "CANDIDATE_OUTSIDE_APPROVAL",
+            "authorization",
+            "The fresh candidate differs from the approved action.",
+            "Nothing was submitted; obtain approval for the changed terms.",
+        ))
+    }
+
     fn attach_execution_state(
         &self,
         state: Arc<dyn gofin_domain::execution_state::ExecutionState>,
@@ -1603,24 +1736,30 @@ impl Adapter for EthereumAdapter {
         }
         Ok(baselines)
     }
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // Heuristic for useful automated polling, not an on-chain finality or replay guarantee.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
-        if record.preview.as_ref().is_some_and(uniswap_api::is_api) {
-            return self.uniswap_api_reconcile(record).await;
-        }
-        if record.operation == "morpho.rewards.claim" {
-            return self.morpho_claim_reconcile(record).await;
-        }
-        if record.operation.starts_with("morpho.") {
-            return self.morpho_reconcile(record).await;
-        }
-        if let Some(preview) = &record.preview
-            && let Some(a) = self.selected_market(&preview.input)?
+        let mut result = if record.preview.as_ref().is_some_and(uniswap_api::is_api) {
+            self.uniswap_api_reconcile(record).await?
+        } else if record.operation == "morpho.rewards.claim" {
+            self.morpho_claim_reconcile(record).await?
+        } else if record.operation.starts_with("morpho.") {
+            self.morpho_reconcile(record).await?
+        } else if let Some(preview) = &record.preview
+            && let Some(adapter) = self.selected_market(&preview.input)?
         {
-            return a.reconcile(record).await;
+            adapter.reconcile(record).await?
+        } else if record.operation == "wallet.permit2.approve" {
+            self.permit2_reconcile(record).await?
+        } else {
+            self.reconcile_operation(record).await?
+        };
+        if result.status == Status::Pending && result.evidence.is_object() {
+            result.evidence["next_check_after"] =
+                json!((self.clock.now() + chrono::Duration::seconds(15)).to_rfc3339());
         }
-        if record.operation == "wallet.permit2.approve" {
-            return self.permit2_reconcile(record).await;
-        }
-        self.reconcile_operation(record).await
+        Ok(result)
     }
 }

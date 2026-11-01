@@ -194,7 +194,15 @@ pub(crate) fn validate_candidate_at(
         request.min_output.as_deref().expect("parsed floor"),
         b.output.decimals,
     )?;
-    let minimum = rate_floor.max(absolute_floor).max(requested_floor);
+    let slip_bps = request.slippage_bps.unwrap_or(100);
+    let relative_floor = b.quote_output.mul_div_ceil(
+        &Quantity::from_u64(10_000 - u64::from(slip_bps)),
+        &Quantity::from_u64(10_000),
+    )?;
+    let minimum = rate_floor
+        .max(absolute_floor)
+        .max(requested_floor)
+        .max(relative_floor);
     if b.minimum_output.is_zero() || b.minimum_output < minimum || b.minimum_output > b.quote_output
     {
         return Err(fail(

@@ -1,0 +1,74 @@
+{
+  "schema_version": 25,
+  "synthetic": true,
+  "generator": "examples/capture_schema25.rs",
+  "records": [
+    "pending-withdrawal",
+    "unknown-order",
+    "accounting-blocked",
+    "partial-bridge"
+  ],
+  "includes": [
+    "submission identities",
+    "reservations",
+    "active financial plan"
+  ],
+  "limitations": [
+    "synthetic operation records do not contain provider-specific proof or policy data"
+  ],
+  "additional_fixture": {
+    "file": "schema25-attestations.sqlite",
+    "generator": "examples/capture_schema25_attestations.rs",
+    "includes": [
+      "human reservation override",
+      "human operation resolution"
+    ]
+  },
+  "grant_fixture": {
+    "file": "schema25-grants.sqlite",
+    "generator": "examples/capture_schema25_grants.rs",
+    "includes": [
+      "active synthetic boundary authorization"
+    ]
+  },
+  "bridge_fixture": {
+    "file": "schema25-partial-bridge.sqlite",
+    "generator": "examples/capture_schema25_bridge.rs",
+    "includes": [
+      "in-transit bridge transfer",
+      "source submission identity"
+    ],
+    "limitations": [
+      "no individual bridge stage rows"
+    ]
+  },
+  "bridge_stage_fixture": {
+    "file": "schema25-bridge-stages.sqlite",
+    "generator": "examples/capture_schema25_bridge_stages.rs",
+    "includes": [
+      "submitted source stage and original submission identity",
+      "unsubmitted dependent destination stage"
+    ]
+  },
+  "hyperliquid_fixture": {
+    "file": "schema25-hyperliquid-sell.sqlite",
+    "generator": "baseline integration test with examples/capture_schema25_hyperliquid.patch",
+    "includes": [
+      "synthetic 0.95 SOL sell",
+      "90.95 directional limit",
+      "95.75 verified favorable fill",
+      "legacy approval binding and original submission"
+    ],
+    "note": "baseline test fixture with synthetic owner and order identities"
+  },
+  "finite_policy_fixture": {
+    "file": "schema25-finite-policy.json",
+    "generator": "baseline broker example examples/capture_schema25_policy.rs.txt",
+    "includes": [
+      "baseline-validated protected configuration with 50 USD movement and run-allocation limits"
+    ],
+    "note": "Synthetic active run records 100 USD initial allocation and 90 USD spent against companion 50 USD finite protected limits; generated through baseline store API.",
+    "usage_store": "schema25-over-limit.sqlite",
+    "usage_generator": "examples/capture_schema25_over_limit.rs"
+  }
+}

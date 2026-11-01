@@ -1,7 +1,7 @@
 # Companion skill
 
 GoFin's optional skill teaches an agent to discover the installed CLI, preview
-operations, respect protected human enrollment and per-write authorization, and
+operations, respect protected human enrollment and per-action authorization, and
 reconcile uncertain outcomes. It does not authorize financial actions. Current
 operations, networks and provider details come from `capabilities`, `explain`
 and `schema`, rather than a second catalog in the skill.
@@ -11,24 +11,31 @@ Only the human's verified local or macOS system OpenSSH terminal and fresh sudo
 can enable or disable it;
 machine on/off return a handoff. When explicitly enabled, agents may execute
 the requested financial intent without another per-action human approval,
-while keeping exact bounds, limits and explicit step submission. The skill
+while keeping native bounds and broker validation at each stage admission. The skill
 reports Yolo provenance, preserves admitted/uncertain identities and never
 tries to enable it through agent tools. Disable invalidates unused Yolo
 authority permanently and does not cancel admitted venue submissions.
 
-The agent gives a plan an intent-led name and one complementary financial
-`summary` sentence covering its input, outcome and material fee cap. Name and
-summary together fit within 140 Unicode characters, with names still limited
-to 80. Both are bound to the review and shown in full in Touch ID; they convey
-caller-authored intent while GoFin enforces the structured plan independently.
-Older plans can omit the summary without changing their approval bindings.
+The agent requests logical actions with native economic terms. A supported
+compound action can advance its declared stages under one approval while the
+invocation remains active. Separate logical actions retain separate authority;
+grouping them in an agent's workflow does not create a shared grant. Quote and
+payload refresh are adapter-specific and must stay within approved terms.
+
+Observation never approves or dispatches. After a long wait or interruption, the
+agent observes the original identity and follows broker-returned continuation or
+reauthorization arguments. Successful stages and filled amounts are preserved,
+and spent fees remain counted. There is no background runner. Disconnect stops
+new stage admission while admitted immutable submissions may finish. Unconfirmed
+history does not globally block unrelated work, but dependent actions still need
+verified prerequisites. Dismissal changes a listing label, not financial facts.
+
 The skill also asks for brief updates at milestones established by GoFin's
 results, with status/reconciliation for pending work and no invented progress.
-When installed discovery advertises it, the skill uses `--json --stream` for
-financial execution and reconciliation, relays meaningful broker stages, and
-reads the final result status before claiming completion. Ordinary `--json`
-remains a single value for existing consumers. Stream interruption requires
-recovering the same identity, never a fresh financial action.
+Progress modes and command arguments come from installed discovery. The agent
+relays meaningful broker stages and reads the final result before claiming
+completion. Stream interruption requires recovering the same identity, never a
+fresh financial action.
 Agents relay those stages in conversation while consuming the stream; raw tool
 output alone does not keep the human informed. They combine closely spaced
 events, give a brief factual update about once a minute during longer waits,

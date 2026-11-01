@@ -126,6 +126,8 @@ gofin_changed=''
 gofin_backup=''
 gofin_replacing=0
 gofin_complete=0
+gofin_schema_upgrade=0
+gofin_forward_only=0
 gofin_locked=0
 gofin_auth_initial=0
 gofin_auth_changed=0
@@ -229,7 +231,11 @@ service_is_running() {
 cleanup() {
   local gofin_exit=$?
   trap - EXIT HUP INT TERM
-  if [ "$gofin_replacing" = 1 ] && [ "$gofin_complete" = 0 ]; then
+  if [ "$gofin_replacing" = 1 ] && [ "$gofin_complete" = 0 ] && { [ "$gofin_forward_only" = 1 ] || [ -f "$gofin_backup/forward-only" ]; }; then
+    echo 'The new runtime has been committed for journal migration; it will not be rolled back. Preserve the runtime backup and retry recovery.' >&2
+    gofin_analytics_rollback=not-needed
+    gofin_exit=1
+  elif [ "$gofin_replacing" = 1 ] && [ "$gofin_complete" = 0 ]; then
     echo 'Update failed/interrupted; restoring changed runtime files from the verified backup.' >&2
     local gofin_restore_ok=1
     sync_runtime_paths
@@ -300,6 +306,7 @@ cleanup() {
     fi
     if [ "$gofin_restore_ok" = 1 ]; then
       gofin_analytics_rollback=restored
+      /bin/rm -f "$gofin_backup/recovery-ready"
       echo 'Previous runtime restored. Saved state was preserved.' >&2
     else
       gofin_analytics_rollback=uncertain
@@ -319,7 +326,7 @@ cleanup() {
     wait "$gofin_maintenance_pid" 2>/dev/null || true
   fi
   sync_runtime_paths
-  if [ "$gofin_locked" = 1 ]; then /bin/rmdir "$gofin_update_lock"; fi
+  if [ "$gofin_locked" = 1 ]; then /bin/rm -f "$gofin_update_lock/pid" "$gofin_update_lock/phase"; /bin/rmdir "$gofin_update_lock"; fi
   # Observe rollback first. Optional work after commit cannot change success.
   if [ "$gofin_complete" = 1 ]; then
     gofin_analytics_stage=complete
@@ -346,8 +353,29 @@ if [ "$gofin_public_release" = 1 ] && [ "$gofin_old_name" = gofin ] && [ "$gofin
   if [ -n "$gofin_analytics_from" ]; then gofin_analytics_enabled=1; fi
 fi
 [ "$(/usr/bin/stat -f '%d' "$gofin_runtime")" = "$(/usr/bin/stat -f '%d' "$gofin_install_root")" ] || fail 'Runtime and staging must share a filesystem for atomic file replacement.'
-/bin/mkdir "$gofin_update_lock" || fail 'Another runtime update or an interrupted update needs inspection; preserve existing backups.'
+if ! /bin/mkdir "$gofin_update_lock"; then
+  # Recover only a lock whose owning updater is known to have exited and whose
+  # write-ahead marker exists. Unknown locks stay untouched.
+  [ -f "$gofin_update_lock/pid" ] && [ ! -L "$gofin_update_lock/pid" ] || fail 'Another runtime update or an interrupted update needs inspection; preserve existing backups.'
+  gofin_lock_owner=$(cat "$gofin_update_lock/pid")
+  case "$gofin_lock_owner" in ''|*[!0-9]*) fail 'The update lock identity is invalid.' ;; esac
+  kill -0 "$gofin_lock_owner" 2>/dev/null && fail 'Another runtime update is active.'
+  gofin_recovery_found=0
+  for gofin_candidate in "$gofin_install_root"/runtime-backup.*/recovery-ready; do
+    [ -f "$gofin_candidate" ] && [ ! -L "$gofin_candidate" ] && gofin_recovery_found=$((gofin_recovery_found + 1))
+  done
+  if [ "$gofin_recovery_found" != 1 ]; then
+    # Preparation never changes runtime files. Reclaim this known-dead lock
+    # only when that phase was durably recorded; unknown states stay intact.
+    [ "$gofin_recovery_found" = 0 ] && [ -f "$gofin_update_lock/phase" ] && [ ! -L "$gofin_update_lock/phase" ] && [ "$(cat "$gofin_update_lock/phase")" = preparation ] || fail 'An interrupted update needs inspection; preserve existing backups.'
+  fi
+  /bin/rm -f "$gofin_update_lock/pid" "$gofin_update_lock/phase"
+  /bin/rmdir "$gofin_update_lock" || fail 'The interrupted update lock could not be recovered.'
+  /bin/mkdir "$gofin_update_lock" || fail 'Another runtime update started during recovery.'
+fi
 gofin_locked=1
+printf '%s\n' "$$" > "$gofin_update_lock/pid"
+printf '%s\n' preparation > "$gofin_update_lock/phase"
 if [ "$gofin_namespace_migration" = 1 ]; then
   [ "$(/usr/bin/stat -f '%d' "$gofin_install_root")" = "$(/usr/bin/stat -f '%d' /Library)" ] || fail 'Protected root migration requires an atomic same-filesystem rename.'
   for gofin_existing in "$gofin_target_plist" "$gofin_target_path_file"; do
@@ -359,8 +387,67 @@ if [ "$gofin_public_release" = 1 ]; then
   [ "$gofin_from" = "$gofin_runtime" ] || fail 'Public updates must preserve the fixed installed runtime as their source.'
 fi
 gofin_analytics_stage=verify
-check_bundle "$gofin_from" "$gofin_old_name"
 check_bundle "$gofin_to" gofin
+# A durable write-ahead marker means an earlier process may have been killed
+# at any replacement boundary. Complete from its protected, signed staged copy;
+# never infer that a partially installed bundle is safe to roll back.
+gofin_recovery_backup=''
+for gofin_marker in "$gofin_install_root"/runtime-backup.*/recovery-ready; do
+  [ -f "$gofin_marker" ] && [ ! -L "$gofin_marker" ] || continue
+  [ -z "$gofin_recovery_backup" ] || fail 'Multiple interrupted runtime updates require inspection.'
+  gofin_recovery_backup=${gofin_marker%/recovery-ready}
+done
+if [ -n "$gofin_recovery_backup" ]; then
+  [ "$gofin_namespace_migration" = 0 ] && [ "$gofin_old_name" = gofin ] || fail 'Interrupted namespace migration requires inspection.'
+  check_protected_path "$gofin_recovery_backup"
+  check_protected_path "$gofin_recovery_backup/recovery-ready"
+  check_bundle "$gofin_recovery_backup/recovery-incoming" gofin
+  check_code "$gofin_recovery_backup/recovery-incoming" gofin
+  /usr/bin/cmp -s "$gofin_recovery_backup/recovery-incoming/SHA256SUMS" "$gofin_to/SHA256SUMS" || fail 'The supplied recovery bundle differs from the reviewed interrupted update.'
+  gofin_recovery_running=$(cat "$gofin_recovery_backup/recovery-ready")
+  case "$gofin_recovery_running" in 0|1) ;; *) fail 'The interrupted update recovery marker is invalid.' ;; esac
+  "$gofin_recovery_backup/recovery-incoming/gofin-broker" --hold-runtime-update "$$" > "$gofin_recovery_backup/compatibility-ready" &
+  gofin_maintenance_pid=$!; gofin_waited=0
+  while ! /usr/bin/grep -qx compatible "$gofin_recovery_backup/compatibility-ready"; do
+    kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'Could not acquire the interrupted update guard.'
+    [ "$gofin_waited" -lt 200 ] || fail 'The interrupted update guard did not become ready.'
+    gofin_waited=$((gofin_waited + 1)); /bin/sleep 0.05
+  done
+  gofin_recovery_service_status=0
+  /bin/launchctl print "system/$gofin_label" >/dev/null 2>&1 || gofin_recovery_service_status=$?
+  case "$gofin_recovery_service_status" in
+    0) /bin/launchctl bootout "system/$gofin_label" || fail 'Could not stop the service for update recovery.' ;;
+    3|113) ;;
+    *) fail 'Could not inspect the service for update recovery.' ;;
+  esac
+  for gofin_component in $gofin_files; do
+    /bin/cp -p "$gofin_recovery_backup/recovery-incoming/$gofin_component" "$gofin_recovery_backup/restore/$gofin_component"
+    /bin/mv -f "$gofin_recovery_backup/restore/$gofin_component" "$gofin_runtime/$gofin_component"
+  done
+  if [ ! -d "$gofin_auth_dir" ]; then /bin/mkdir "$gofin_auth_dir"; /usr/sbin/chown root:wheel "$gofin_auth_dir"; /bin/chmod 755 "$gofin_auth_dir"; fi
+  /bin/cp -p "$gofin_recovery_backup/recovery-incoming/gofin-touch-id" "$gofin_recovery_backup/restore-GoFin"
+  /bin/mv -f "$gofin_recovery_backup/restore-GoFin" "$gofin_auth_helper"
+  check_bundle "$gofin_runtime" gofin; check_code "$gofin_runtime" gofin; check_auth_helper gofin GoFin
+  kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true; wait "$gofin_maintenance_pid" 2>/dev/null || true; gofin_maintenance_pid=''
+  "$gofin_runtime/gofin-broker" --review-runtime-update || fail 'Execution contract review is required to finish recovery.'
+  /bin/rm -f "$gofin_recovery_backup/compatibility-ready"
+  "$gofin_runtime/gofin-broker" --hold-runtime-update "$$" > "$gofin_recovery_backup/compatibility-ready" &
+  gofin_maintenance_pid=$!; gofin_waited=0
+  while ! /usr/bin/grep -qx compatible "$gofin_recovery_backup/compatibility-ready"; do
+    kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'Could not reacquire the interrupted update guard.'
+    [ "$gofin_waited" -lt 200 ] || fail 'The interrupted update guard did not become ready.'
+    gofin_waited=$((gofin_waited + 1)); /bin/sleep 0.05
+  done
+  printf '%s\n' 'schema migration may start; recover forward with the new runtime' > "$gofin_recovery_backup/forward-only"; /bin/sync
+  kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true; wait "$gofin_maintenance_pid" 2>/dev/null || true; gofin_maintenance_pid=''
+  /bin/launchctl bootstrap system "$gofin_target_plist" || fail 'Could not register the recovered runtime; retry this update.'
+  if [ "$gofin_recovery_running" = 1 ]; then /bin/launchctl kickstart "system/$gofin_label" || fail 'Could not start the recovered runtime; retry this update.'; fi
+  /bin/rm -f "$gofin_recovery_backup/recovery-ready" "$gofin_recovery_backup/forward-only"
+  gofin_complete=1
+  echo 'GoFin update recovered.'
+  exit 0
+fi
+check_bundle "$gofin_from" "$gofin_old_name"
 check_bundle "$gofin_runtime" "$gofin_old_name"
 if [ "$gofin_analytics_enabled" = 1 ]; then
   gofin_analytics_to=$(/usr/bin/awk -F= '$1 == "release_version" {count++; value=$2} END {if (count == 1) print value}' "$gofin_to/BUILDINFO" 2>/dev/null) || gofin_analytics_to=''
@@ -544,24 +631,30 @@ if [ "$gofin_public_release" = 1 ]; then
   while ! /usr/bin/grep -qx compatible "$gofin_backup/compatibility-ready"; do
     kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'Journal schema is incompatible, GoFin is busy, or metadata could not be checked safely; runtime was preserved.'
     [ "$gofin_waited" -lt 200 ] || fail 'The protected update guard did not become ready; runtime was preserved.'
-    gofin_waited=$((gofin_waited + 1))
-    /bin/sleep 0.05
+    gofin_waited=$((gofin_waited + 1)); /bin/sleep 0.05
   done
+  gofin_installed_schema=$(/usr/bin/awk -F= '$1=="schema" {print $2}' "$gofin_backup/compatibility-ready")
+  gofin_supported_schema=$(/usr/bin/awk -F= '$1=="target" {print $2}' "$gofin_backup/compatibility-ready")
 else
-gofin_storage_contract=$("$gofin_backup/incoming/gofin-broker" --export-storage-contract) || fail 'Incoming broker could not report its journal schema; runtime and journal were preserved.'
-gofin_supported_schema=$(printf '%s' "$gofin_storage_contract" | /usr/bin/python3 -I -c 'import json,sys
-try:
- value=json.load(sys.stdin)
- version=value["journal_schema_version"]
- if type(version) is not int or version <= 0: raise ValueError()
- print(version)
-except Exception:
- sys.exit(1)') || fail 'Incoming broker reported an invalid journal schema contract; runtime and journal were preserved.'
-gofin_script_dir=$(/usr/bin/dirname "$0")
-gofin_schema_legacy=''
-if [ "$gofin_namespace_migration" = 1 ]; then gofin_schema_legacy=--legacy-root; fi
-/usr/bin/python3 -I "$gofin_script_dir/check-runtime-store-compatibility.py" ${gofin_schema_legacy:+$gofin_schema_legacy} --supported-schema "$gofin_supported_schema" >/dev/null || fail 'Journal schema is incompatible or could not be checked safely; runtime and journal were preserved.'
-
+  gofin_storage_contract=$("$gofin_backup/incoming/gofin-broker" --export-storage-contract) || fail 'Incoming broker could not report its journal schema.'
+  gofin_supported_schema=$(printf '%s' "$gofin_storage_contract" | /usr/bin/python3 -I -c 'import json,sys; x=json.load(sys.stdin)["journal_schema_version"]; assert type(x) is int and x>0; print(x)') || fail 'Incoming broker reported an invalid journal schema.'
+  gofin_script_dir=$(/usr/bin/dirname "$0")
+  gofin_schema_legacy=''
+  if [ "$gofin_namespace_migration" = 1 ]; then gofin_schema_legacy=--legacy-root; fi
+  gofin_schema_report=$(/usr/bin/python3 -I "$gofin_script_dir/check-runtime-store-compatibility.py" ${gofin_schema_legacy:+$gofin_schema_legacy} --supported-schema "$gofin_supported_schema") || fail 'Journal schema is incompatible or could not be checked safely; runtime and journal were preserved.'
+  gofin_installed_schema=$(printf '%s\n' "$gofin_schema_report" | /usr/bin/awk '/^Journal schema [0-9]+ is compatible / {print $3}')
+fi
+case "$gofin_installed_schema:$gofin_supported_schema" in *[!0-9:]*|:*|*:) fail 'Journal schema report is invalid.' ;; esac
+if [ "$gofin_installed_schema" -ge 25 ] && [ "$gofin_installed_schema" -lt "$gofin_supported_schema" ]; then gofin_schema_upgrade=1; fi
+if [ "$gofin_schema_upgrade" = 1 ] && [ "$gofin_namespace_migration" = 1 ]; then fail 'The legacy namespace requires a separate reviewed namespace migration before this journal upgrade.'; fi
+if [ "$gofin_schema_upgrade" = 1 ] && [ "$gofin_public_release" = 0 ]; then
+  "$gofin_backup/incoming/gofin-broker" --hold-runtime-update "$$" > "$gofin_backup/compatibility-ready" &
+  gofin_maintenance_pid=$!; gofin_waited=0
+  while ! /usr/bin/grep -qx compatible "$gofin_backup/compatibility-ready"; do
+    kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'The protected update guard could not be acquired.'
+    [ "$gofin_waited" -lt 200 ] || fail 'The protected update guard did not become ready.'
+    gofin_waited=$((gofin_waited + 1)); /bin/sleep 0.05
+  done
 fi
 
 check_idle_clients
@@ -578,16 +671,24 @@ if [ "$gofin_namespace_migration" = 1 ]; then
     [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || fail 'A GoFin destination appeared during staging; preserve both installations for review.'
   done
 fi
-if [ "$gofin_public_release" = 1 ]; then
-  kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'The update compatibility lock was lost; runtime was preserved.'
+if [ "$gofin_public_release" = 1 ] || [ "$gofin_schema_upgrade" = 1 ]; then
+  if [ "$gofin_public_release" = 1 ]; then kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'The update compatibility lock was lost; runtime was preserved.'; fi
   gofin_service_observation=$(/bin/launchctl print "system/$gofin_label") || fail 'The installed GoFin service could not be inspected.'
   gofin_service_initial=1
   if printf '%s\n' "$gofin_service_observation" | service_is_running; then gofin_service_was_running=1; fi
 fi
+if [ "$gofin_schema_upgrade" = 1 ]; then
+  # A complete protected copy and intent marker precede the first rename.
+  /bin/cp -Rp "$gofin_backup/incoming" "$gofin_backup/recovery-incoming"
+  printf '%s\n' "$gofin_service_was_running" > "$gofin_backup/recovery-ready"
+  /bin/sync
+fi
 echo 'Updating GoFin...'
 gofin_analytics_stage=replace
+printf '%s\n' replacing > "$gofin_update_lock/phase"
+/bin/sync
 gofin_replacing=1
-if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
+if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ] || [ "$gofin_schema_upgrade" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
   gofin_service_detached=1
   /bin/launchctl bootout "system/$gofin_label" || fail 'Could not detach the service; restoring its previous runtime.'
 fi
@@ -627,7 +728,31 @@ check_bundle "$gofin_runtime" gofin
 check_code "$gofin_runtime" gofin
 if [ -e "$gofin_auth_dir" ] || [ -L "$gofin_auth_dir" ]; then check_auth_helper gofin GoFin; fi
 gofin_analytics_stage=restart
-if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
+if [ "$gofin_schema_upgrade" = 1 ]; then
+  # The daemon is detached and no new runtime has opened the journal. The
+  # fixed installed broker can now perform the human-only update review.
+  if [ -n "$gofin_maintenance_pid" ]; then
+    kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true
+    wait "$gofin_maintenance_pid" 2>/dev/null || true
+    gofin_maintenance_pid=''
+  fi
+  "$gofin_runtime/gofin-broker" --review-runtime-update || fail 'Execution contract review was not completed; restoring the previous runtime.'
+  /bin/rm -f "$gofin_backup/compatibility-ready"
+  "$gofin_runtime/gofin-broker" --hold-runtime-update "$$" > "$gofin_backup/compatibility-ready" &
+  gofin_maintenance_pid=$!
+  gofin_waited=0
+  while ! /usr/bin/grep -qx compatible "$gofin_backup/compatibility-ready"; do
+    kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'Could not reacquire the protected update guard.'
+    [ "$gofin_waited" -lt 200 ] || fail 'The protected update guard did not become ready.'
+    gofin_waited=$((gofin_waited + 1)); /bin/sleep 0.05
+  done
+  # From this point any restart can migrate the durable journal. Mark forward
+  # only before releasing the lock so ordinary traps cannot restore old code.
+  printf '%s\n' 'schema migration may start; recover forward with the new runtime' > "$gofin_backup/forward-only"
+  /bin/sync
+  gofin_forward_only=1
+fi
+if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ] || [ "$gofin_schema_upgrade" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
   if [ -n "$gofin_maintenance_pid" ]; then
     kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true
     wait "$gofin_maintenance_pid" 2>/dev/null || true
@@ -649,7 +774,7 @@ gofin_complete=1
 gofin_analytics_stage=complete
 report_update succeeded
 /bin/rm -rf "$gofin_backup/incoming" "$gofin_backup/restore"
-/bin/rm -f "$gofin_backup/incoming-GoFin" "$gofin_backup/restore-GoFin" "$gofin_backup/incoming.plist" "$gofin_backup/restore.plist" "$gofin_backup/incoming.path" "$gofin_backup/restore.path" "$gofin_backup/maintenance-ready" "$gofin_backup/compatibility-ready"
+/bin/rm -f "$gofin_backup/recovery-ready" "$gofin_backup/forward-only" "$gofin_backup/incoming-GoFin" "$gofin_backup/restore-GoFin" "$gofin_backup/incoming.plist" "$gofin_backup/restore.plist" "$gofin_backup/incoming.path" "$gofin_backup/restore.path" "$gofin_backup/maintenance-ready" "$gofin_backup/compatibility-ready"
 if [ "${NO_COLOR+x}" != x ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
   printf '\033[32m✓ GoFin updated.\033[0m\n'
 else

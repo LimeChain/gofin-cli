@@ -344,7 +344,7 @@ impl KrakenProfile {
         prepared.warnings.extend(margin.warnings);
         prepared.warnings.push("The declared per-asset fee ceilings and maximumSpend are shared across this batch. Fee ceilings are allocated by independently priced gross family exposure; explicit cash fee reservations never finance leveraged loan principal.".into());
         prepared.observed_at = gofin_domain::now();
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
     pub(crate) async fn reconcile_mixed_spot_margin(

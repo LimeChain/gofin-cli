@@ -23,6 +23,9 @@ struct Args {
     /// Internal, metadata-only guard for a verified public update.
     #[arg(long, hide = true)]
     hold_runtime_update: Option<u32>,
+    /// Review the execution-contract migration in the verified human terminal.
+    #[arg(long, hide = true)]
+    review_runtime_update: bool,
     /// Inspect root-staged executable dependencies before loading new code.
     #[arg(long, hide = true)]
     verify_update_bundle: Option<String>,
@@ -57,6 +60,10 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum EnrollmentAction {
+    DismissOperation {
+        #[arg(long)]
+        request: String,
+    },
     PolicySet {
         #[arg(long)]
         request: String,
@@ -159,6 +166,7 @@ fn reports_analytics(args: &Args) -> bool {
     !args.export_registry
         && !args.export_storage_contract
         && args.hold_runtime_update.is_none()
+        && !args.review_runtime_update
         && args.verify_update_bundle.is_none()
 }
 
@@ -192,6 +200,17 @@ fn analytics_operation(args: &Args) -> Option<String> {
 
 async fn run(args: Args) -> gofin_domain::Result<()> {
     let ui = Ui::new(args.json, args.verbose);
+    if args.review_runtime_update {
+        if args.json {
+            return Err(GoFinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "update",
+                "The execution update requires your own terminal review.",
+                "Run gofin update without --json.",
+            ));
+        }
+        return gofin_broker::runtime_update::review_execution_migration(&ui).await;
+    }
     if let Some(tag) = args.runtime_update_release {
         if args.json {
             return Err(GoFinError::new(
@@ -285,7 +304,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
         gofin_analytics::set_broker_user(uid);
         let terminal = gofin_human_terminal::HumanTerminal::open_yolo(uid)?;
         let confirmation = if enabled {
-            let warning = "DANGER: Yolo lets agents submit financial transactions and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing, and repayments, within remaining configured capabilities and financial limits. Funds may be lost.";
+            let warning = "DANGER: Yolo lets agents submit financial actions without per-action human approval. GoFin no longer enforces personal USD movement or rolling allocation limits. The agent's chosen quantities, destinations, prices and fees for each action are the only financial bounds. Funds may be lost.";
             ui.warning(warning).map_err(|_| {
                 GoFinError::new(
                     "OUTPUT_FAILED",
@@ -310,7 +329,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
                 }
             })?;
         let message = if state.enabled {
-            "Protected Yolo enabled. Financial operations use bounded policy and dispatch checks without per-write approval."
+            "Protected Yolo enabled. Each action's terms and dispatch checks still apply; personal USD limits do not."
         } else {
             "Protected Yolo disabled. New Yolo admissions are blocked; already admitted work may still finish."
         };
@@ -335,6 +354,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
         }
         let ui = Ui::new(false, args.verbose);
         let (action_name, request) = match action {
+            EnrollmentAction::DismissOperation { request } => ("operation_dismiss", request),
             EnrollmentAction::PolicySet { request } => ("policy_set", request),
             EnrollmentAction::Initialize { request } => ("initialize", request),
             EnrollmentAction::Add { request } => ("add", request),
@@ -345,6 +365,17 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
         };
         let request = validate_public_enrollment_request(&request)?;
         let result = gofin_broker::enrollment::handle_with_ui(action_name, request, &ui).await?;
+        if action_name == "operation_dismiss" {
+            ui.write_result(&result, "status").map_err(|_| {
+                GoFinError::new(
+                    "OUTPUT_UNAVAILABLE",
+                    "presentation",
+                    "The dismissal label was saved but could not be displayed.",
+                    "Read status for the original operation; no financial fact changed.",
+                )
+            })?;
+            return Ok(());
+        }
         if action_name == "configure" {
             let operation = result["operation"]
                 .as_str()

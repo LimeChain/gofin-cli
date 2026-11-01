@@ -364,7 +364,6 @@ impl Engine {
         let mut required_costs = BTreeMap::new();
         let mut required_locks = BTreeSet::new();
         let mut owners = BTreeSet::new();
-        let mut required_usd = BigUint::zero();
         for child in children {
             let linked = context
                 .children
@@ -420,48 +419,6 @@ impl Engine {
                         &aggregate_cost_bounds(&previous.maximum_costs)?,
                         &aggregate_cost_bounds(&revision.intent.maximum_costs)?,
                     );
-                    let total = |value: &gofin_domain::Valuation| {
-                        value.movement_usd_micros.integer()
-                            + value.maximum_fee_usd_micros.integer()
-                            + value.additional_allocation_usd_micros.integer()
-                    };
-                    let old_value = linked
-                        .context
-                        .effective_scope()
-                        .and_then(|scope| scope.valuation.as_ref())
-                        .or(old.valuation.as_ref())
-                        .ok_or_else(|| invalid("The prior child valuation is missing."))?;
-                    let new_value = revision
-                        .valuation
-                        .as_ref()
-                        .ok_or_else(|| invalid("The revised child valuation is missing."))?;
-                    let scalar_increase = if total(new_value) > total(old_value) {
-                        total(new_value) - total(old_value)
-                    } else {
-                        BigUint::zero()
-                    };
-                    // Every new approval must contain the independently priced
-                    // positive increment. Serde still accepts the absent field in
-                    // older submitted records so reconciliation never replays them.
-                    let incremental = child.incremental_valuation.as_ref().ok_or_else(|| {
-                        invalid("Every newly prepared amendment requires its own positive incremental valuation.")
-                    })?;
-                    validate_price_observation(
-                        &incremental.observed_at,
-                        &incremental.source,
-                        Utc::now(),
-                        "VALUATION_UNAVAILABLE",
-                    )?;
-                    validate_price_rows(
-                        &incremental.prices,
-                        &incremental
-                            .prices
-                            .iter()
-                            .map(|price| price.asset.clone())
-                            .collect(),
-                        Utc::now(),
-                    )?;
-                    required_usd += std::cmp::max(scalar_increase, total(incremental));
                     let mut virtual_child = prepared.clone();
                     let mut debit_keys = BTreeSet::new();
                     let mut cost_keys = BTreeSet::new();
@@ -507,14 +464,7 @@ impl Engine {
                         }],
                         locks: old.intent.locks.clone(),
                     };
-                    if let Some(value) = &child.incremental_valuation {
-                        virtual_child.valuation = Some(value.clone());
-                        validate_cost_prices(
-                            &virtual_child,
-                            &prepared_cost_assets(&virtual_child.intent),
-                            Utc::now(),
-                        )?;
-                    }
+                    virtual_child.valuation = child.incremental_valuation.clone();
                     self.validate_submission_amendment_for_attempt(
                         &virtual_child,
                         None,
@@ -541,19 +491,6 @@ impl Engine {
         {
             return Err(invalid(
                 "The batch does not reserve every positive child scope increase and original resource lock.",
-            ));
-        }
-        let own = prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("The compound incremental valuation is missing."))?;
-        if own.movement_usd_micros.integer()
-            + own.maximum_fee_usd_micros.integer()
-            + own.additional_allocation_usd_micros.integer()
-            < required_usd
-        {
-            return Err(invalid(
-                "The compound rolling allocation does not cover all positive revised child exposures.",
             ));
         }
         Ok(Some(binding_hash(&to_value(&children)?)?))

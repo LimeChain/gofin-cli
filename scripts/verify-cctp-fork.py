@@ -82,6 +82,7 @@ def start_fork(chain, anvil, evidence):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chain", type=int, choices=list(URLS), help="Select source burns; destination forks still cover all three networks.")
+    parser.add_argument("--outcome-a18", action="store_true", help="Also run the real CLI fee-refresh and reauthorization fixture on the owned forks.")
     args = parser.parse_args()
     anvil = Path(os.environ.get("GOFIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
     if not anvil.is_absolute() or not anvil.is_file() or not os.access(anvil, os.X_OK) or not shutil.which("cargo") or not shutil.which("lsof"):
@@ -107,7 +108,29 @@ def main():
         test = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", "cctp_fork", "deployed_cctp_burn_and_mint_bind_each_supported_destination", "--", "--ignored", "--exact", "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
         status = test.process.wait()
         print((evidence / "test.log").read_text(errors="replace"), end="")
-        return status
+        if status:
+            return status
+        if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in (evidence / "test.log").read_text(errors="replace"):
+            raise RuntimeError("Owned CCTP contract fixture did not run exactly once")
+        if not args.outcome_a18:
+            return 0
+        cli_env = env.copy()
+        cli_env["GOFIN_DEV_BUILD_ID"] = "synthetic-cctp-build"
+        built = subprocess.run(["cargo", "build", "--locked", "--offline", "-p", "gofin-cli", "--example", "gofin-dev"], cwd=SOURCE, env=cli_env)
+        if built.returncode:
+            return built.returncode
+        cli_path = evidence / "cctp-cli"
+        shutil.copy2(SOURCE / "target/debug/examples/gofin-dev", cli_path)
+        cli_env["GOFIN_CCTP_CLI"] = str(cli_path)
+        cli_env["GOFIN_OUTCOME_EVIDENCE"] = os.environ.get("GOFIN_OUTCOME_EVIDENCE", str(evidence / "a18-evidence.json"))
+        test = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", "cctp_lifecycle", "owned_fork_cli_cctp_fee_refresh_and_remaining_reauthorization", "--", "--ignored", "--exact", "--nocapture"], log_path=evidence / "a18.log", marker_path=evidence / "a18.owner.json", env=cli_env)
+        status = test.process.wait()
+        print((evidence / "a18.log").read_text(errors="replace"), end="")
+        if status:
+            return status
+        if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in (evidence / "a18.log").read_text(errors="replace"):
+            raise RuntimeError("Owned CCTP CLI fixture did not run exactly once")
+        return 0
     finally:
         if test is not None and not test.stop():
             test.detach()

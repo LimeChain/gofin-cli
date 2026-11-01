@@ -401,6 +401,35 @@ mod reconciliation {
         );
     }
     #[tokio::test]
+    async fn withdrawal_destination_uses_original_source_evidence_without_venue_reads() {
+        let (profile, fixture) = profile(vec![
+            (E::KrakenPrivatePostWithdrawStatus, status()),
+            (E::KrakenPrivatePostLedgers, ledger()),
+        ]);
+        let profile = profile.with_recipient_verifier(Arc::new(Receipt(Status::Completed)));
+        let mut binding = withdrawal(VerificationRequirement::DestinationReceipt);
+        binding.destination = Some(destination());
+        let submission = submission(json!({"account":account().name,"funding":binding}));
+        let mut record = record(
+            &submission,
+            Some(json!({"response":{"result":{"refid":"original-venue-id"}}})),
+        );
+        let source = profile
+            .observe_funding_side(&record, &submission, "source")
+            .await
+            .unwrap();
+        record.last_reconciliation_evidence = Some(source.reconciliation.unwrap().evidence);
+        assert!(fixture.0.lock().unwrap().is_empty());
+        let destination = profile
+            .observe_funding_side(&record, &submission, "destination")
+            .await
+            .unwrap();
+        assert!(fixture.0.lock().unwrap().is_empty());
+        assert_eq!(destination.metadata["status"], "completed");
+        assert_eq!(destination.reconciliation.unwrap().status, Status::Pending);
+    }
+
+    #[tokio::test]
     async fn pending_recipient_receipt_does_not_create_any_terminal_effects() {
         let (p, _) = profile(vec![
             (E::KrakenPrivatePostWithdrawStatus, status()),
@@ -725,6 +754,26 @@ mod reconciliation {
         );
     }
     #[tokio::test]
+    async fn failed_withdrawal_waits_for_correlated_refund() {
+        let (b, h, response, mut principal, fee) = current_separate_fee(false);
+        principal["result"]["ledger"]
+            .as_object_mut()
+            .unwrap()
+            .remove("refund");
+        let (p, _) = profile(vec![
+            (E::KrakenFundingGetFundingV1Withdrawals, h),
+            (E::KrakenPrivatePostLedgers, principal),
+            (E::KrakenPrivatePostLedgers, fee),
+        ]);
+        let result = p
+            .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Failed);
+        assert_eq!(result.evidence["outcome_transfer"], "source_pending");
+        assert!(result.verified.is_none());
+    }
+    #[tokio::test]
     async fn failed_current_withdrawal_returns_principal_and_books_only_proven_fee_asset_cost() {
         for refunded in [false, true] {
             let (b, h, response, l, mut fee) = current_separate_fee(false);
@@ -741,6 +790,7 @@ mod reconciliation {
                 .await
                 .unwrap();
             assert_eq!(r.status, Status::Failed);
+            assert_eq!(r.evidence["outcome_transfer"], "returned_to_source");
             let effects = r.verified.unwrap().effects;
             assert!(
                 matches!(&effects[0],FinancialEffect::CashDebit{amount,..}if amount.asset.reference=="USDC"&&amount.atoms==Quantity::from_decimal(if refunded{"0.0001"}else{"0.001"},36).unwrap())

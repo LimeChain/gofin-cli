@@ -1904,23 +1904,28 @@ impl Adapter for TriggerAdapter {
                 maximum_network_fee,
                 wallet.address(),
             )
-            .await?
-            .0
+            .await
+            .ok()
+            .map(|(valuation, _)| valuation)
         } else {
-            cancellation_valuation(self.prices.clone(), maximum_network_fee).await?
+            cancellation_valuation(self.prices.clone(), maximum_network_fee)
+                .await
+                .ok()
         };
-        if maximum_funding > 0 {
+        if maximum_funding > 0
+            && let Some(value) = valuation.as_mut()
+        {
             let native = AssetId {
                 network: NETWORK.into(),
                 reference: "native".into(),
                 decimals: 9,
             };
-            let native_price = valuation
+            let native_price = value
                 .prices
                 .iter()
                 .find(|price| price.asset == native)
                 .ok_or_else(bad_response)?;
-            valuation.additional_allocation_usd_micros =
+            value.additional_allocation_usd_micros =
                 gofin_domain::Quantity::from_u64(maximum_funding)
                     .mul_div_ceil(&native_price.usd_micros_per_unit, &native_price.unit_atoms)?;
         }
@@ -2010,7 +2015,7 @@ impl Adapter for TriggerAdapter {
                 tx.order, asset.reference
             )
         };
-        Ok(PreparedOperation{operation:operation.into(),input:input.clone(),binding:json!({"kind":effect_name,"wallet_address":wallet.address(),"order_key":tx.order,"request_id":tx.request_id,"original_operation_id":cancellation_parent.as_ref().map(|(id,_)|id),"original_submission":cancellation_parent.as_ref().map(|(_,s)|s),"original_funding_accounts":cancellation_parent_funding,"transaction_base64":tx.encoded,"message_sha256":frozen.message_sha256(),"input_mint":asset.reference,"input_decimals":asset.decimals,"input_token_program":input_token_program,"output_mint":output_mint,"output_decimals":output_asset.map(|output|output.decimals),"output_token_program":output_token_program,"amount_atoms":amount.to_string(),"output_atoms":if operation==CREATE{Some(atoms(input,"taking_amount_atoms")?.to_string())}else{None},"last_valid_block_height":frozen.last_valid_block_height(),"fee_payer":frozen.fee_payer(),"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds}),summary,checks:vec![pass("Pinned Limit Order V2 instruction and account layout"),pass("Exact maker, escrow and token mint binding"),pass("Network fee limit"),pass("Account funding limit"),pass("Simulation"),pass("Blockhash expiry")],warnings:vec!["Placement moves assets into escrow; it does not complete the later swap. Rent-bearing accounts remain refundable funding and are tracked separately from fees. Fill, expiry and cancellation are separate states.".into()],observed_at:Utc::now().to_rfc3339(),expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(),valuation:Some(valuation),intent:FinancialIntent{debits,maximum_costs:vec![fee_bound],expected,locks:vec![resource,order_resource]},action_deadline:None,operation_version:1})
+        Ok(PreparedOperation{operation:operation.into(),input:input.clone(),binding:json!({"kind":effect_name,"wallet_address":wallet.address(),"order_key":tx.order,"request_id":tx.request_id,"original_operation_id":cancellation_parent.as_ref().map(|(id,_)|id),"original_submission":cancellation_parent.as_ref().map(|(_,s)|s),"original_funding_accounts":cancellation_parent_funding,"transaction_base64":tx.encoded,"message_sha256":frozen.message_sha256(),"input_mint":asset.reference,"input_decimals":asset.decimals,"input_token_program":input_token_program,"output_mint":output_mint,"output_decimals":output_asset.map(|output|output.decimals),"output_token_program":output_token_program,"amount_atoms":amount.to_string(),"output_atoms":if operation==CREATE{Some(atoms(input,"taking_amount_atoms")?.to_string())}else{None},"last_valid_block_height":frozen.last_valid_block_height(),"fee_payer":frozen.fee_payer(),"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds}),summary,checks:vec![pass("Pinned Limit Order V2 instruction and account layout"),pass("Exact maker, escrow and token mint binding"),pass("Network fee limit"),pass("Account funding limit"),pass("Simulation"),pass("Blockhash expiry")],warnings:vec!["Placement moves assets into escrow; it does not complete the later swap. Rent-bearing accounts remain refundable funding and are tracked separately from fees. Fill, expiry and cancellation are separate states.".into()],observed_at:Utc::now().to_rfc3339(),expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(),valuation,intent:FinancialIntent{debits,maximum_costs:vec![fee_bound],expected,locks:vec![resource,order_resource]},action_deadline:None,operation_version:1})
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         let wallet = self.wallet(&prepared.input)?;
@@ -2176,11 +2181,18 @@ impl Adapter for TriggerAdapter {
                     verified: Some(verified),
                 })
             }
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason}),

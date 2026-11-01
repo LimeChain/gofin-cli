@@ -1062,7 +1062,7 @@ impl KrakenProfile {
                 )
             });
         parameters["cliOrdId"] = json!(id);
-        let mut valuation = self
+        let valuation = self
             .financial_valuation(
                 &[ResourceAmount {
                     resource: account.resource.clone(),
@@ -1073,16 +1073,19 @@ impl KrakenProfile {
                 }],
                 &intent.maximum_costs,
             )
-            .await?;
-        // Settlement loss reserves are policy costs as well as cash debits.
-        valuation.additional_allocation_usd_micros = Quantity::zero();
-        let mut prepared=PreparedOperation{operation:endpoint.operation().into(),input:input.clone(),binding:json!({"endpoint":endpoint.method(),"product":self.product,"account":account.name,"physicalIdentity":account.physical_identity,"parameters":parameters,"requestId":control.request_id,"derivative":{"clientId":id,"symbol":symbol,"wallet":wallet,"collateral":collateral,"size":size,"positionBefore":before.to_string(),"positionLimit":atoms(&instrument["maxPositionSize"])? ,"minimumRequiredFeeAtoms":required_fee,"observedFeePrice":observed_fee_price,"initialMarginRate":margin_rate,"initialMargin":initial_margin,"leveragePreference":leverage_preference,"accountUid":derivative_permissions["accountUid"],"feeSourceAccount":fee_account.name,"feeRelationship":if venue_verified{"venue_verified"}else{"human_confirmed"},"rebateCreditPermitted":true}}),summary:format!("Place exact Kraken derivative {symbol} order on {}. Contract exposure, realized collateral and funding are accounted separately.",account.name),checks:vec![],warnings:vec!["Initial margin is checked against the maximum applicable published customer/platform schedule and protected isolated leverage preferences.".into(),"Standing derivative positions can accrue funding and be liquidated independently of GoFin; revoking GoFin consent does not cancel the venue order. Kraken offers no hard native commission ceiling; GoFin reserves exact fee caps and retains unresolved receipts if a better price or conversion causes an unexpected excess.".into()],observed_at:gofin_domain::now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,action_deadline: None, operation_version:1};
+            .await
+            .ok()
+            .map(|mut valuation| {
+                valuation.additional_allocation_usd_micros = Quantity::zero();
+                valuation
+            });
+        let mut prepared=PreparedOperation{operation:endpoint.operation().into(),input:input.clone(),binding:json!({"endpoint":endpoint.method(),"product":self.product,"account":account.name,"physicalIdentity":account.physical_identity,"parameters":parameters,"requestId":control.request_id,"derivative":{"clientId":id,"symbol":symbol,"wallet":wallet,"collateral":collateral,"size":size,"positionBefore":before.to_string(),"positionLimit":atoms(&instrument["maxPositionSize"])? ,"minimumRequiredFeeAtoms":required_fee,"observedFeePrice":observed_fee_price,"initialMarginRate":margin_rate,"initialMargin":initial_margin,"leveragePreference":leverage_preference,"accountUid":derivative_permissions["accountUid"],"feeSourceAccount":fee_account.name,"feeRelationship":if venue_verified{"venue_verified"}else{"human_confirmed"},"rebateCreditPermitted":true}}),summary:format!("Place exact Kraken derivative {symbol} order on {}. Contract exposure, realized collateral and funding are accounted separately.",account.name),checks:vec![],warnings:vec!["Initial margin is checked against the maximum applicable published customer/platform schedule and protected isolated leverage preferences.".into(),"Standing derivative positions can accrue funding and be liquidated independently of GoFin; revoking GoFin consent does not cancel the venue order. Kraken offers no hard native commission ceiling; GoFin checks declared fee bounds and reports any verified excess.".into()],observed_at:gofin_domain::now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation,intent,action_deadline: None, operation_version:1};
         let baseline=[(PositionKind::DerivativeLong,if before.is_positive(){before.clone()}else{BigInt::zero()}),(PositionKind::DerivativeShort,if before.is_negative(){-before.clone()}else{BigInt::zero()})].into_iter().map(|(kind,value)|->Result<PositionAnchor>{Ok(PositionAnchor{resource:account.resource.clone(),position:symbol.clone(),position_kind:kind,principal:Amount{asset:contract(&symbol),atoms:Quantity::new(value.to_string())?},evidence_version:1,scaled_receipt:None,evidence:json!({"endpoint":"private_get_openpositions","account":account.name,"physicalIdentity":account.physical_identity,"symbol":symbol,"netPositionAtoms":before.to_string()}),observed_at:prepared.observed_at.clone()})}).collect::<Result<Vec<_>>>()?;
         prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY] = json!(baseline);
         if observed_fee_price.is_some() {
             prepared.warnings.push("This native market or trigger order has no limit price. Fee admission uses the exact observed venue book and trigger; execution may differ, and unexpected fee excess remains unresolved with its receipts.".into());
         }
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
     pub(crate) async fn reconcile_derivatives(

@@ -116,13 +116,6 @@ impl Engine {
             ));
         }
         validate_replacements(group)?;
-        if group.children.iter().any(|child| child.mutation.is_amend())
-            && group.incremental_valuation.is_none()
-        {
-            return Err(invalid(
-                "Each newly approved grouped amendment requires its independently priced incremental valuation; old submitted records remain recoverable without replay.",
-            ));
-        }
         let original = self.load_record(&group.operation_id)?;
         let context = self.amendment_context(&group.operation_id)?;
         let old = original
@@ -197,7 +190,9 @@ impl Engine {
         }
         let all = group.children.iter().map(|c| c.child_tag.clone()).collect();
         let derived = accounting_scope(group, &all)?;
-        if derived != *group.approved_envelope {
+        if derived.intent != group.approved_envelope.intent
+            || derived.binding != group.approved_envelope.binding
+        {
             return Err(invalid(
                 "The approved grouped envelope does not sum positive member increases and shared costs exactly.",
             ));
@@ -226,70 +221,6 @@ impl Engine {
         if has_amendment {
             validate_prepared(&virtual_envelope, &prepared.operation, Utc::now())?;
             validate_cost_bound_contract(&derived.intent)?;
-            validate_cost_prices(
-                &virtual_envelope,
-                &prepared_cost_assets(&derived.intent),
-                Utc::now(),
-            )?;
-        }
-        let old_value = raw
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("Original valuation missing."))?;
-        let full = derived.valuation.as_ref().unwrap();
-        let own = prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("Incremental valuation missing."))?;
-        let total = |v: &gofin_domain::Valuation| {
-            v.movement_usd_micros.integer()
-                + v.maximum_fee_usd_micros.integer()
-                + v.additional_allocation_usd_micros.integer()
-        };
-        if let Some(incremental) = &group.incremental_valuation {
-            let mut floor = prepared.clone();
-            floor.valuation = Some(incremental.clone());
-            validate_price_observation(
-                &incremental.observed_at,
-                &incremental.source,
-                Utc::now(),
-                "VALUATION_UNAVAILABLE",
-            )?;
-            validate_price_rows(
-                &incremental.prices,
-                &incremental.prices.iter().map(|p| p.asset.clone()).collect(),
-                Utc::now(),
-            )?;
-            validate_cost_prices(&floor, &prepared_cost_assets(&prepared.intent), Utc::now())?;
-            if total(own) < total(incremental) {
-                return Err(invalid(
-                    "The group omits independently priced positive member authority increments.",
-                ));
-            }
-        }
-
-        let full_total = total(full);
-        let old_total = total(old_value);
-        if full_total < old_total {
-            return Err(invalid(
-                "Grouped conservative USD scope lost an original reservation.",
-            ));
-        }
-        if total(own) < full_total - old_total {
-            return Err(invalid(
-                "Grouped USD reservation omits a positive member increase.",
-            ));
-        }
-        if has_amendment
-            && gofin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?
-                .is_some_and(|n| {
-                    full.movement_usd_micros.integer() + full.maximum_fee_usd_micros.integer()
-                        > BigUint::from(n)
-                })
-        {
-            return Err(invalid(
-                "The full grouped scope exceeds the protected movement ceiling.",
-            ));
         }
         Ok(Some(binding_hash(&to_value(group)?)?))
     }

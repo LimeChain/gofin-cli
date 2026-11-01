@@ -45,6 +45,24 @@ def expand(value, substitutions):
     return value
 
 
+def read_execution_evidence(path, scenario_id):
+    evidence = json.loads(path.read_text())
+    if evidence.get("scenario") != scenario_id:
+        raise ValueError("Execution evidence belongs to a different scenario")
+    for key in ("approval_count", "external_submission_count", "intervention_count"):
+        if type(evidence.get(key)) is not int or evidence[key] < 0:
+            raise ValueError(f"Execution evidence needs a nonnegative {key}")
+    if evidence["intervention_count"]:
+        raise ValueError("Recovery required an intervention")
+    if type(evidence.get("remaining_external_uncertainty")) is not bool:
+        raise ValueError("Execution evidence must report remaining external uncertainty")
+    if "blocked_unrelated_activity" not in evidence:
+        raise ValueError("Execution evidence must report the unrelated-admission probe")
+    if re.fullmatch(r"outcome\.a[0-9]+", scenario_id) and evidence["blocked_unrelated_activity"] is not False:
+        raise ValueError("Acceptance evidence requires successful same-account and different-account admission probes")
+    return evidence
+
+
 def source_snapshot():
     diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=ROOT)
     untracked = subprocess.check_output(
@@ -163,7 +181,14 @@ def main():
                         break
                 else:
                     row["status"] = "passed"
-                    print(f"PASS {name}", flush=True)
+                    if scenario.get("evidence"):
+                        try:
+                            evidence_path = Path(expand(scenario["evidence"], substitutions))
+                            row["execution"] = read_execution_evidence(evidence_path, name)
+                            row["evidence"] = str(evidence_path)
+                        except (OSError, ValueError, TypeError) as error:
+                            row.update(status="failed", error=f"Invalid execution evidence: {error}")
+                    print(f"{row['status'].upper()} {name}", flush=True)
             report_path.write_text(json.dumps(report, indent=2) + "\n")
             if row["status"] == "failed" and args.fail_fast:
                 break

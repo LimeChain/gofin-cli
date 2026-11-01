@@ -165,7 +165,15 @@ impl DevelopmentTransport {
                 .map_err(|_| unavailable())?;
         verify_peer(&stream)?;
         let mut reader = BufReader::new(stream);
-        let cancel_on_disconnect = normal_request.is_some_and(BrokerRequest::may_use_rpc_reads);
+        let cancel_on_disconnect = normal_request.is_some_and(|request| {
+            request.may_use_rpc_reads()
+                || matches!(
+                    request,
+                    BrokerRequest::Execute { .. }
+                        | BrokerRequest::ContinueOperation { .. }
+                        | BrokerRequest::ReauthorizeOperation { .. }
+                )
+        });
         let financial_dispatch = normal_request
             .is_some_and(production_cli::response_deadline::execution_progress_required);
         let progress = gofin_domain::execution_progress::enabled() || financial_dispatch;

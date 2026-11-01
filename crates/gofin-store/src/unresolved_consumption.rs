@@ -451,7 +451,7 @@ mod tests {
         let path = dir.path().join("synthetic-upgrade.sqlite");
         let mut store = Store::open(&path).unwrap();
         let initial = create(&mut store);
-        store.conn.execute_batch("DROP TABLE unresolved_cost_events; DROP TABLE unresolved_cost_consumption; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=14;").unwrap();
+        store.conn.execute_batch("DROP TABLE unresolved_cost_events; DROP TABLE unresolved_cost_consumption; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=14;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(

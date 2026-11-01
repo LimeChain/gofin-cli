@@ -51,10 +51,7 @@ struct PlanApproval(AtomicUsize);
 #[async_trait]
 impl Authorizer for PlanApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        assert_eq!(
-            challenge.binding["plan"]["steps"].as_array().unwrap().len(),
-            2
-        );
+        assert_eq!(challenge.binding["operation"], "bridge.execute");
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic exact bridge plan approval".into(),
@@ -172,17 +169,10 @@ impl Environment {
         )
         .unwrap()
     }
-    fn stored_transfer(&self, id: &str) -> BridgeTransferRecord {
-        Store::open(self.dir.path().join("journal.sqlite"))
-            .unwrap()
-            .bridge_transfer(id)
-            .unwrap()
-            .unwrap()
-    }
 }
 
 #[test]
-fn exact_bridge_plan_survives_catalog_reload_and_same_scope_renewal() {
+fn completed_compound_bridge_survives_catalog_reload_without_reapproval_or_replay() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -202,188 +192,53 @@ fn exact_bridge_plan_survives_catalog_reload_and_same_scope_renewal() {
 
 async fn rehearse() {
     let env = Environment::new();
-    let old_runtime = env.runtime(true);
-    let old_def = old_runtime
-        .engine
-        .definitions()
-        .unwrap()
-        .into_iter()
-        .find(|d| d.name == "bridge.transfer")
-        .unwrap();
-    let client = Client::new(old_runtime.clone(), env.dir.path()).await;
-    let quote = call(&client, BrokerRequest::Read {
-        operation: "bridge.quotes".into(),
-        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":bridge_fixture::ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":bridge_fixture::ARB_USDC}],"recipient":env.wallet,"refundTo":env.wallet,"allowedRefundAssets":[{"chainId":1,"token":bridge_fixture::ETH_USDC}],"amount":"10000000"}}),
-    }).await;
-    let transfer = quote["transfers"][0]["transfer_id"].as_str().unwrap();
-    let links = quote["transfers"][0]["steps"].as_array().unwrap();
-    assert_eq!(links.len(), 2);
-    let resource = format!("ethereum:1:{}", env.wallet);
-    let usdc = asset("ethereum:1", bridge_fixture::ETH_USDC, 6);
-    let native = asset("ethereum:1", "native", 18);
-    let bounds = json!({
-        "input":{"minimum":"10000000","maximum":"10000000"},
-        "maximum_source_debit":"10000000",
-        "minimum_net_receipt":{"asset":asset("ethereum:42161",bridge_fixture::ARB_USDC,6),"atoms":"9500000"},
-        "fee_caps":[{"asset":native,"kind":"gas","maximum":"2000000000000000","maximum_usd_micros":4000000}],
-        "maximum_total_usd_micros":14000000,
-        "authorization_seconds":600
-    });
-    let gas = fee(&resource, &native, "0.001", CostTreatment::AdditionalDebit);
-    let debit = amount(&resource, &usdc, "10");
-    let steps = links.iter().enumerate().map(|(index, link)| step(
-        if index == 0 { "approve" } else { "deposit" },
-        "bridge.transfer",
-        json!({"transferId":transfer,"stepId":link["step_id"],"stepKind":link["kind"],"bounds":bounds}),
-        if index == 0 { vec![] } else { vec![debit.clone()] },
-        vec![gas.clone()],if index == 0 { json!([]) } else { json!([{ "resource":format!("ethereum:42161:{}",env.wallet), "asset":asset("ethereum:42161",bridge_fixture::ARB_USDC,6)}]) },vec![],
-    )).collect::<Vec<_>>();
-    let spec = FinancialPlanSpec {
-        version: FINANCIAL_PLAN_VERSION,
-        name: "Exact bridge catalog reload".into(),
-        summary: None,
-        steps,
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: vec![debit],
-            maximum_costs: vec![fee(
-                &resource,
-                &native,
-                "0.002",
-                CostTreatment::AdditionalDebit,
-            )],
-        },
-    };
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "EXACT-BRIDGE-APPROVE".into(),
-        plan: spec.clone(),
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let review = call(
-        &client,
-        BrokerRequest::PreviewPlan {
-            request: request.clone(),
-        },
-    )
-    .await;
-    for permission in review["permissions"].as_array().unwrap() {
-        assert!(permission["exact"].is_object(), "{permission}");
-        assert!(permission["permission"].is_null(), "{permission}");
-    }
-    request.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
-    let approved = call(&client, BrokerRequest::AuthorizePlan { request }).await;
-    let plan_id = approved["plan_id"].as_str().unwrap().to_string();
-    assert_eq!(env.approval.0.load(Ordering::SeqCst), 1);
-    assert_eq!(env.source.broadcasts(), 0);
-    drop(client);
-    drop(old_runtime);
-
     let runtime = env.runtime(false);
-    let current_def = runtime
-        .engine
-        .definitions()
-        .unwrap()
-        .into_iter()
-        .find(|d| d.name == "bridge.transfer")
-        .unwrap();
-    // Public catalog hash from the affected released version, independently
-    // recorded before the compatibility repair (not a synthetic grant edit).
-    assert!(
-        exact_plan_definition_hash_matches(
-            &current_def,
-            "5019f5ba9716bdc0b100634c4294a391a0a87d4012ef69471cad6f2f06e2a260",
-        )
-        .unwrap()
-    );
-    assert_ne!(
-        old_def.semantics["request_identity"],
-        current_def.semantics["request_identity"]
-    );
-    assert_eq!(old_def.input_schema, current_def.input_schema);
-    let client = Client::new(runtime, env.dir.path()).await;
-    let reloaded = call(
-        &client,
-        BrokerRequest::PlanStatus {
-            plan_id: plan_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(reloaded["revision"], approved["revision"]);
-    let execute = |index: usize| BrokerRequest::ExecutePlanStep {
-        plan_id: plan_id.clone(),
-        step_id: spec.steps[index].step_id.clone(),
+    let client = Client::new(runtime.clone(), env.dir.path()).await;
+    let input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":bridge_fixture::ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":bridge_fixture::ARB_USDC}],"recipient":env.wallet,"refundTo":env.wallet,"allowedRefundAssets":[{"chainId":1,"token":bridge_fixture::ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":asset("ethereum:42161",bridge_fixture::ARB_USDC,6),"atoms":"9500000"},"fee_caps":[{"asset":asset("ethereum:1","native",18),"kind":"gas","maximum":"2000000000000000"}],"latest_protocol_deadline":null},"actionDeadline":chrono::Utc::now().timestamp()+600});
+    let request = BrokerRequest::Execute {
         request: OperationRequest {
-            request_id: format!("EXACT-BRIDGE-CHILD-{index}"),
-            operation: "bridge.transfer".into(),
-            input: spec.steps[index].input.clone(),
+            request_id: "CATALOG-COMPOUND-BRIDGE".into(),
+            operation: "bridge.execute".into(),
+            input,
             run_id: None,
         },
     };
-    let allowance = call(&client, execute(0)).await;
-    assert_eq!(allowance["status"], "completed", "{allowance}");
+    let mut executed = call(&client, request.clone()).await;
+    for _ in 0..3 {
+        if executed["outcome"]["phase"] == "done" {
+            break;
+        }
+        executed = call(
+            &client,
+            BrokerRequest::Status {
+                id: executed["id"].as_str().unwrap().into(),
+            },
+        )
+        .await;
+    }
+    assert_eq!(executed["outcome"]["phase"], "done", "{executed}");
     assert_eq!(env.approval.0.load(Ordering::SeqCst), 1);
-    assert_eq!(env.source.broadcasts(), 1);
-    let before = env.stored_transfer(transfer);
-    let status = call(
-        &client,
-        BrokerRequest::PlanStatus {
-            plan_id: plan_id.clone(),
-        },
-    )
-    .await;
-    let mut renewal = FinancialPlanAuthorizationRequest {
-        request_id: "EXACT-BRIDGE-RENEW".into(),
-        plan: spec.clone(),
-        valid_for_seconds: Some(600),
-        replaces_revision_id: Some(status["revision"]["revision_id"].as_str().unwrap().into()),
-        expected_review_hash: None,
-    };
-    let review = call(
-        &client,
-        BrokerRequest::PreviewPlan {
-            request: renewal.clone(),
-        },
-    )
-    .await;
-    renewal.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
-    let renewed = call(&client, BrokerRequest::AuthorizePlan { request: renewal }).await;
-    assert_eq!(renewed["plan_id"], plan_id);
-    assert_eq!(
-        env.approval.0.load(Ordering::SeqCst),
-        2,
-        "only the deliberately requested renewal asks for another approval"
-    );
-    assert_eq!(renewed["usage"], status["usage"]);
-    let parent = env.stored_transfer(transfer);
-    assert_eq!(parent.approved_bounds, before.approved_bounds);
-    assert_eq!(parent.steps, before.steps);
-    assert_eq!(parent.quote_revisions, before.quote_revisions);
-    let replay = call(&client, execute(0)).await;
-    assert_eq!(replay["id"], allowance["id"]);
-    assert_eq!(replay["submission"], allowance["submission"]);
-    assert_eq!(env.source.broadcasts(), 1);
-    let deposit = call(&client, execute(1)).await;
-    assert_eq!(deposit["status"], "completed", "{deposit}");
     assert_eq!(env.source.broadcasts(), 2);
-    let settled = call(
-        &client,
-        BrokerRequest::Read {
-            operation: "bridge.status".into(),
-            input: json!({"transferId":transfer}),
-        },
-    )
-    .await;
-    assert_eq!(settled["state"], "completed", "{settled}");
-    let final_status = call(&client, BrokerRequest::PlanStatus { plan_id }).await;
-    assert!(
-        final_status["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["state"] == "completed"),
-        "{final_status}"
-    );
-    assert_eq!(env.approval.0.load(Ordering::SeqCst), 2);
+    let original = Store::open(env.dir.path().join("journal.sqlite"))
+        .unwrap()
+        .get_record(executed["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    drop(client);
+    drop(runtime);
+    let client = Client::new(env.runtime(true), env.dir.path()).await;
+    let observed = call(&client, request).await;
+    assert_eq!(observed["id"], executed["id"]);
+    assert_eq!(observed["submission"], executed["submission"]);
+    assert_eq!(observed["outcome"]["replay_safe"], false);
+    assert_eq!(observed["outcome"]["phase"], "done");
+    let stored = Store::open(env.dir.path().join("journal.sqlite"))
+        .unwrap()
+        .get_record(executed["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored["preview"], original["preview"]);
+    assert_eq!(stored["approval"], original["approval"]);
+    assert_eq!(env.approval.0.load(Ordering::SeqCst), 1);
     assert_eq!(env.source.broadcasts(), 2);
 }

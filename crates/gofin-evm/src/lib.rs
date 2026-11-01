@@ -859,7 +859,8 @@ impl HttpRpc {
                 }
             }
             return Err(RpcAttemptFailure {
-                retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504),
+                retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
+                    || (status.as_u16() == 499 && method != "eth_sendRawTransaction"),
                 error: error("RPC_UNAVAILABLE", "rpc", "RPC HTTP request failed.")
                     .with_details(details),
             });
@@ -1702,7 +1703,7 @@ pub struct CanonicalReceipt {
     pub block_number: u64,
     pub confirmations: u64,
     pub success: bool,
-    pub fee: U256,
+    pub fee: Option<U256>,
     pub receipt: Value,
 }
 
@@ -2586,6 +2587,124 @@ impl EvmRuntime {
             .map_err(|_| permit_error("Permit expired while protected signing was in progress."))?;
         Ok(signature)
     }
+    /// Prove replacement only from a different transaction in a finalized
+    /// canonical block. A pending/latest nonce alone never proves replacement.
+    pub async fn finalized_nonce_replacement(
+        &self,
+        submission: &Submission,
+        transaction: &FrozenTransaction,
+    ) -> Result<Option<gofin_domain::Reconciliation>> {
+        if submission.kind != "ethereum"
+            || submission.data["transaction"]
+                != serde_json::to_value(transaction)
+                    .map_err(|_| GoFinError::validation("Invalid transaction envelope."))?
+            || transaction.chain_id != self.chain_id
+        {
+            return Err(GoFinError::validation(
+                "Replacement proof requires the original transaction envelope.",
+            ));
+        }
+        self.assert_chain().await?;
+        let original = hash(&submission.reference)?;
+        let sender = address(&transaction.sender)?;
+        let finalized = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["finalized", false]))
+            .await?;
+        if finalized.is_null() {
+            return Ok(None);
+        }
+        let height = rpc_u64(&finalized["number"])?;
+        let finalized_hash = hash(finalized["hash"].as_str().unwrap_or(""))?;
+        let nonce_at = |height: u64| async move {
+            self.rpc
+                .request_checked(
+                    "eth_getTransactionCount",
+                    json!([format!("{sender:#x}"), format!("{height:#x}")]),
+                    RpcReadRequirements {
+                        pin_block: Some(height),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .and_then(|v| rpc_u64(&v))
+        };
+        if nonce_at(height).await? <= transaction.nonce {
+            return Ok(None);
+        }
+        // Locate the first canonical block whose post-state has consumed the
+        // nonce. Exact historical state and a full block are both required.
+        let (mut low, mut high) = (0u64, height);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if nonce_at(middle).await? > transaction.nonce {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let block = self
+            .rpc
+            .request("eth_getBlockByNumber", json!([format!("{low:#x}"), true]))
+            .await?;
+        if block.is_null() || rpc_u64(&block["number"])? != low {
+            return Ok(None);
+        }
+        let block_hash = hash(block["hash"].as_str().unwrap_or(""))?;
+        let Some(transactions) = block["transactions"].as_array() else {
+            return Ok(None);
+        };
+        let matching: Vec<_> = transactions
+            .iter()
+            .filter(|tx| {
+                address(tx["from"].as_str().unwrap_or("")).ok() == Some(sender)
+                    && rpc_u64(&tx["nonce"]).ok() == Some(transaction.nonce)
+                    && hash(tx["blockHash"].as_str().unwrap_or("")).ok() == Some(block_hash)
+                    && rpc_u64(&tx["blockNumber"]).ok() == Some(low)
+            })
+            .collect();
+        if matching.len() != 1 {
+            return Ok(None);
+        }
+        let replacement = hash(matching[0]["hash"].as_str().unwrap_or(""))?;
+        if replacement == original {
+            return Ok(None);
+        }
+        // Guard against inconsistent endpoints or a finality change while
+        // searching; missing canonical evidence remains pending.
+        let canonical = self
+            .rpc
+            .request("eth_getBlockByNumber", json!([format!("{low:#x}"), false]))
+            .await?;
+        let anchor = self
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([format!("{height:#x}"), false]),
+            )
+            .await?;
+        if hash(canonical["hash"].as_str().unwrap_or(""))? != block_hash
+            || hash(anchor["hash"].as_str().unwrap_or(""))? != finalized_hash
+        {
+            return Ok(None);
+        }
+        let evidence = json!({"state":"finalized_nonce_replaced","outcome_replay_safe":true,"original_hash":submission.reference,"replacement_hash":format!("{replacement:#x}"),"sender":transaction.sender,"nonce":transaction.nonce,"block_number":low,"block_hash":format!("{block_hash:#x}"),"finalized_block_number":height,"finalized_block_hash":format!("{finalized_hash:#x}"),"financial_effects":[]});
+        let mut verified = gofin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: vec![],
+            evidence: evidence.clone(),
+            observed_at: gofin_domain::now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
+        Ok(Some(gofin_domain::Reconciliation {
+            status: gofin_domain::Status::Failed,
+            evidence,
+            verified: Some(verified),
+        }))
+    }
+
     pub async fn receipt(
         &self,
         submission: &Submission,
@@ -2712,18 +2831,28 @@ impl EvmRuntime {
                 "Receipt status is not a canonical success/revert value.",
             ));
         }
-        let gas = rpc_u64(&receipt["gasUsed"])?;
-        let price = rpc_u256(&receipt["effectiveGasPrice"])?;
-        if gas > transaction.gas || price > u256(&transaction.max_fee_per_gas)? {
-            return Err(error(
-                "RECEIPT_FEE_MISMATCH",
-                "reconciliation",
-                "Actual execution gas/price exceeds the approved envelope.",
-            ));
-        }
-        let fee = self
-            .receipt_total_fee(&receipt, &reported, &block, gas, price)
-            .await?;
+        let fee = if receipt["gasUsed"].is_null()
+            || receipt["effectiveGasPrice"].is_null()
+            || (self.chain_id == 8453
+                && reported["type"] != json!("0x7e")
+                && receipt["l1Fee"].is_null())
+        {
+            None
+        } else {
+            let gas = rpc_u64(&receipt["gasUsed"])?;
+            let price = rpc_u256(&receipt["effectiveGasPrice"])?;
+            if gas > transaction.gas || price > u256(&transaction.max_fee_per_gas)? {
+                return Err(error(
+                    "RECEIPT_FEE_MISMATCH",
+                    "reconciliation",
+                    "Actual execution gas/price exceeds the approved envelope.",
+                ));
+            }
+            Some(
+                self.receipt_total_fee(&receipt, &reported, &block, gas, price)
+                    .await?,
+            )
+        };
         Ok(Some(CanonicalReceipt {
             hash: expected,
             transaction_sender: transaction.sender.clone(),
@@ -2881,11 +3010,21 @@ impl EvmRuntime {
                 "Receipt status is not a canonical success/revert value.",
             ));
         }
-        let gas = rpc_u64(&receipt["gasUsed"])?;
-        let price = rpc_u256(&receipt["effectiveGasPrice"])?;
-        let fee = self
-            .receipt_total_fee(&receipt, &reported, &block, gas, price)
-            .await?;
+        let fee = if receipt["gasUsed"].is_null()
+            || receipt["effectiveGasPrice"].is_null()
+            || (self.chain_id == 8453
+                && reported["type"] != json!("0x7e")
+                && receipt["l1Fee"].is_null())
+        {
+            None
+        } else {
+            let gas = rpc_u64(&receipt["gasUsed"])?;
+            let price = rpc_u256(&receipt["effectiveGasPrice"])?;
+            Some(
+                self.receipt_total_fee(&receipt, &reported, &block, gas, price)
+                    .await?,
+            )
+        };
         Ok(Some(CanonicalReceipt {
             hash: expected,
             transaction_sender: lower_address(address(reported["from"].as_str().unwrap_or(""))?),
@@ -2914,6 +3053,7 @@ pub fn validate_materialized_permit_template(
         || concrete.gas != expected.gas
         || concrete.max_fee_per_gas != expected.max_fee_per_gas
         || concrete.max_priority_fee_per_gas != expected.max_priority_fee_per_gas
+        || concrete.rollup_fee != expected.rollup_fee
     {
         return Err(error(
             "PERMIT_TRANSACTION_MISMATCH",
@@ -3284,7 +3424,7 @@ mod http_rpc_tests {
         assert_eq!(observed.block_number, 16);
         assert_eq!(observed.confirmations, 2);
         assert!(observed.success);
-        assert_eq!(observed.fee, U256::from(0x5208 * 2));
+        assert_eq!(observed.fee, Some(U256::from(0x5208 * 2)));
         assert_eq!(
             observed.receipt["logs"][0]["address"],
             "0x3333333333333333333333333333333333333333"
@@ -3353,6 +3493,89 @@ mod http_rpc_tests {
                 "eth_getBlockByNumber"
             ]
         );
+    }
+
+    struct ReplacementRpc {
+        consumed: bool,
+        replacement_is_original: bool,
+    }
+    #[async_trait]
+    impl EvmRpc for ReplacementRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let block_hash = format!("0x{}", "22".repeat(32));
+            Ok(match method {
+                "eth_chainId" => json!("0x1"),
+                "eth_getTransactionCount" => {
+                    let height = rpc_u64(&params[1])?;
+                    json!(if self.consumed && height >= 2 {
+                        "0x1"
+                    } else {
+                        "0x0"
+                    })
+                }
+                "eth_getBlockByNumber" => {
+                    let height = if params[0] == "finalized" {
+                        4
+                    } else {
+                        rpc_u64(&params[0])?
+                    };
+                    let transactions = if params[1] == true && height == 2 {
+                        json!([{
+                            "from":"0x4444444444444444444444444444444444444444", "nonce":"0x0",
+                            "blockHash":block_hash, "blockNumber":"0x2",
+                            "hash":format!("0x{}", if self.replacement_is_original { "11" } else { "33" }.repeat(32))
+                        }])
+                    } else {
+                        json!([])
+                    };
+                    json!({"number":format!("{height:#x}"),"hash":block_hash,"transactions":transactions})
+                }
+                _ => panic!("unexpected RPC {method}"),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn replacement_requires_a_different_transaction_in_finalized_canonical_block() {
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: "0x4444444444444444444444444444444444444444".into(),
+            to: "0x5555555555555555555555555555555555555555".into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: format!("0x{}", "11".repeat(32)),
+            data: json!({"transaction":transaction}),
+        };
+        for (consumed, replacement_is_original, expected) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let runtime = EvmRuntime::new(
+                Arc::new(ReplacementRpc {
+                    consumed,
+                    replacement_is_original,
+                }),
+                1,
+                None,
+            );
+            let result = runtime
+                .finalized_nonce_replacement(&submission, &transaction)
+                .await
+                .unwrap();
+            assert_eq!(result.is_some(), expected);
+            if let Some(result) = result {
+                assert_eq!(result.status, gofin_domain::Status::Failed);
+                assert_eq!(result.evidence["state"], "finalized_nonce_replaced");
+            }
+        }
     }
 
     #[tokio::test]

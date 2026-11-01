@@ -56,6 +56,11 @@ impl Authorizer for Approval {
     }
 }
 async fn setup() -> (tempfile::TempDir, Client, Arc<fixture::Fixture>, String) {
+    setup_with_other(false).await
+}
+async fn setup_with_other(
+    other: bool,
+) -> (tempfile::TempDir, Client, Arc<fixture::Fixture>, String) {
     let temp = tempfile::tempdir().unwrap();
     let signer = Arc::new(
         LocalEnvelopeSigner::from_private_key(
@@ -83,7 +88,11 @@ async fn setup() -> (tempfile::TempDir, Client, Arc<fixture::Fixture>, String) {
         .unwrap()
         .with_wallet_valuation(valuator.clone()),
     );
-    let profile = Arc::new(venue.profile());
+    let profile = Arc::new(if other {
+        venue.profile_with_other(true)
+    } else {
+        venue.profile()
+    });
     let exchange = Arc::new(gofin_exchange::ExchangeAdapter::new(
         profile.without_operation("hyperliquid.account.deposit"),
     ));
@@ -160,6 +169,40 @@ async fn execute(client: &Client, op: &str, input: Value) -> Value {
             true,
         )
         .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires GOFIN_KRAKEN_PLAN_CLI synthetic-kraken-build"]
+async fn missing_hyperliquid_order_stays_uncertain_without_replay() {
+    assert!(std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some());
+    let (temp, client, venue, _) = setup_with_other(true).await;
+    venue.seed_reverse_position(100_000_000, 0);
+    venue.lose_first_order.store(true, Ordering::SeqCst);
+    let input = json!({"request_id":"missing-hl","account":"synthetic-hl","symbol":"SOL/USDC:USDC","market_type":"perpetual","side":"buy","order_type":"limit","size":"0.1","limit_price":"100","time_in_force":"ioc","reduce_only":false,"max_notional_usdc":"10","max_fee_usdc":"0.1","max_realized_loss_usdc":"0"});
+    let original = execute(&client, "hyperliquid.orders.place", input.clone()).await;
+    assert!(original["submission"].is_object(), "{original}");
+    assert_eq!(original["outcome"]["replay_safe"], false);
+    let mut probe = input.clone();
+    probe["request_id"] = json!("missing-hl-probe");
+    let other = execute(&client, "hyperliquid.orders.place", probe).await;
+    assert!(other["submission"].is_object(), "{other}");
+    let mut other_input = input.clone();
+    other_input["request_id"] = json!("missing-hl-other");
+    other_input["account"] = json!("synthetic-hl-other");
+    other_input["time_in_force"] = json!("gtc");
+    let different = execute(&client, "hyperliquid.orders.place", other_input).await;
+    assert!(different["submission"].is_object(), "{different}");
+    let runtime = client.runtime.clone();
+    drop(client);
+    let client = Client::new(runtime, temp.path()).await;
+    let repeated = execute(&client, "hyperliquid.orders.place", input).await;
+    assert_eq!(repeated["id"], original["id"]);
+    assert_eq!(repeated["submission"], original["submission"]);
+    assert_eq!(repeated["outcome"]["replay_safe"], false);
+    assert_eq!(venue.native_dispatches.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"outcome.a13.hyperliquid","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"different_account_probed":true})).unwrap()).unwrap();
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires GOFIN_KRAKEN_PLAN_CLI synthetic-kraken-build"]
@@ -320,4 +363,88 @@ async fn positive_hyperliquid_spot_via_public_cli() {
         .await;
     assert_eq!(done["status"], "completed", "{done}");
     assert_eq!(venue.cash().0, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires GOFIN_KRAKEN_PLAN_CLI synthetic-kraken-build"]
+async fn hyperliquid_withdrawal_without_correlated_ledger_stays_unconfirmed() {
+    let (temp, client, venue, wallet) = setup_with_other(true).await;
+    venue.seed_reverse_position(100_000_000, 0);
+    venue.hide_withdrawal_ledger.store(true, Ordering::SeqCst);
+    let input = json!({"request_id":"unconfirmed-hl-withdraw","account":"synthetic-hl","asset":"USDC","amount":"5","address":wallet,"max_amount_usdc":"5","max_fee_usdc":"0.01"});
+    let original = execute(&client, "hyperliquid.account.withdraw", input.clone()).await;
+    assert!(original["submission"].is_object(), "{original}");
+    assert_eq!(original["outcome"]["dispatch"], "dispatched", "{original}");
+    assert_eq!(
+        original["outcome"]["transfer"], "source_pending",
+        "{original}"
+    );
+    assert_ne!(original["outcome"]["phase"], "done", "{original}");
+    assert_eq!(original["outcome"]["replay_safe"], false, "{original}");
+    for (id, account) in [
+        ("hl-withdraw-same", "synthetic-hl"),
+        ("hl-withdraw-other", "synthetic-hl-other"),
+    ] {
+        let order = json!({"request_id":id,"account":account,"symbol":"SOL/USDC:USDC","market_type":"perpetual","side":"buy","order_type":"limit","size":"0.1","limit_price":"100","time_in_force":"ioc","reduce_only":false,"max_notional_usdc":"10","max_fee_usdc":"0.1","max_realized_loss_usdc":"0"});
+        let probe = execute(&client, "hyperliquid.orders.place", order).await;
+        assert!(probe["submission"].is_object(), "{probe}");
+    }
+    let id = original["id"].as_str().unwrap();
+    let observed = client
+        .call(
+            args(&["status", id, "--json"]),
+            BrokerRequest::Status { id: id.into() },
+            true,
+        )
+        .await;
+    assert_eq!(
+        observed["outcome"]["transfer"], "source_pending",
+        "{observed}"
+    );
+    assert!(
+        observed["outcome"]["next_action"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Hyperliquid"),
+        "{observed}"
+    );
+    venue.tamper_withdrawal_detail.store(true, Ordering::SeqCst);
+    let later = client
+        .call(
+            args(&["status", id, "--json"]),
+            BrokerRequest::Status { id: id.into() },
+            true,
+        )
+        .await;
+    assert_eq!(
+        later["outcome"]["dispatch"], "dispatched",
+        "known acceptance survives a later mismatched response: {later}"
+    );
+    assert_eq!(later["outcome"]["transfer"], "source_pending", "{later}");
+    assert_eq!(later["outcome"]["replay_safe"], false);
+    let runtime = client.runtime.clone();
+    drop(client);
+    let client = Client::new(runtime, temp.path()).await;
+    let repeated = execute(&client, "hyperliquid.account.withdraw", input).await;
+    assert_eq!(repeated["id"], original["id"]);
+    assert_eq!(repeated["submission"], original["submission"]);
+    assert_eq!(venue.native_dispatches.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&json!({"scenario":"outcome.a15.hyperliquid.unconfirmed","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"different_account_probed":true,"limitation":"No correlated failed-withdrawal or refund evidence is supplied by the controlled Hyperliquid ledger."})).unwrap()).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires GOFIN_KRAKEN_PLAN_CLI synthetic-kraken-build"]
+async fn hyperliquid_withdrawal_mismatched_explorer_detail_does_not_prove_acceptance() {
+    let (_temp, client, venue, wallet) = setup().await;
+    venue.seed_reverse_position(100_000_000, 0);
+    venue.hide_withdrawal_ledger.store(true, Ordering::SeqCst);
+    venue.tamper_withdrawal_detail.store(true, Ordering::SeqCst);
+    let input = json!({"request_id":"mismatched-hl-withdraw","account":"synthetic-hl","asset":"USDC","amount":"5","address":wallet,"max_amount_usdc":"5","max_fee_usdc":"0.01"});
+    let original = execute(&client, "hyperliquid.account.withdraw", input).await;
+    assert_eq!(original["outcome"]["dispatch"], "uncertain", "{original}");
+    assert_eq!(original["outcome"]["transfer"], "unknown", "{original}");
+    assert_eq!(original["outcome"]["replay_safe"], false);
+    assert_eq!(venue.native_dispatches.load(Ordering::SeqCst), 1);
 }

@@ -1,0 +1,8 @@
+//! Synthetic protected configuration emitted by the schema-25 baseline.
+use gofin_broker::{BrokerConfigV2, BrokerPolicy, NetworkConfig, DeploymentConfig};
+use std::collections::BTreeMap;
+fn main() {
+    let config=BrokerConfigV2 {version:2,networks:vec![NetworkConfig::ethereum_mainnet()],deployments:vec![DeploymentConfig::ethereum_mainnet()],connections:vec![],policy:BrokerPolicy {require_run_for_writes:false,max_movement_usd_micros:"50000000".into(),max_run_allocation_usd_micros:"50000000".into(),preview_ttl_seconds:60,allow_unpriced_exchange_assets:false},approver_uid:501,extensions:BTreeMap::new()};
+    config.validate().unwrap();
+    std::fs::write(std::env::args().nth(1).unwrap(),serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}

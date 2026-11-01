@@ -29,6 +29,28 @@ struct ApprovalPresentationTests {
             "output":["amount":"5", "asset":asset, "account":["name":"destination"]]]
         guard case .success(let transferReason) = typedFinancialApprovalReason(envelope(partialTransfer)) else { fatalError("Valid partial transfer rejected") }
         assert(transferReason == "transfer 5 USDC from source to destination on Example; at least 5 USDC; input: USDC", transferReason)
+        var classified = partialTransfer
+        classified["terms"] = [
+            ["label":"Input amount", "value":"5 USDC", "enforcement":"enforced"],
+            ["label":"Expected USD value", "value":"unavailable", "enforcement":"estimate"],
+            ["label":"Venue fee", "value":"Not capped; determined by venue", "enforcement":"after_execution"]
+        ]
+        guard case .success(let classifiedReason) = typedFinancialApprovalReason(envelope(classified)) else { fatalError("Classified intent rejected") }
+        assert(classifiedReason.contains("Input amount [enforced]: 5 USDC"))
+        assert(classifiedReason.contains("Expected USD value [estimate]: unavailable"))
+        assert(classifiedReason.contains("Venue fee [checked after execution]: Not capped; determined by venue"))
+        var advised = classified
+        advised["advisories"] = [["operation_id":"original-uncertain", "operation":"wallet.transfer",
+            "amounts":[["resource":"wallet-a", "amount":["asset":["network":"ethereum:1", "reference":"native", "decimals":18], "atoms":"1000000000000000"]]]]]
+        guard case .success(let warning) = typedFinancialApprovalReason(envelope(advised)) else { fatalError("Advisory blocked approval") }
+        assert(warning.contains("original-uncertain"))
+        assert(warning.contains("0.001 ethereum:1/native"))
+        assert(warning.contains("does not block"))
+        advised["advisories"] = [["operation_id":"bad\u{001b}history"]]
+        guard case .success(let skipped) = typedFinancialApprovalReason(envelope(advised)) else { fatalError("Malformed advisory blocked approval") }
+        assert(!skipped.contains("bad"))
+        classified["terms"] = [["label":"Fee", "value":"0.1 USDC", "enforcement":"silently_unbounded"]]
+        guard case .failure(.invalid) = typedFinancialApprovalReason(envelope(classified)) else { fatalError("Unknown enforcement accepted") }
         // The fixture enumerates Rust’s generated ApprovalAction schema and
         // serializes each validated review through the native contract.
         if let path = ProcessInfo.processInfo.environment["GOFIN_NATIVE_FINANCIAL_FIXTURES"] {

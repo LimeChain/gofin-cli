@@ -210,34 +210,22 @@ async fn fresh_quote_updates_within_approved_ceiling_keep_one_approval_and_submi
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     assert!(record.submission.is_some(), "{record:?}");
-    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
+    let price_calls = prices.calls.load(Ordering::SeqCst);
+    assert!(price_calls >= 2);
     let prepared = record.preview.as_ref().unwrap();
     assert_eq!(
-        prepared
-            .valuation
-            .as_ref()
-            .unwrap()
-            .movement_usd_micros
-            .as_str(),
-        "20000"
-    );
-    assert_eq!(
         record.approval.as_ref().unwrap().binding_hash,
-        gofin_domain::binding_hash(&gofin_domain::authorization_binding(prepared)).unwrap()
+        gofin_domain::binding_hash(&gofin_domain::native_authorization_binding(prepared)).unwrap()
     );
     // Retrying the same logical request cannot authorize or submit another write.
     assert_eq!(engine.execute(request).await.unwrap().id, record.id);
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
-    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(prices.calls.load(Ordering::SeqCst), price_calls);
 }
 
 #[tokio::test]
-async fn engine_rejects_final_quote_movement_before_any_binance_post() {
-    // This synthetic price feed values a selected 99-unit withdrawal at $99
-    // during preparation, then $100.98 in the engine's single post-approval
-    // adapter revalidation. Submission must reuse the checked candidate;
-    // the final quote must not escape the approved $100 movement ceiling.
+async fn advisory_price_movement_does_not_block_native_withdrawal() {
     let prices = Arc::new(ScriptedPrices::new(&["1.02", "1.00"]));
     let transport = Arc::new(RecordingTransport::default());
     let adapter = Arc::new(
@@ -272,31 +260,11 @@ async fn engine_rejects_final_quote_movement_before_any_binance_post() {
         .await
         .unwrap();
 
-    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
+    assert!(prices.calls.load(Ordering::SeqCst) >= 2);
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
-    assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     assert!(record.approval.is_some());
-    assert!(record.submission.is_none());
-    let approved_movement = record
-        .preview
-        .as_ref()
-        .unwrap()
-        .valuation
-        .as_ref()
-        .unwrap()
-        .movement_usd_micros
-        .as_str()
-        .parse::<u64>()
-        .unwrap();
-    let final_quote_usd_micros_per_unit = 1_020_000u64;
-    let final_movement = 99u64 * final_quote_usd_micros_per_unit;
-    assert_eq!(approved_movement, 99_000_000);
-    assert_eq!(final_movement, 100_980_000);
-    assert!(final_movement > 100_000_000);
-    assert_eq!(
-        record.error.as_ref().map(|error| error.code.as_str()),
-        Some("PREVIEW_CHANGED")
-    );
+    assert!(record.submission.is_some());
 }
 
 #[tokio::test]
@@ -345,7 +313,7 @@ async fn adapter_accepts_unchanged_quote_with_engine_enriched_price_rows() {
 }
 
 #[tokio::test]
-async fn duplicate_adapter_native_price_identity_is_rejected() {
+async fn advisory_price_rows_do_not_change_native_authority() {
     use gofin_domain::Adapter;
     let prices = Arc::new(ScriptedPrices::new(&["1.00", "1.00"]));
     let adapter = BinanceAdapter::new(
@@ -366,14 +334,11 @@ async fn duplicate_adapter_native_price_identity_is_rejected() {
         .unwrap()
         .prices
         .push(native_binance_row);
-    assert_eq!(
-        adapter.revalidate(&approved).await.unwrap_err().code,
-        "PREVIEW_CHANGED"
-    );
+    assert!(adapter.revalidate(&approved).await.is_ok());
 }
 
 #[tokio::test]
-async fn provider_timestamp_survives_prepare_and_expired_quotes_block_submission() {
+async fn provider_timestamp_survives_prepare_and_expired_quotes_are_omitted() {
     use gofin_domain::Adapter;
     for seconds in [90, 121] {
         let timestamp = (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339();
@@ -401,18 +366,18 @@ async fn provider_timestamp_survives_prepare_and_expired_quotes_block_submission
             assert_eq!(valuation.observed_at, timestamp);
             assert_eq!(valuation.prices[0].observed_at, timestamp);
         } else {
-            assert_eq!(result.unwrap_err().code, "STALE_VALUATION");
+            assert!(result.unwrap().valuation.is_none());
         }
         assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
     }
 }
 
 #[tokio::test]
-async fn stale_zero_and_unavailable_quotes_fail_closed_during_prepare() {
+async fn unavailable_advisory_quotes_do_not_block_native_preparation() {
     use gofin_domain::Adapter;
-    for (provider, expected) in [
-        (Arc::new(ScriptedPrices::stale()), "STALE_VALUATION"),
-        (Arc::new(ScriptedPrices::zero()), "VALUATION_INVALID"),
+    for provider in [
+        Arc::new(ScriptedPrices::stale()),
+        Arc::new(ScriptedPrices::zero()),
     ] {
         let adapter = BinanceAdapter::new(
             config(),
@@ -421,13 +386,13 @@ async fn stale_zero_and_unavailable_quotes_fail_closed_during_prepare() {
             Some(Arc::new(PendingRecipientVerifier)),
         )
         .unwrap();
-        assert_eq!(
+        assert!(
             adapter
                 .prepare("binance.withdraw", &withdrawal_input())
                 .await
-                .unwrap_err()
-                .code,
-            expected
+                .unwrap()
+                .valuation
+                .is_none()
         );
     }
 
@@ -450,12 +415,12 @@ async fn stale_zero_and_unavailable_quotes_fail_closed_during_prepare() {
         Some(Arc::new(PendingRecipientVerifier)),
     )
     .unwrap();
-    assert_eq!(
+    assert!(
         adapter
             .prepare("binance.withdraw", &withdrawal_input())
             .await
-            .unwrap_err()
-            .code,
-        "PRICE_UNAVAILABLE"
+            .unwrap()
+            .valuation
+            .is_none()
     );
 }

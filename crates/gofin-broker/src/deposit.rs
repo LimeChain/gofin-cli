@@ -1061,7 +1061,7 @@ impl BinanceEthereumDepositAdapter {
             source_asset: Some(source_asset.clone()),
             usd_ceiling: None,
         };
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: operation.into(),
             input: raw.clone(),
             binding: serde_json::to_value(binding).map_err(|_| internal_error())?,
@@ -1075,16 +1075,6 @@ impl BinanceEthereumDepositAdapter {
             operation_version: 2,
             action_deadline: None,
         };
-        // Compose the wallet's approved USD ceilings without changing its exact
-        // principal or gas envelope. Legacy inner previews retain exact pricing.
-        if approved_inner.is_none()
-            || inner_preview
-                .binding
-                .product_get(gofin_domain::value_bounds::KEY)?
-                .is_some()
-        {
-            gofin_domain::value_bounds::bind(&mut prepared);
-        }
         Ok(prepared)
     }
 
@@ -1191,20 +1181,17 @@ impl BinanceEthereumDepositAdapter {
             source_asset: Some(source_asset.clone()),
             usd_ceiling: None,
         };
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: operation.into(), input: raw.clone(), binding: serde_json::to_value(binding).map_err(|_| internal_error())?,
             summary,
             checks: vec![Check { name:"venue_deposit_enabled".into(), status:CheckStatus::Passed, detail:format!("Binance confirms {coin} deposits are enabled on SOL and supplies an exact credit minimum.") }, Check { name:"asset_identity".into(), status:CheckStatus::Passed, detail:format!("Exact Solana asset {} with {} decimals is fixed by finalized mint metadata.", source_asset.reference, source_asset.decimals) }, Check { name:"solana_transfer_preview".into(), status:CheckStatus::Passed, detail:"Ordinary wallet.transfer froze the exact owner, recipient, amount, mint and fee limits.".into() }],
             warnings: vec!["A finalized Solana transaction does not complete this operation until Binance records the exact usable deposit credit and matching free-balance increase.".into()],
             observed_at:inner_preview.observed_at.clone(), expires_at:inner_preview.expires_at.clone(), valuation:inner_preview.valuation.clone(), intent, operation_version:2, action_deadline:None,
         };
-        if approved_inner.is_none()
-            || inner_preview
+        if approved_inner.is_some() {
+            inner_preview
                 .binding
-                .product_get(gofin_domain::value_bounds::KEY)?
-                .is_some()
-        {
-            gofin_domain::value_bounds::bind(&mut prepared);
+                .product_get(gofin_domain::value_bounds::KEY)?;
         }
         Ok(prepared)
     }

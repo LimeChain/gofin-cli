@@ -29,6 +29,12 @@ fn error(code: &str, stage: &str, message: &str) -> GoFinError {
 /// deliberately not an Adapter: authorization-sensitive lifecycle is shared.
 #[async_trait]
 pub trait ExchangeProfile: Send + Sync {
+    fn supports_approved_reprepare(&self, _prepared: &PreparedOperation) -> bool {
+        false
+    }
+    fn supports_independent_submission(&self, _prepared: &PreparedOperation) -> bool {
+        false
+    }
     type Request: Send + Sync;
     fn attach_execution_state(
         &self,
@@ -272,6 +278,16 @@ pub trait ExchangeProfile: Send + Sync {
             "This exchange profile has no supported reconciliation operation.",
         ))
     }
+    async fn observe_transfer_side(
+        &self,
+        _record: &OperationRecord,
+        _submission: &Submission,
+        _side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        Err(GoFinError::validation(
+            "Independent side observation is unavailable for this exchange.",
+        ))
+    }
     async fn reconcile_submission_with_compound_context(
         &self,
         record: &OperationRecord,
@@ -365,6 +381,24 @@ impl<P: ExchangeProfile> ExchangeAdapter<P> {
 
 #[async_trait]
 impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
+    fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
+        self.profile.supports_approved_reprepare(prepared)
+    }
+    fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
+        self.profile.supports_independent_submission(prepared)
+    }
+    fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
+        // Polling usefulness heuristic only: not a retention promise or nonexecution proof.
+        matches!(
+            record.operation.as_str(),
+            "binance.withdraw"
+                | "kraken.withdraw-funds"
+                | "kraken.create-funding-withdrawal-v1"
+                | "coinbase.withdraw"
+        )
+        .then(|| std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+
     fn attach_execution_state(
         &self,
         state: Arc<dyn gofin_domain::execution_state::ExecutionState>,
@@ -781,6 +815,31 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             return Ok(unknown("Unsupported exchange reconciliation operation."));
         }
         self.profile.reconcile_submission(record, submission).await
+    }
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        if !matches!(side, "source" | "destination")
+            || !matches!(
+                record.operation.as_str(),
+                "binance.withdraw"
+                    | "kraken.withdraw-funds"
+                    | "kraken.create-funding-withdrawal-v1"
+                    | "coinbase.withdraw"
+            )
+        {
+            return Err(GoFinError::validation(
+                "Side observation is unavailable for this operation.",
+            ));
+        }
+        let submission = record.submission.as_ref().ok_or_else(|| {
+            GoFinError::validation("Original submission identity is unavailable.")
+        })?;
+        self.profile
+            .observe_transfer_side(record, submission, side)
+            .await
     }
     async fn reconcile_configuration(
         &self,

@@ -34,7 +34,7 @@ class CacheTests(unittest.TestCase):
         self.second = self.root / "worktree-b/bin"
         self.build = self.enterContext(patch.object(installer, "build", side_effect=self.fake_build))
 
-    def fake_build(self, destination):
+    def fake_build(self, destination, patches=None):
         binary = destination / "surfpool"
         binary.write_text("#!/bin/sh\necho 'surfpool 1.5.0'\n")
         binary.chmod(0o755)
@@ -55,6 +55,15 @@ class CacheTests(unittest.TestCase):
                          (self.second / "surfpool-build.txt").read_bytes())
         with patch.object(validator.shutil, "which", return_value=str(self.second / "surfpool")):
             validator.validate_surfpool()
+
+    def test_expiry_patch_uses_a_separate_cached_build(self):
+        self.install(self.first)
+        installer.install(self.second, self.cache, expiry_proof=True)
+        self.assertEqual(self.build.call_count, 2)
+        patches = self.build.call_args.args[1]
+        self.assertEqual(patches, [installer.PATCH, installer.EXPIRY_PATCH])
+        self.assertNotEqual((self.first / "surfpool-build.txt").read_text(),
+                            (self.second / "surfpool-build.txt").read_text())
 
     def test_installed_binary_survives_cache_eviction(self):
         self.install(self.first)
@@ -114,7 +123,7 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.build.call_count, 5)
 
     def test_failed_build_is_not_published_and_retry_succeeds(self):
-        def fail(destination):
+        def fail(destination, patches=None):
             self.fake_build(destination)
             raise RuntimeError("interrupted build")
 
@@ -137,7 +146,7 @@ class CacheTests(unittest.TestCase):
                 contended.set()
             return real_flock(*args)
 
-        def blocked_build(destination):
+        def blocked_build(destination, patches=None):
             started.set()
             if not release.wait(timeout=5):
                 raise RuntimeError("test timed out")

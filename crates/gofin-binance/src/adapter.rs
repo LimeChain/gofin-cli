@@ -173,6 +173,11 @@ fn transport_error(stage: &str, error_value: TransportError) -> GoFinError {
             stage,
             "Binance timed out; reconcile any persisted submission before retrying.",
         ),
+        TransportError::OrderNotFound => error(
+            "VENUE_ORDER_NOT_FOUND",
+            stage,
+            "Binance reports that the selected order was not found.",
+        ),
         TransportError::Rejected => error(
             "VENUE_REQUEST_FAILED",
             stage,
@@ -219,6 +224,10 @@ impl BinanceAdapter {
 
 #[async_trait]
 impl Adapter for BinanceAdapter {
+    fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
+        self.0.observation_horizon(record)
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         self.0.definitions()
     }
@@ -315,6 +324,13 @@ impl Adapter for BinanceAdapter {
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, GoFinError> {
         self.0.reconcile(record).await
+    }
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        self.0.observe_transfer_side(record, side).await
     }
 }
 
@@ -953,10 +969,36 @@ impl BinanceProfile {
         movement: &str,
         max_fee: &str,
     ) -> Result<Option<Valuation>, GoFinError> {
+        // USD observations are advisory: invalid, stale or unavailable quotes
+        // never veto an independently validated native operation.
+        Ok(self
+            .valuation_checked(coin, movement, max_fee)
+            .await
+            .ok()
+            .flatten())
+    }
+
+    async fn valuation_checked(
+        &self,
+        coin: &str,
+        movement: &str,
+        max_fee: &str,
+    ) -> Result<Option<Valuation>, GoFinError> {
         let Some(provider) = &self.price_provider else {
             return Ok(None);
         };
-        let quote = provider.quote_usd(coin).await?;
+        let quote = match provider.quote_usd(coin).await {
+            Ok(quote) => quote,
+            Err(_) => return Ok(None),
+        };
+        let identity = AssetId {
+            network: "binance".into(),
+            reference: coin.into(),
+            decimals: 36,
+        };
+        if gofin_domain::unpriced::is_source(&identity, &quote.source) {
+            return Ok(None);
+        }
         let price = ExactDecimal::parse(&quote.usd_per_unit).map_err(|_| {
             error(
                 "VALUATION_INVALID",
@@ -2169,7 +2211,7 @@ fn prepared(
             " Unpriced {names}: $0 estimate, excluded from USD limits."
         ));
     }
-    gofin_domain::value_bounds::bind(&mut result);
+
     result
 }
 
@@ -3229,25 +3271,8 @@ impl ExchangeProfile for BinanceProfile {
                     .flatten()
                 && gofin_domain::value_bounds::validate(refreshed).is_ok();
         }
-        if trading::is_write(&approved.operation) {
-            return trading::valuation_matches(approved, refreshed);
-        }
-        if matches!(
-            approved.operation.as_str(),
-            "binance.futures.leverage-set" | "binance.futures.margin-type-set"
-        ) {
-            return [approved, refreshed].iter().all(|p| {
-                p.intent.debits.is_empty()
-                    && p.intent.maximum_costs.is_empty()
-                    && p.valuation.as_ref().is_some_and(|v| {
-                        v.movement_usd_micros.is_zero()
-                            && v.maximum_fee_usd_micros.is_zero()
-                            && v.additional_allocation_usd_micros.is_zero()
-                            && v.prices.is_empty()
-                    })
-            });
-        }
-        approved_native_valuation_matches(approved, refreshed)
+        // New approvals bind exact native financial terms; reporting prices are optional.
+        true
     }
 
     async fn plan_submission(
@@ -3557,6 +3582,31 @@ impl ExchangeProfile for BinanceProfile {
         Ok(())
     }
 
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        if record.operation != "binance.withdraw" {
+            return Err(GoFinError::validation(
+                "Independent side observation is unavailable for this operation.",
+            ));
+        }
+        if side == "source" {
+            let observation = self.reconcile_withdrawal(record, submission, true).await?;
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata: json!({"side":"source","scope":"binance_withdrawal_history"}),
+                reconciliation: Some(observation),
+            });
+        }
+        if side != "destination" {
+            return Err(GoFinError::validation("Choose source or destination."));
+        }
+        self.observe_withdrawal_destination(record, submission)
+            .await
+    }
+
     async fn reconcile_submission(
         &self,
         record: &OperationRecord,
@@ -3584,7 +3634,7 @@ impl ExchangeProfile for BinanceProfile {
                 self.reconcile_sub_to_master(record, submission).await
             }
             "binance.transfer" => self.reconcile_transfer(record, submission).await,
-            "binance.withdraw" => self.reconcile_withdrawal(record, submission).await,
+            "binance.withdraw" => self.reconcile_withdrawal(record, submission, false).await,
             _ => Ok(Reconciliation {
                 status: Status::Unknown,
                 evidence: json!({"reason":"Unsupported Binance reconciliation operation."}),
@@ -4537,10 +4587,125 @@ impl BinanceProfile {
         })
     }
 
+    async fn observe_withdrawal_destination(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        let data = &submission.data;
+        let binding = &data["binding"];
+        let evidence = record.last_reconciliation_evidence.as_ref().ok_or_else(|| GoFinError::validation("Observe the original venue withdrawal first to obtain its transaction identity."))?;
+        let source = std::iter::once(evidence)
+            .chain(
+                evidence
+                    .get("previous_observations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .rev(),
+            )
+            .filter_map(|entry| entry.get("withdrawal"))
+            .find(|row| {
+                row["withdrawOrderId"].as_str() == Some(submission.reference.as_str())
+                    && row["status"].as_u64() == Some(6)
+            })
+            .ok_or_else(|| {
+                GoFinError::validation(
+                    "No durable original venue transaction identity is available.",
+                )
+            })?;
+        if source["withdrawOrderId"].as_str() != Some(submission.reference.as_str())
+            || source["status"].as_u64() != Some(6)
+            || source["coin"] != data["coin"]
+            || source["network"] != data["network"]
+        {
+            return Err(GoFinError::validation(
+                "The persisted venue observation does not match this withdrawal.",
+            ));
+        }
+        let tx_hash = source["txId"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            .ok_or_else(|| {
+                GoFinError::validation(
+                    "The original venue observation has no transaction identity.",
+                )
+            })?;
+        let network = data["network"]
+            .as_str()
+            .or_else(|| binding["network"].as_str())
+            .ok_or_else(|| GoFinError::validation("Original withdrawal network is missing."))?;
+        let asset: AssetId = serde_json::from_value(binding["asset"].clone())
+            .map_err(|_| GoFinError::validation("Original payout asset is invalid."))?;
+        let verifier = self
+            .recipient_verifier
+            .as_ref()
+            .filter(|v| v.supports_asset(network, &asset))
+            .ok_or_else(|| {
+                GoFinError::validation("The original destination observer is unavailable.")
+            })?;
+        let recipient = binding["receiptAddress"]
+            .as_str()
+            .or_else(|| source["address"].as_str())
+            .ok_or_else(|| GoFinError::validation("Original recipient is missing."))?;
+        if source["address"]
+            .as_str()
+            .is_none_or(|a| !a.eq_ignore_ascii_case(recipient))
+        {
+            return Err(GoFinError::validation(
+                "Persisted venue destination differs from the approved recipient.",
+            ));
+        }
+        let positive_atom = if asset.decimals == 0 {
+            "1".to_owned()
+        } else {
+            format!(
+                "0.{}1",
+                "0".repeat(asset.decimals.saturating_sub(1) as usize)
+            )
+        };
+        let receipt = verifier
+            .verify(PayoutRequest {
+                tx_hash: tx_hash.into(),
+                network: network.into(),
+                memo: data["memo"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                chain_id: binding["chainId"]
+                    .as_u64()
+                    .or_else(|| binance_evm_chain_id(network))
+                    .unwrap_or(0),
+                recipient: recipient.into(),
+                asset,
+                minimum_amount: positive_atom,
+                maximum_amount: data["maximumReceive"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                confirmations: binding["confirmations"]
+                    .as_u64()
+                    .and_then(|v| v.try_into().ok())
+                    .unwrap_or(1),
+            })
+            .await;
+        let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount_atoms});
+        let evidence = json!({"withdrawal":source,"destination_observation":metadata,"outcome_transfer":"in_transit"});
+        Ok(gofin_domain::TransferSideObservation {
+            metadata,
+            reconciliation: Some(Reconciliation {
+                status: Status::Pending,
+                evidence,
+                verified: None,
+            }),
+        })
+    }
+
     async fn reconcile_withdrawal(
         &self,
         record: &OperationRecord,
         submission: &Submission,
+        source_only: bool,
     ) -> Result<Reconciliation, GoFinError> {
         let unknown = |evidence: Value| Reconciliation {
             status: Status::Unknown,
@@ -4786,6 +4951,24 @@ impl BinanceProfile {
         }
         let base_evidence = redact_funding_row(&row);
         let status = row.status;
+        if source_only {
+            let mut evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,
+                "outcome_transfer": if status == 6 { "in_transit" } else { "source_pending" }});
+            if status == 0 {
+                evidence["outcome_attention"] = json!({"kind":"action_required","venue":"Binance",
+                    "reason":"Binance reports that a withdrawal confirmation email was sent.",
+                    "where_to_act":"Confirm the withdrawal using the Binance email or Binance App."});
+            }
+            return Ok(Reconciliation {
+                status: if matches!(status, 1 | 3 | 5) {
+                    Status::Failed
+                } else {
+                    Status::Pending
+                },
+                evidence,
+                verified: None,
+            });
+        }
         let source_before =
             observed_decimal(data["sourceFreeBefore"].as_str().unwrap_or_default())?;
         // An account balance is shared and may include unrelated concurrent
@@ -4804,22 +4987,20 @@ impl BinanceProfile {
             .as_ref()
             .and_then(|current| decimal_delta(&source_before, current));
         if matches!(status, 1 | 3 | 5) {
-            if aggregate_debit.as_ref().is_some_and(ExactDecimal::is_zero) {
-                let evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.as_ref().map(ExactDecimal::canonical),"aggregateSourceDebitObserved":"0","venueState":"failed"});
-                return Ok(Reconciliation {
-                    status: Status::Failed,
-                    evidence: evidence.clone(),
-                    verified: Some(make_verified(submission.clone(), vec![], evidence)?),
-                });
-            }
-            return Ok(unknown(
-                json!({"withdrawal":base_evidence,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"reason":"Binance reports withdrawal failure but an aggregate source debit remains or could not be established; keep it unresolved."}),
-            ));
+            return Ok(Reconciliation {
+                status: Status::Failed,
+                evidence: json!({"withdrawal":base_evidence,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"outcome_transfer":"source_pending","reason":"Binance reports withdrawal failure; a refund correlated to this withdrawal has not yet been established."}),
+                verified: None,
+            });
         }
         if status != 6 {
+            let mut evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"venueState":"pending","outcome_transfer":"source_pending"});
+            if status == 0 {
+                evidence["outcome_attention"] = json!({"kind":"action_required","venue":"Binance","reason":"Binance reports that a withdrawal confirmation email was sent.","where_to_act":"Confirm the withdrawal using the Binance email or Binance App."});
+            }
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"historyComplete":complete,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"venueState":"pending"}),
+                evidence,
                 verified: None,
             });
         }
@@ -5041,76 +5222,6 @@ impl BinanceProfile {
             verified: Some(verified),
         })
     }
-}
-
-/// Compare the adapter-owned valuation fields that were approved while
-/// allowing the engine to append trusted cost-origin price rows. Observation
-/// timestamps are freshness metadata, not a changed financial amount; exact
-/// unit, price and provider source remain part of the approved binding.
-fn approved_native_valuation_matches(
-    approved: &PreparedOperation,
-    refreshed: &PreparedOperation,
-) -> bool {
-    let (Some(approved_value), Some(refreshed_value)) =
-        (approved.valuation.as_ref(), refreshed.valuation.as_ref())
-    else {
-        return approved.valuation.is_none() && refreshed.valuation.is_none();
-    };
-    if approved_value.movement_usd_micros != refreshed_value.movement_usd_micros
-        || approved_value.maximum_fee_usd_micros != refreshed_value.maximum_fee_usd_micros
-        || approved_value.additional_allocation_usd_micros
-            != refreshed_value.additional_allocation_usd_micros
-    {
-        return false;
-    }
-
-    let mut adapter_assets = BTreeSet::new();
-    if let Some(coin) = approved.input.get("coin").and_then(Value::as_str) {
-        adapter_assets.insert(AssetId {
-            network: "binance".into(),
-            reference: coin.into(),
-            decimals: 36,
-        });
-    }
-    if approved.operation == "binance.withdraw" {
-        for constraint in &approved.intent.expected {
-            if let EffectConstraint::Transfer { credit_asset, .. } = constraint {
-                adapter_assets.insert(credit_asset.clone());
-            }
-        }
-    }
-    if approved.operation == "binance.spot-order" {
-        for name in ["spentAsset", "receivedAsset"] {
-            if let Some(coin) = approved.binding[name].as_str() {
-                adapter_assets.insert(AssetId {
-                    network: "binance".into(),
-                    reference: coin.into(),
-                    decimals: 36,
-                });
-            }
-        }
-    }
-    if adapter_assets.is_empty() {
-        return false;
-    }
-
-    adapter_assets.iter().all(|asset| {
-        let approved_rows = approved_value
-            .prices
-            .iter()
-            .filter(|row| row.asset == *asset)
-            .collect::<Vec<_>>();
-        let refreshed_rows = refreshed_value
-            .prices
-            .iter()
-            .filter(|row| row.asset == *asset)
-            .collect::<Vec<_>>();
-        matches!((approved_rows.as_slice(), refreshed_rows.as_slice()),
-            ([before], [after])
-                if before.usd_micros_per_unit == after.usd_micros_per_unit
-                    && before.unit_atoms == after.unit_atoms
-                    && before.source == after.source)
-    })
 }
 
 fn decimal_delta(before: &ExactDecimal, after: &ExactDecimal) -> Option<ExactDecimal> {

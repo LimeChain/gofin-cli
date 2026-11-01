@@ -714,35 +714,30 @@ async fn margin_native_fee_overrun_records_extra_consumption_and_holds_original_
     let result = engine.execute(request.clone()).await.unwrap();
     assert_eq!(result.status, Status::Unknown, "{result:#?}");
     assert!(result.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("500000".into())
-    );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
-    let proof = store
-        .unresolved_consumption_proof(&result.id)
-        .unwrap()
-        .unwrap();
+    let proof = gofin_domain::unresolved_consumption::read(
+        result.last_reconciliation_evidence.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(proof.submission, result.submission.clone().unwrap());
     assert!(proof.costs.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,category,..}if category=="kraken_margin_execution_fee"&&amount.atoms.to_decimal(36)=="1.5")));
     assert_eq!(
         proof.evidence["proofEvents"][0]["ledgers"]["LEDGER"]["fee"],
         "1.5"
     );
-    drop(store);
     drop(engine);
     let engine = margin_engine(gofin_store::Store::open(&path).unwrap(), overrun_adapter(f));
     let duplicate = engine.status(&result.id, true).await.unwrap();
     assert_eq!(duplicate.status, Status::Unknown);
     assert!(duplicate.effects.is_none());
     assert_eq!(engine.execute(request).await.unwrap().id, result.id);
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("500000".into())
+    assert!(
+        gofin_domain::unresolved_consumption::read(
+            duplicate.last_reconciliation_evidence.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_some()
     );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
     assert_eq!(
         venue
             .calls
@@ -753,6 +748,5 @@ async fn margin_native_fee_overrun_records_extra_consumption_and_holds_original_
             .count(),
         1
     );
-    drop(store);
     drop(engine);
 }

@@ -222,7 +222,7 @@ impl KaminoAdapter {
             rent_observations.push(json!({"account":account,"context_slot":slot,"observed_at":Utc::now().to_rfc3339(),"commitment":"finalized","account_absence_proven":true}));
         }
         candidate.metadata["account_funding_observations"] = json!(rent_observations);
-        let valuation = self.valuation(&intent, &candidate.quote).await?;
+        let valuation = self.valuation(&intent, &candidate.quote).await.ok();
         // Native validation, rent evidence and pricing can require many reads.
         // Acquire the final message lifetime only after that preparation. This
         // is strictly pre-approval: freeze/submit retain this exact hash forever.
@@ -264,7 +264,7 @@ impl KaminoAdapter {
             &candidate,
             &prepared.observed_at
         )?);
-        prepared.valuation = Some(valuation);
+        prepared.valuation = valuation;
         Ok(prepared)
     }
     async fn freeze(

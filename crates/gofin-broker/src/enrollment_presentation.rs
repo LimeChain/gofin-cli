@@ -18,7 +18,33 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     }
     let action = binding["action"].as_str().unwrap_or("");
     let mut lines = Vec::new();
-    if action == "configure" {
+    if action == "runtime_update" {
+        if binding["execution_contract"] != 1
+            || binding["retire_personal_limits"] != true
+            || binding["preserve_enabled_yolo"] != true
+        {
+            return Err(error(
+                "INVALID_CHALLENGE",
+                "The execution update review is invalid.",
+            ));
+        }
+        lines.push("Update GoFin's execution contract".into());
+        lines.push("Personal USD movement and rolling allocation limits are retired. Existing settings will no longer restrict financial actions.".into());
+        lines.push("Without Yolo, each action requires approval of its native quantities, destinations and financial bounds.".into());
+        lines.push("If Yolo is enabled, it stays enabled: agents may choose each action's terms without per-action approval. GoFin no longer applies personal USD limits. Funds may be lost.".into());
+        lines.push("Credentials, submission identities and financial history are preserved. Open operations do not block the update.".into());
+        lines.push("Your confirmation acknowledges these changes for this runtime update.".into());
+    } else if action == "operation_dismiss" {
+        let id = binding["operation_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Operation identity is missing."))?;
+        lines.push(format!(
+            "Dismiss unconfirmed operation {} from the open list",
+            safe(id)
+        ));
+        lines.push("This is only a human label. It changes no financial evidence, authorizes no write and never makes the action safe to replay. Status remains available.".into());
+    } else if action == "configure" {
         let operation = binding["operation"]
             .as_str()
             .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration operation is missing."))?;
@@ -92,10 +118,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 )
             })?;
         config.validate()?;
-        let mut expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
-        expected.policy.max_movement_usd_micros = config.policy.max_movement_usd_micros.clone();
-        expected.policy.max_run_allocation_usd_micros =
-            config.policy.max_run_allocation_usd_micros.clone();
+        let expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
         if serde_json::to_value(&config).ok() != serde_json::to_value(&expected).ok() {
             return Err(error(
                 "INVALID_CHALLENGE",
@@ -104,17 +127,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         }
         lines.extend([
             "Confirm this Mac account as GoFin's approver.".into(),
-            format!(
-                "Movement limit: {}",
-                gofin_domain::policy::format_limit(&config.policy.max_movement_usd_micros)?
-            ),
-            gofin_domain::policy::MOVEMENT_INCLUDES.into(),
-            format!(
-                "24-hour allocation limit: {}",
-                gofin_domain::policy::format_limit(&config.policy.max_run_allocation_usd_micros)?
-            ),
-            gofin_domain::policy::ALLOCATION_INCLUDES.into(),
-            "Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo.".into(),
+            "No personal USD limits are enforced. Financial writes require approval of their native economic terms, or explicitly enabled protected Yolo.".into(),
             "Your terminal confirmation approves GoFin setup; sudo permitted installation.".into(),
         ]);
     } else {
@@ -747,18 +760,11 @@ mod tests {
         assert!(text.contains("Confirm this Mac account as GoFin's approver."));
         assert!(text.contains("sudo permitted installation"));
         assert!(text.contains("terminal confirmation approves GoFin setup"));
-        assert!(text.contains("Movement limit: $100 USD"));
-        assert!(text.contains("24-hour allocation limit: $100 USD"));
-        binding["configuration"]["policy"]["max_movement_usd_micros"] = "200000000".into();
-        assert!(review(&binding).unwrap().contains("$200 USD"));
-        binding["configuration"]["policy"]["max_movement_usd_micros"] = "0".into();
-        assert!(
-            review(&binding)
-                .unwrap()
-                .contains("Movement limit: No limit")
-        );
-        binding["configuration"]["policy"]["require_run_for_writes"] = true.into();
-        assert!(review(&binding).is_err());
+        assert!(text.contains("No personal USD limits"));
+        for value in ["200000000", "0"] {
+            binding["configuration"]["policy"]["max_movement_usd_micros"] = value.into();
+            assert!(review(&binding).is_err());
+        }
     }
 
     #[test]

@@ -30,6 +30,120 @@ impl Store {
             ReservationLink::Single(original_id),
         )
     }
+    /// Commit a proved native amendment and its revision without budget or
+    /// reservation accounting. The original record remains immutable.
+    pub fn record_amendment_revision(
+        &mut self,
+        settlement: &Settlement,
+        original_id: &str,
+        expected_original: &Value,
+        revision: &ApprovedAmendment,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let original = get_operation_record_tx(&tx, original_id)?;
+        if original != *expected_original
+            || !matches!(
+                json_string(&original, "status"),
+                Some("submitted" | "pending" | "unknown")
+            )
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let mutation = get_operation_record_tx(&tx, &settlement.operation_id)?;
+        validate_linked_record(&mutation, &original, original_id)?;
+        if settlement.run_id.is_some()
+            || settlement.run_record.is_some()
+            || settlement.terminal_record["id"] != settlement.operation_id
+            || settlement.terminal_record["status"] != "completed"
+            || revision.amendment_operation_id != settlement.operation_id
+            || serde_json::to_value(&revision.amendment_submission)? != mutation["submission"]
+            || settlement.terminal_record["submission"] != mutation["submission"]
+            || serde_json::to_value(&revision.scope)?
+                != mutation["preview"]["intent"]["expected"][0]["revision"]
+            || revision.proof_digest != settlement.proof["proof_digest"].as_str().unwrap_or("")
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let proof: gofin_domain::VerifiedEffects =
+            serde_json::from_value(settlement.proof.clone())?;
+        if gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+            != Some(proof.proof_digest.as_str())
+            || serde_json::to_value(&proof.submission)? != mutation["submission"]
+            || settlement.terminal_record["effects"] != settlement.proof
+            || serde_json::to_value(&proof.effects)? != settlement.effects
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let original_submission: gofin_domain::Submission =
+            serde_json::from_value(original["submission"].clone())?;
+        if !proof.effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::SubmissionAmendment{operation_id,submission,successor} if operation_id==original_id && submission==&original_submission && successor==&revision.successor)) {return Err(StoreError::SubmissionConflict)}
+        let mut before = mutation.clone();
+        let mut after = settlement.terminal_record.clone();
+        for key in [
+            "status",
+            "effects",
+            "last_reconciliation_evidence",
+            "updated_at",
+            "error",
+        ] {
+            before
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+            after
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+        }
+        if before != after {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT revision_json FROM operation_amendments WHERE amendment_operation_id=?1",
+                [&settlement.operation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old {
+            if serde_json::from_str::<ApprovedAmendment>(&old)? == *revision
+                && get_operation_record_tx(&tx, &settlement.operation_id)?
+                    == settlement.terminal_record
+            {
+                tx.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::AlreadySettled);
+        }
+        let (kind, reference) = revision
+            .successor
+            .as_ref()
+            .map(|s| (Some(s.kind.as_str()), Some(s.reference.as_str())))
+            .unwrap_or((None, None));
+        if let Some(successor) = &revision.successor {
+            if successor.kind != original["submission"]["kind"].as_str().unwrap_or("")
+                || successor.reference.is_empty()
+            {
+                return Err(StoreError::SubmissionConflict);
+            }
+            validate_successor_available_tx(&tx, &successor.kind, &successor.reference)?;
+        }
+        let ordinal = next_revision_tx(&tx, original_id)?;
+        tx.execute("INSERT INTO operation_amendments(original_operation_id,revision,amendment_operation_id,revision_json,proof_json,successor_kind,successor_reference) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![original_id,ordinal,settlement.operation_id,serde_json::to_string(revision)?,settlement.proof.to_string(),kind,reference])?;
+        tx.execute(
+            "UPDATE operations SET status='completed',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![
+                settlement.operation_id,
+                settlement.terminal_record.to_string(),
+                timestamp
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn commit_amendment_settlement(
         &mut self,
         settlement: &Settlement,

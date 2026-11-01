@@ -397,9 +397,18 @@ impl BridgeAdapter {
             ));
         }
         let locator = cctp_lifecycle::cctp_locator(record)?;
-        let bounds: BridgeBounds =
-            serde_json::from_value(record.approved_bounds.clone().ok_or_else(internal_error)?)
-                .map_err(|_| internal_error())?;
+        let bounds: BridgeBounds = if let Some(original) = record.approved_bounds.clone() {
+            serde_json::from_value(original).map_err(|_| internal_error())?
+        } else {
+            // Compound stages carry their parent-approved bounds in the child
+            // candidate; the engine validates them before durable admission.
+            normalize_authorization_bounds(
+                Some(requested.clone().ok_or_else(|| {
+                    GoFinError::validation("CCTP mint requires its original native bounds.")
+                })?),
+                saved,
+            )?
+        };
         if requested.is_some() && normalize_authorization_bounds(requested, saved)? != bounds {
             return Err(GoFinError::validation(
                 "Solana mint must preserve the original approved bounds.",
@@ -514,7 +523,7 @@ impl BridgeAdapter {
             expected: vec![],
             locks: vec![resource.clone()],
         };
-        let valuation = self.value_intent(&intent).await?;
+        let valuation = self.value_intent(&intent).await.ok();
         // Fee-cap pricing and valuation may wait on external services. Acquire
         // the execution hash only after those reads, then freeze and simulate
         // the exact message that revalidation and dispatch will preserve.
@@ -549,8 +558,7 @@ impl BridgeAdapter {
         // This is an upper bound on preparation freshness, not a promised
         // blockhash lifetime; revalidation and dispatch check block height.
         let wallet_alias = destination.wallet.as_deref().ok_or_else(internal_error)?;
-        let mut prepared=PreparedOperation{action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),binding:json!({"resource":resource,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,"solana_instructions":instructions,"solana_blockhash":blockhash,"solana_last_valid_block_height":height,"solana_maximum_network_fee_lamports":actual_fee,"solana_account_funding_lamports":state.account_funding_lamports,"solana_message_sha256":frozen.message_sha256(),(gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),summary:self.summary(saved,&link.kind,wallet_alias),checks:vec![Check{name:"CCTP Solana mint".into(),status:CheckStatus::Passed,detail:"Verified source-linked attestation, destination program accounts, existing native-USDC ATA, nonce and bounded SOL fees.".into()}],warnings:vec!["Mint completion requires finalized Solana native-USDC credit.".into()],observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1};
-        gofin_domain::value_bounds::bind(&mut prepared);
+        let prepared=PreparedOperation{action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),binding:json!({"resource":resource,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,"solana_instructions":instructions,"solana_blockhash":blockhash,"solana_last_valid_block_height":height,"solana_maximum_network_fee_lamports":actual_fee,"solana_account_funding_lamports":state.account_funding_lamports,"solana_message_sha256":frozen.message_sha256(),(gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),summary:self.summary(saved,&link.kind,wallet_alias),checks:vec![Check{name:"CCTP Solana mint".into(),status:CheckStatus::Passed,detail:"Verified source-linked attestation, destination program accounts, existing native-USDC ATA, nonce and bounded SOL fees.".into()}],warnings:vec!["Mint completion requires finalized Solana native-USDC credit.".into()],observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation,intent,operation_version:1};
         Ok(prepared)
     }
     pub(super) async fn revalidate_cctp_solana_mint(
@@ -656,7 +664,11 @@ impl BridgeAdapter {
                 "Solana mint's gas and account-funding intent changed.",
             ));
         }
-        if record.approved_bounds.as_ref() != Some(&prepared.binding["bounds"]) {
+        if record
+            .approved_bounds
+            .as_ref()
+            .is_some_and(|original| original != &prepared.binding["bounds"])
+        {
             return Err(GoFinError::validation(
                 "Solana mint authority bounds changed.",
             ));
@@ -673,7 +685,7 @@ impl BridgeAdapter {
         self.validate_solana_usd_caps(&quote, &bounds, fee, state.account_funding_lamports)
             .await?;
         let mut fresh = prepared.clone();
-        fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
+        fresh.valuation = self.value_intent(&fresh.intent).await.ok();
         Ok(fresh)
     }
     pub(super) async fn submit_cctp_solana_mint(

@@ -68,8 +68,8 @@ fn engine(path: &std::path::Path, source: Arc<Source>) -> gofin_engine::Engine {
 }
 
 #[tokio::test]
-async fn correlated_wallet_deposit_cost_excess_survives_restart_without_credit_or_resubmission() {
-    for (separate, quoted_fee, extra) in [(false, true, "200000"), (true, true, "200000"), (false, false, "400000")] {
+async fn correlated_wallet_deposit_cost_excess_reports_discrepancy_without_resubmission() {
+    for (separate, quoted_fee) in [(false, true), (true, true), (false, false)] {
         let (adapter, venue) = adapter();
         venue.fee.store(quoted_fee, Ordering::SeqCst);
         venue.separate_fee.store(separate, Ordering::SeqCst);
@@ -79,27 +79,17 @@ async fn correlated_wallet_deposit_cost_excess_survives_restart_without_credit_o
         let request = OperationRequest { request_id: "synthetic-deposit-001".into(), operation: "kraken.deposit".into(), input: input(), run_id: None };
         let runtime = engine(&path, source.clone());
         let record = runtime.execute(request.clone()).await.unwrap();
-        assert_eq!(record.status, Status::Unknown, "{:?}", record.error);
-        assert_eq!(record.error.as_ref().map(|error| error.code.as_str()), Some("COST_BOUND_EXCEEDED"), "{:?}", record.last_reconciliation_evidence);
-        assert!(record.effects.is_none());
+        assert_eq!(record.status, Status::Completed, "{:?}", record.last_reconciliation_evidence);
+        let proof = record.effects.as_ref().expect("correlated receipt must be retained");
+        assert_eq!(proof.evidence["outcome_attention"]["kind"], "discrepancy");
+        assert!(proof.effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer { .. })));
         let original = (record.preview.clone(), record.approval.clone(), record.submission.clone());
-        let store = gofin_store::Store::open(&path).unwrap();
-        assert_eq!(store.unresolved_consumption_usd(&record.id).unwrap(), Some(extra.into()));
-        let reservations = store.operation_reservations(&record.id).unwrap();
-        assert!(!reservations.is_empty());
-        let used = runtime.allocation_used_usd_micros().unwrap();
-        let consumed = store.unresolved_consumption_proof(&record.id).unwrap().unwrap();
-        assert!(consumed.costs.iter().all(|effect| matches!(effect, FinancialEffect::Cost { .. })));
-        assert!(consumed.evidence["proofEvents"].as_array().unwrap().iter().any(|event| event["eventId"].as_str().unwrap().contains("deposit-ledger")));
-        drop(store);
         drop(runtime);
         let restarted = engine(&path, source.clone());
         let resumed = restarted.execute(request).await.unwrap();
         assert_eq!(resumed.id, record.id);
         assert_eq!((resumed.preview, resumed.approval, resumed.submission), original);
-        assert!(resumed.effects.is_none());
-        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), used);
-        assert_eq!(gofin_store::Store::open(&path).unwrap().operation_reservations(&record.id).unwrap(), reservations);
+        assert!(resumed.effects.is_some());
         assert_eq!(source.dispatches.load(Ordering::SeqCst), 1);
     }
 }
@@ -117,11 +107,24 @@ async fn missing_separate_fee_identity_cannot_create_a_consumption_or_credit_pro
     assert_eq!(unknown.status, Status::Unknown);
     assert!(unknown.verified.is_none());
     assert!(gofin_domain::unresolved_consumption::read(&unknown.evidence).unwrap().is_none());
+    for side in ["source", "destination"] {
+        let observation = adapter.observe_transfer_side(&record, side).await.unwrap();
+        assert_eq!(observation.metadata["side"], side);
+        if side == "source" {
+            assert_eq!(observation.metadata["scope"], "source_chain");
+            assert_eq!(observation.reconciliation.as_ref().unwrap().status, Status::Pending);
+            assert!(observation.reconciliation.as_ref().unwrap().verified.is_some());
+            assert_eq!(observation.reconciliation.as_ref().unwrap().evidence["outcome_transfer"], "in_transit");
+        } else {
+            assert!(observation.reconciliation.is_none(), "destination-only evidence cannot claim a source proof");
+            assert_eq!(observation.metadata["scope"], "kraken_deposit_history");
+        }
+        assert_eq!(observation.metadata["submission_reference"], record.submission.as_ref().unwrap().reference);
+    }
 }
 
 #[tokio::test]
-async fn explicit_zero_fee_deposit_plan_keeps_native_identity_and_completes_only_correlated_credit() {
-    use gofin_domain::financial_plans::*;
+async fn explicit_zero_fee_standalone_deposit_requires_correlated_credit() {
     let (adapter, venue) = adapter();
     let source = Arc::new(Source { inner: Arc::new(adapter), venue, dispatches: AtomicUsize::new(0), overrun: false });
     let temp = tempfile::tempdir().unwrap();
@@ -129,26 +132,8 @@ async fn explicit_zero_fee_deposit_plan_keeps_native_identity_and_completes_only
     let prepared = runtime.preview("kraken.deposit", &input()).await.unwrap();
     let binding = decode_binding(&prepared.binding).unwrap();
     assert!(prepared.intent.maximum_costs.iter().any(|cost| cost.amount.atoms.is_zero() && cost.amount.asset == binding.venue_asset));
-    let spec = FinancialPlanSpec {
-        summary: None,
-        version: 1, name: "Synthetic zero fee deposit".into(),
-        steps: vec![FinancialPlanStepSpec {
-            action_deadline_seconds: None,
-            step_id: "deposit".into(), operation: "kraken.deposit".into(), input: input(),
-            permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":[{"resource":binding.account_resource,"asset":binding.venue_asset}]}),
-            completion: FinancialStepCompletion {
-                principal_spend: None, operation_succeeded: true,
-                minimum_net_receipt: Some(ResourceAmount { resource: binding.account_resource.clone(), amount: Amount { asset: binding.venue_asset.clone(), atoms: binding.gross.clone() } }),
-            }, funding_dependencies: vec![],
-        }],
-        aggregate_bounds: FinancialPlanBounds { maximum_debits: prepared.intent.debits.clone(), maximum_costs: prepared.intent.maximum_costs.clone() },
-    };
-    let consent = runtime.authorize_financial_plan(FinancialPlanAuthorizationRequest {
-        request_id: "synthetic-zero-deposit-plan".into(), plan: spec, valid_for_seconds: Some(600),
-        replaces_revision_id: None, expected_review_hash: None,
-    }).await.unwrap();
-    let result = runtime.execute_financial_plan_step(&consent.plan_id, "deposit", OperationRequest {
-        request_id: "synthetic-deposit-001".into(), operation: "kraken.deposit".into(), input: input(), run_id: None,
+    let result = runtime.execute(OperationRequest {
+        request_id:"synthetic-deposit-001".into(), operation:"kraken.deposit".into(), input:input(), run_id:None,
     }).await.unwrap();
     assert_eq!(result.status, Status::Completed, "{:?}", result.error);
     assert!(result.effects.as_ref().unwrap().effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer { to, credit, .. } if to == &binding.account_resource && credit.atoms == binding.gross)));
@@ -169,9 +154,9 @@ async fn older_zero_fee_scope_is_never_rewritten_to_price_or_authorize_a_new_fee
     venue.credit.store(true, Ordering::SeqCst);
     venue.fee_overrun.store(true, Ordering::SeqCst);
     let result = adapter.reconcile(&record).await.unwrap();
-    assert_eq!(result.status, Status::Unknown);
-    assert!(result.verified.is_none());
+    assert_eq!(result.status, Status::Completed);
+    assert!(result.verified.is_some());
+    assert_eq!(result.evidence["outcome_attention"]["kind"], "discrepancy");
     assert!(gofin_domain::unresolved_consumption::read(&result.evidence).unwrap().is_none());
     assert_eq!(record, frozen);
-    assert!(result.evidence.to_string().contains("legacy excess-cost accounting is incomplete"));
 }

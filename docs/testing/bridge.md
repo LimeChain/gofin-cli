@@ -36,11 +36,11 @@ cargo test --locked -p gofin-broker --test cctp_lifecycle solana::
 cargo test --locked -p gofin-engine --lib bridge_solana_receipt_identity_and_target_are_exact
 ```
 
-Cover a future-funded named plan through source withdrawal, CCTP burn,
-source-linked attestation, explicit Solana mint and finalized receipt. Include
-response loss, restart, wrong-token credit, missing finalized receipts,
-insufficient destination gas, expiry and revocation. A used nonce alone does
-not prove destination credit.
+Cover a standalone compound action through CCTP burn, source-linked attestation,
+Solana mint and finalized receipt, with explicit native fee and account-funding
+caps. Include response loss, restart, wrong-token credit, missing finalized
+receipts, insufficient destination gas, expired authority and reauthorization.
+A used nonce alone does not prove destination credit.
 
 ## Relay Solana routes
 

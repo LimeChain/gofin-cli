@@ -291,19 +291,14 @@ impl Authorizer for SyntheticPlanApproval {
     }
 }
 #[tokio::test]
-async fn supply_plan_covers_exact_rounding_cost_and_reaches_only_the_missing_signer() {
-    use gofin_domain::financial_plans::*;
+async fn standalone_supply_covers_exact_rounding_cost_and_reaches_only_the_missing_signer() {
     let rpc = Arc::new(Fixture::new());
     let a = Arc::new(adapter(rpc.clone()));
     let input = aave_input("aave.supply");
-    let variations = json!({"min_amount":"1","max_amount":"1","max_fee_eth":"0.001"});
-    let scope = a
-        .prepare_plan_permission("aave.supply", &input, &variations)
-        .await
-        .unwrap();
+    let prepared = a.prepare("aave.supply", &input).await.unwrap();
     assert!(
-        scope
-            .spec
+        prepared
+            .intent
             .maximum_costs
             .iter()
             .any(|c| c.treatment == CostTreatment::IncludedInDebit)
@@ -315,46 +310,13 @@ async fn supply_plan_covers_exact_rounding_cost_and_reaches_only_the_missing_sig
         gofin_engine::EngineOptions::default(),
     )
     .unwrap();
-    let request = FinancialPlanAuthorizationRequest {
-        request_id: "synthetic-aave-cost-scope".into(),
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-        plan: FinancialPlanSpec {
-            version: 1,
-            name: "Synthetic Aave cost scope".into(),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                step_id: "supply".into(),
-                operation: "aave.supply".into(),
-                input: input.clone(),
-                permitted_variations: variations,
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: None,
-                },
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: scope.spec.maximum_debits,
-                maximum_costs: scope.spec.maximum_costs,
-            },
-        },
-    };
-    let status = engine.authorize_financial_plan(request).await.unwrap();
     let record = engine
-        .execute_financial_plan_step(
-            &status.plan_id,
-            "supply",
-            OperationRequest {
-                request_id: "synthetic-aave-cost-attempt".into(),
-                operation: "aave.supply".into(),
-                input,
-                run_id: None,
-            },
-        )
+        .execute(OperationRequest {
+            request_id: "synthetic-aave-cost-attempt".into(),
+            operation: "aave.supply".into(),
+            input,
+            run_id: None,
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -371,7 +333,7 @@ async fn supply_plan_covers_exact_rounding_cost_and_reaches_only_the_missing_sig
 }
 
 #[tokio::test]
-async fn generic_exact_mode_cannot_bypass_borrow_plan_risk_or_gross_authority() {
+async fn retired_exact_plan_borrow_is_rejected_before_reads() {
     use gofin_domain::financial_plans::*;
     let rpc = Arc::new(Fixture::new());
     let a = Arc::new(adapter(rpc.clone()));
@@ -417,7 +379,7 @@ async fn generic_exact_mode_cannot_bypass_borrow_plan_risk_or_gross_authority() 
             .await
             .unwrap_err()
             .code,
-        "PLAN_APPLICATION_SCOPE_REQUIRED"
+        "EXECUTION_INTERFACE_RETIRED"
     );
     assert_eq!(
         engine
@@ -425,7 +387,7 @@ async fn generic_exact_mode_cannot_bypass_borrow_plan_risk_or_gross_authority() 
             .await
             .unwrap_err()
             .code,
-        "PLAN_APPLICATION_SCOPE_REQUIRED"
+        "EXECUTION_INTERFACE_RETIRED"
     );
     assert!(
         rpc.calls.lock().unwrap().is_empty(),
@@ -720,7 +682,7 @@ async fn wallet_preparation_batches_native_and_wrapped_asset_and_rejects_incompl
         let a = adapter(Arc::new(Fixture::new())).with_wallet_valuation(prices.clone());
         let result = a.prepare("wallet.wrap", &json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"synthetic-batch-wrap","amount":"0.001","max_fee_eth":"0.001"})).await;
         if incomplete {
-            assert_eq!(result.unwrap_err().code, "VALUATION_UNAVAILABLE");
+            assert!(result.unwrap().valuation.is_none());
         } else {
             let prepared = result.unwrap();
             assert_eq!(prepared.valuation.unwrap().prices.len(), 2);
@@ -885,7 +847,7 @@ async fn borrow_plan_review_reports_both_tight_bounds_and_does_not_bind_observat
 }
 
 #[tokio::test]
-async fn borrow_plan_preview_rejects_rounding_shortfall_before_authorization() {
+async fn retired_borrow_plan_is_rejected_without_dispatch() {
     use gofin_domain::financial_plans::*;
     struct NoApproval;
     #[async_trait]
@@ -915,7 +877,7 @@ async fn borrow_plan_preview_rejects_rounding_shortfall_before_authorization() {
         gofin_engine::EngineOptions::default(),
     )
     .unwrap();
-    let mut request = FinancialPlanAuthorizationRequest {
+    let request = FinancialPlanAuthorizationRequest {
         request_id: "synthetic-borrow-rounding-review".into(),
         valid_for_seconds: Some(600),
         replaces_revision_id: None,
@@ -943,33 +905,29 @@ async fn borrow_plan_preview_rejects_rounding_shortfall_before_authorization() {
             },
         },
     };
-    engine
-        .preview_financial_plan(request.clone())
-        .await
-        .unwrap();
-    request.plan.steps[0].permitted_variations["max_cumulative_borrow"] = json!("11.700001");
-    for authorize in [false, true] {
-        let error = if authorize {
-            engine
-                .authorize_financial_plan(request.clone())
-                .await
-                .unwrap_err()
-        } else {
-            engine
-                .preview_financial_plan(request.clone())
-                .await
-                .unwrap_err()
-        };
-        assert_eq!(error.code, "AAVE_BORROW_BOUNDS_TOO_TIGHT");
-        assert_eq!(
-            error.details.unwrap()["minimum_cumulative_borrow"],
-            "11.700004"
-        );
-    }
-    assert!(!rpc.calls.lock().unwrap().iter().any(|method| matches!(
-        method.as_str(),
-        "eth_getBalance" | "eth_estimateGas" | "eth_sendRawTransaction"
-    )));
+    assert_eq!(
+        engine
+            .preview_financial_plan(request.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert_eq!(
+        engine
+            .authorize_financial_plan(request)
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction")
+    );
 }
 
 fn exact_supply_scope(
@@ -1141,7 +1099,7 @@ async fn exact_supply_review_pins_selected_market_and_underlying_decimals() {
 }
 
 #[tokio::test]
-async fn exact_supply_plan_checks_before_both_approval_paths_and_keeps_execution_bound() {
+async fn retired_exact_supply_plan_is_rejected_before_dispatch() {
     use gofin_domain::financial_plans::*;
     let rpc = Arc::new(Fixture::new());
     let a = Arc::new(adapter(rpc.clone()));
@@ -1153,7 +1111,7 @@ async fn exact_supply_plan_checks_before_both_approval_paths_and_keeps_execution
         gofin_engine::EngineOptions::default(),
     )
     .unwrap();
-    let mut request = FinancialPlanAuthorizationRequest {
+    let request = FinancialPlanAuthorizationRequest {
         request_id: "synthetic-exact-supply-review".into(),
         valid_for_seconds: Some(600),
         replaces_revision_id: None,
@@ -1181,46 +1139,21 @@ async fn exact_supply_plan_checks_before_both_approval_paths_and_keeps_execution
             },
         },
     };
-    engine
-        .preview_financial_plan(request.clone())
-        .await
-        .unwrap();
-    request.plan.steps[0].permitted_variations["maximum_costs"] = json!([scope.maximum_costs[0]]);
-    for authorize in [false, true] {
-        let err = if authorize {
-            engine
-                .authorize_financial_plan(request.clone())
-                .await
-                .unwrap_err()
-        } else {
-            engine
-                .preview_financial_plan(request.clone())
-                .await
-                .unwrap_err()
-        };
-        assert_eq!(err.code, "AAVE_SUPPLY_COST_SCOPE_INCOMPLETE");
-        assert_eq!(err.details.unwrap()["step_id"], "supply");
-    }
-    request.plan.steps[0].permitted_variations = json!(scope);
-    let status = engine.authorize_financial_plan(request).await.unwrap();
-    rpc.states.lock().unwrap().get_mut(&20).unwrap().income = ray() * U256::from(2) + U256::from(1);
-    let error = engine
-        .execute_financial_plan_step(
-            &status.plan_id,
-            "supply",
-            OperationRequest {
-                request_id: "synthetic-exact-supply-drift".into(),
-                operation: "aave.supply".into(),
-                input: aave_input("aave.supply"),
-                run_id: None,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "BOUNDARY_VIOLATION");
     assert_eq!(
-        error.details.unwrap()["boundary_violation"]["candidate_value"]["amount"]["atoms"],
-        "5"
+        engine
+            .preview_financial_plan(request.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert_eq!(
+        engine
+            .authorize_financial_plan(request)
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
     );
     assert!(
         !rpc.calls

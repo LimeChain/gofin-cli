@@ -230,26 +230,6 @@ fn order_id(input: &OrderInput, futures: bool) -> String {
     ));
     format!("gofin1{}", &hex::encode(digest)[..26])
 }
-pub(super) fn valuation_matches(a: &PreparedOperation, b: &PreparedOperation) -> bool {
-    match (&a.valuation, &b.valuation) {
-        (Some(a), Some(b)) => {
-            a.movement_usd_micros == b.movement_usd_micros
-                && a.maximum_fee_usd_micros == b.maximum_fee_usd_micros
-                && a.additional_allocation_usd_micros == b.additional_allocation_usd_micros
-                && a.prices.len() == b.prices.len()
-                && a.prices.iter().all(|p| {
-                    b.prices.iter().any(|q| {
-                        p.asset == q.asset
-                            && p.usd_micros_per_unit == q.usd_micros_per_unit
-                            && p.unit_atoms == q.unit_atoms
-                            && p.source == q.source
-                    })
-                })
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
 struct Market {
     base: String,
     quote: String,
@@ -687,9 +667,13 @@ impl BinanceProfile {
             if let Some((loss_coin, _)) = loss {
                 coins.insert(loss_coin.to_owned());
             }
-            provider
+            if provider
                 .prefetch_usd(&coins.into_iter().collect::<Vec<_>>())
-                .await?;
+                .await
+                .is_err()
+            {
+                return Ok(None);
+            }
         }
         let Some(mut value) = self.valuation(coin, &movement.canonical(), "0").await? else {
             return Ok(None);
@@ -2245,6 +2229,7 @@ impl BinanceProfile {
             36,
         )?
         .integer();
+        let mut discrepancies = Vec::new();
         if !futures {
             let maximum_spent: Quantity = serde_json::from_value(binding["maximumSpent"].clone())
                 .map_err(|_| {
@@ -2252,17 +2237,13 @@ impl BinanceProfile {
             })?;
             let actual_spent = if buy { &quote_total } else { &base_total };
             if actual_spent > &maximum_spent.integer() {
-                return Ok(unknown(
-                    "Actual spot principal debit exceeds its approved bound.",
-                ));
+                discrepancies.push(json!({"term":"maximum_spent","asset": if buy { &quote.reference } else { &base.reference }, "actual":Quantity::new(actual_spent.to_string()).map_err(domain_error)?.to_decimal(36),"approved":maximum_spent.to_decimal(36)}));
             }
         }
         if futures
             && quote_total > decimal_to_atoms(&exact(binding, "riskNotional")?, 36)?.integer()
         {
-            return Ok(unknown(
-                "Executed futures quote notional exceeds the approved conservative notional bound.",
-            ));
+            discrepancies.push(json!({"term":"risk_notional","asset":quote.reference,"actual":Quantity::new(quote_total.to_string()).map_err(domain_error)?.to_decimal(36),"approved":binding["riskNotional"]}));
         }
         if base_total != filled || quote_total != cumulative {
             return Ok(unknown(
@@ -2270,35 +2251,32 @@ impl BinanceProfile {
             ));
         }
         if filled.is_zero() && (!futures || binding["positionBefore"] == "0") {
-            let before: BTreeMap<String, String> = serde_json::from_value(
-                submission.data["balancesBefore"].clone(),
-            )
-            .map_err(|_| {
-                error(
-                    "SUBMISSION_INVALID",
-                    "reconciliation",
-                    "Pre-order balances unavailable.",
-                )
-            })?;
-            if before != self.trading_totals(account, futures).await? {
-                return Ok(unknown("A no-fill order has unexplained wallet changes."));
-            }
-            let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"noFill":true});
+            let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"noFill":true,"outcome_replay_safe":true});
             return Ok(Reconciliation {
                 status: Status::Failed,
                 verified: Some(make_verified(submission.clone(), vec![], evidence.clone())?),
                 evidence,
             });
         }
-        let before: BTreeMap<String, String> =
+        // Futures position accounting still needs its own pre/post snapshot. Spot
+        // execution is established by the correlated order and fill records;
+        // concurrent activity makes account-wide balance deltas non-attributable.
+        let before: BTreeMap<String, String> = if futures {
             serde_json::from_value(submission.data["balancesBefore"].clone()).map_err(|_| {
                 error(
                     "SUBMISSION_INVALID",
                     "reconciliation",
                     "Persisted pre-order balances are unavailable.",
                 )
-            })?;
-        let mut after = self.trading_totals(account, futures).await?;
+            })?
+        } else {
+            BTreeMap::new()
+        };
+        let mut after = if futures {
+            self.trading_totals(account, true).await?
+        } else {
+            BTreeMap::new()
+        };
         let mut deltas = BTreeMap::<String, BigInt>::new();
         let mut effects = Vec::new();
         if futures {
@@ -2469,9 +2447,9 @@ impl BinanceProfile {
             if amount.is_zero() {
                 continue;
             }
-            let cap=binding["fees"][&coin].as_str().ok_or_else(||error("UNRESERVED_COMMISSION","reconciliation","Order commission was charged in an unreserved asset; cleanup remains unresolved."))?;
-            if amount > decimal_to_atoms(&observed_decimal(cap)?, 36)?.integer() {
-                return Ok(unknown("Actual commission exceeds its approved asset cap."));
+            match binding["fees"][&coin].as_str() {
+                Some(cap) if amount <= decimal_to_atoms(&observed_decimal(cap)?, 36)?.integer() => {}
+                cap => discrepancies.push(json!({"term":"fee", "asset":coin, "actual":Quantity::new(amount.to_string()).map_err(domain_error)?.to_decimal(36), "approved":cap})),
             }
             *deltas.entry(coin.clone()).or_default() -= BigInt::from(amount.clone());
             let received: AssetId =
@@ -2498,7 +2476,7 @@ impl BinanceProfile {
                 },
             });
         }
-        for (coin, delta) in deltas {
+        for (coin, delta) in deltas.into_iter().filter(|_| futures) {
             let old = decimal_to_atoms(
                 &observed_decimal(before.get(&coin).map(String::as_str).unwrap_or("0"))?,
                 36,
@@ -2515,7 +2493,10 @@ impl BinanceProfile {
                 ));
             }
         }
-        let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":true});
+        let mut evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":futures,"evidenceCorrelation":"order and fill identifiers"});
+        if !discrepancies.is_empty() {
+            evidence["outcome_attention"] = json!({"kind":"discrepancy", "actual":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["actual"]})).collect::<Vec<_>>(), "approved":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["approved"]})).collect::<Vec<_>>()});
+        }
         let _ = record;
         Ok(Reconciliation {
             status: Status::Completed,

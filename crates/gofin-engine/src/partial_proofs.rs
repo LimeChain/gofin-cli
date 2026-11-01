@@ -78,6 +78,46 @@ pub(super) fn validate_growth(old: Option<&VerifiedEffects>, new: &VerifiedEffec
     let Some(old) = old else {
         return Ok(());
     };
+    if let Some(previous) = old.evidence.get("settlement_progress") {
+        let current = new
+            .evidence
+            .get("settlement_progress")
+            .ok_or_else(|| invalid("Cumulative proof omitted progress identity."))?;
+        if previous.get("sequence").and_then(Value::as_u64)
+            > current.get("sequence").and_then(Value::as_u64)
+        {
+            return Err(invalid("Cumulative proof sequence regressed."));
+        }
+        if let Some(events) = previous.get("event_digests").and_then(Value::as_object) {
+            let next = current
+                .get("event_digests")
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid("Cumulative proof omitted event identities."))?;
+            if events
+                .iter()
+                .any(|(id, digest)| next.get(id) != Some(digest))
+            {
+                return Err(invalid("Cumulative proof changed an event identity."));
+            }
+        }
+    }
+    if let Some(events) = old.evidence.get("proofEvents").and_then(Value::as_array) {
+        let next = new
+            .evidence
+            .get("proofEvents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("Cumulative proof omitted its prior events."))?;
+        for event in events {
+            if let Some(id) = event.get("eventId").and_then(Value::as_str)
+                && !next.iter().any(|candidate| {
+                    candidate.get("eventId").and_then(Value::as_str) == Some(id)
+                        && candidate == event
+                })
+            {
+                return Err(invalid("Cumulative proof changed a prior event."));
+            }
+        }
+    }
     conversion_sequences::validate_growth(&old.effects, &new.effects)?;
     for old_effect in &old.effects {
         if let FinancialEffect::CompoundSubmissionMutations {
@@ -120,6 +160,32 @@ pub(super) fn validate_growth(old: Option<&VerifiedEffects>, new: &VerifiedEffec
             {
                 return Err(invalid("An immutable grouped native outcome changed."));
             }
+        }
+    }
+    if old.evidence.get("settlement_progress").is_some()
+        && new.evidence.get("settlement_progress").is_some()
+    {
+        let gross = |effects: &[FinancialEffect]| -> Result<BTreeMap<String, num_bigint::BigUint>> {
+            let mut totals = BTreeMap::new();
+            for effect in effects {
+                if let FinancialEffect::Settlement { delta, .. } = effect {
+                    let mut shape = to_value(effect)?;
+                    if let Some(object) = shape.as_object_mut() {
+                        object.remove("delta");
+                    }
+                    let key = format!("{}:{}", binding_hash(&shape)?, delta.is_negative());
+                    *totals.entry(key).or_default() += delta.magnitude().integer();
+                }
+            }
+            Ok(totals)
+        };
+        let previous = gross(&old.effects)?;
+        let next = gross(&new.effects)?;
+        if previous
+            .iter()
+            .any(|(key, value)| next.get(key).is_none_or(|amount| amount < value))
+        {
+            return Err(invalid("Cumulative proof retracted a gross settlement."));
         }
     }
     let previous = quantities(&old.effects)?;
@@ -238,9 +304,11 @@ fn extract(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_pending(record: &OperationRecord, verified: &VerifiedEffects) -> Result<()> {
     validate_pending_with_scope(record, verified, None)
 }
+#[cfg(test)]
 pub(super) fn validate_pending_with_scope(
     record: &OperationRecord,
     verified: &VerifiedEffects,
@@ -361,6 +429,51 @@ mod tests {
             observed_at: now(),
             proof_digest: String::new(),
         }
+    }
+    #[test]
+    fn cumulative_child_outcomes_keep_original_owner_submission_and_evidence() {
+        use gofin_domain::compound_mutations::{ChildMutationOutcome, MutationChildProof};
+        let child = MutationChildProof {
+            child_tag: "member-0".into(),
+            operation_id: "original-owner".into(),
+            submission: Submission {
+                kind: "synthetic".into(),
+                reference: "original-order".into(),
+                data: json!({}),
+            },
+            outcome: ChildMutationOutcome::Accepted { successor: None },
+            native_evidence: json!({"event":"original-proof"}),
+        };
+        let effects = |children| vec![FinancialEffect::CompoundSubmissionMutations { children }];
+        let original = bundle(effects(vec![child.clone()]));
+        let mut second = child.clone();
+        second.child_tag = "member-1".into();
+        second.operation_id = "other-owner".into();
+        validate_growth(
+            Some(&original),
+            &bundle(effects(vec![child.clone(), second])),
+        )
+        .unwrap();
+        for altered in [
+            MutationChildProof {
+                operation_id: "different-owner".into(),
+                ..child.clone()
+            },
+            MutationChildProof {
+                submission: Submission {
+                    reference: "different-order".into(),
+                    ..child.submission.clone()
+                },
+                ..child.clone()
+            },
+            MutationChildProof {
+                native_evidence: json!({"event":"different-proof"}),
+                ..child.clone()
+            },
+        ] {
+            assert!(validate_growth(Some(&original), &bundle(effects(vec![altered]))).is_err());
+        }
+        assert!(validate_growth(Some(&original), &bundle(effects(vec![]))).is_err());
     }
     #[test]
     fn gross_exposure_legs_grow_independently_when_net_position_shrinks() {

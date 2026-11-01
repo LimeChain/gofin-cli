@@ -40,7 +40,6 @@ help:
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
 	  'make test-aave-mcp-read-cli Aave MCP catalog and position reads through the public CLI; synthetic fixture, no RPC or credentials' \
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
-	  'make test-full-plan-rehearsal Public CLI Kraken/Aave/bridge/Hyperliquid single-plan and recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires pinned patched Surfpool' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
@@ -88,10 +87,10 @@ catalog:
 	  mv "$$gofin_catalog_tmp" crates/gofin-cli/data/financial-catalog.json
 
 test-ui:
+	@python3 scripts/test-e2e-outcome-evidence.py
 	@python3 scripts/run-e2e.py --group core
 	@python3 scripts/run-security-tests.py --group cli-authority --group misleading-financial-output
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
-	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 	@$(MAKE) test-native-approval
 
 test-native-approval:
@@ -173,20 +172,14 @@ test-meteora-validator:
 test-meteora-cli-validator:
 	@python3 scripts/test-meteora-cli-validator.py --family both
 
-.PHONY: test-full-plan-rehearsal
-test-full-plan-rehearsal:
-	@GOFIN_DEV_BUILD_ID=synthetic-kraken-build cargo build --locked -p gofin-cli --example gofin-dev
-	@cp target/debug/examples/gofin-dev target/debug/examples/gofin-full-plan-rehearsal
-	@GOFIN_KRAKEN_PLAN_CLI="$(CURDIR)/target/debug/examples/gofin-full-plan-rehearsal" cargo test --locked -p gofin-broker --test full_plan_workflow
-
 test-papertrade-rehearsal:
 	@cargo test --locked -p gofin-exchange --features hyperliquid ccxt::hyperliquid_tests::papertrade_ -- --nocapture
 	@GOFIN_DEV_BUILD_ID=synthetic-papertrade-workflow-build cargo build --locked -p gofin-cli --example gofin-dev
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --test papertrade_workflow -- --include-ignored
 	@cargo test --locked -p gofin-broker --lib broker_runtime_signs_submits_and_canonically_verifies_session_registration -- --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
-	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_withdrawal_named_plan_uses_real_runtime_and_canonical_credit_proof -- --exact --ignored --nocapture
-	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::hyperevm_withdrawal_named_plan_settles_core_stage_without_dispatching_onward_leg -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_withdrawal_native_action_uses_real_runtime_and_canonical_credit_proof -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::hyperevm_withdrawal_native_actions_preserve_core_and_onward_stage_proofs -- --exact --ignored --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=success cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=lost_noop cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_lost_response_reconciles_original_nonce_and_persists_hash_without_resend -- --exact

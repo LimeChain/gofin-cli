@@ -34,6 +34,7 @@ mod boundary_migration_tests;
 mod bridge_state_tests;
 mod cctp_state;
 pub mod compound_amendments;
+pub mod execution_admission;
 pub mod execution_state;
 pub mod grouped_amendments;
 #[cfg(test)]
@@ -52,7 +53,7 @@ mod reservation_overrides;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -66,6 +67,8 @@ pub enum StoreError {
     RequestConflict,
     #[error("submission identity cannot be changed")]
     SubmissionConflict,
+    #[error("execution action, authority, stage or continuation conflicts with durable state")]
+    ExecutionConflict,
     #[error("dispatch evidence cannot be changed or lacks its exact durable submission")]
     DispatchEvidenceConflict,
     #[error("resource reservation cannot be changed")]
@@ -641,6 +644,130 @@ impl Store {
                     ["operation_id", "kind", "reference", "data_json"].as_slice(),
                 ),
             ];
+            if version >= 38 {
+                expected.push((
+                    "preapproval_continuations",
+                    [
+                        "token",
+                        "action_id",
+                        "generation",
+                        "input_hash",
+                        "result_json",
+                        "retryable",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 34 {
+                expected.push((
+                    "verified_position_anchors",
+                    [
+                        "operation_id",
+                        "resource",
+                        "position",
+                        "position_kind",
+                        "asset_json",
+                        "observed_at",
+                        "anchor_json",
+                        "proof_digest",
+                        "conflict",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 33 {
+                expected.push((
+                    "reauthorization_claims",
+                    [
+                        "token",
+                        "input_hash",
+                        "candidate_json",
+                        "authority_id",
+                        "result_json",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 32 {
+                expected.push((
+                    "submission_admissions",
+                    ["operation_id", "admitted_at"].as_slice(),
+                ));
+            }
+            if version >= 31 {
+                expected.push((
+                    "evm_definitive_rejections",
+                    ["operation_id", "proof_json"].as_slice(),
+                ));
+            }
+            if version >= 30 {
+                expected.push((
+                    "evm_submission_nonces",
+                    ["operation_id", "signer_scope", "nonce"].as_slice(),
+                ));
+            }
+            if version >= 29 {
+                expected.push((
+                    "evm_nonce_claims",
+                    ["signer_scope", "nonce", "operation_id"].as_slice(),
+                ));
+            }
+            if version >= 28 {
+                expected.push((
+                    "action_continuations",
+                    [
+                        "token",
+                        "action_id",
+                        "generation",
+                        "stage_token",
+                        "result_json",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 27 {
+                expected.extend([
+                    ("logical_actions", ["action_id", "deadline"].as_slice()),
+                    (
+                        "action_authorities",
+                        [
+                            "action_id",
+                            "authority_id",
+                            "authority_json",
+                            "audit_json",
+                            "expires_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "stage_attempts",
+                        [
+                            "token",
+                            "action_id",
+                            "stage_id",
+                            "generation",
+                            "authority_id",
+                            "operation_id",
+                            "candidate_json",
+                            "state",
+                            "result_json",
+                        ]
+                        .as_slice(),
+                    ),
+                ]);
+            }
+            if version >= 26 {
+                expected.extend([
+                    (
+                        "outcome_observations",
+                        ["sequence", "operation_id", "facts_json", "source"].as_slice(),
+                    ),
+                    (
+                        "outcome_dismissals",
+                        ["operation_id", "dismissed_at"].as_slice(),
+                    ),
+                ]);
+            }
             if version >= 24 {
                 expected.push((
                     "operation_resolutions",
@@ -1509,7 +1636,243 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=25;")?;
             tx.commit()?;
         }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 25 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE outcome_observations (sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL REFERENCES operations(id), facts_json TEXT NOT NULL, source TEXT NOT NULL);
+                CREATE INDEX outcome_observations_operation ON outcome_observations(operation_id, sequence);
+                CREATE TABLE outcome_dismissals (operation_id TEXT PRIMARY KEY REFERENCES operations(id), dismissed_at TEXT NOT NULL);
+                PRAGMA user_version=26;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 26 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE logical_actions(action_id TEXT PRIMARY KEY REFERENCES operations(id), deadline TEXT NOT NULL);
+                CREATE TABLE action_authorities(action_id TEXT NOT NULL REFERENCES logical_actions(action_id), authority_id TEXT NOT NULL, authority_json TEXT NOT NULL, audit_json TEXT NOT NULL, expires_at TEXT NOT NULL, PRIMARY KEY(action_id,authority_id), UNIQUE(action_id,audit_json));
+                CREATE TABLE stage_attempts(token TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES logical_actions(action_id), stage_id TEXT NOT NULL, generation INTEGER NOT NULL, authority_id TEXT NOT NULL, operation_id TEXT UNIQUE REFERENCES operations(id), candidate_json TEXT, state TEXT NOT NULL, result_json TEXT, UNIQUE(action_id,stage_id,generation), FOREIGN KEY(action_id,authority_id) REFERENCES action_authorities(action_id,authority_id));
+                PRAGMA user_version=27;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 27 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE action_continuations(token TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES logical_actions(action_id), generation INTEGER NOT NULL, stage_token TEXT REFERENCES stage_attempts(token), result_json TEXT, UNIQUE(action_id,generation)); PRAGMA user_version=28;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 28 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE evm_nonce_claims(signer_scope TEXT NOT NULL, nonce INTEGER NOT NULL CHECK(nonce>=0), operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id), PRIMARY KEY(signer_scope,nonce)); PRAGMA user_version=29;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 29 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE evm_submission_nonces(operation_id TEXT PRIMARY KEY REFERENCES operations(id), signer_scope TEXT NOT NULL, nonce INTEGER); CREATE INDEX evm_submission_scope_nonce ON evm_submission_nonces(signer_scope,nonce);")?;
+            let records = {
+                let mut query = tx.prepare(
+                    "SELECT operation_id,data_json FROM submissions WHERE kind='ethereum'",
+                )?;
+                let rows = query
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (id, raw) in records {
+                if let Ok(data) = serde_json::from_str::<Value>(&raw) {
+                    project_evm_submission_nonce_tx(&tx, &id, &data)?;
+                }
+            }
+            tx.execute_batch("PRAGMA user_version=30;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 30 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE evm_definitive_rejections(operation_id TEXT PRIMARY KEY REFERENCES operations(id),proof_json TEXT NOT NULL); PRAGMA user_version=31;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 31 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE submission_admissions(operation_id TEXT PRIMARY KEY REFERENCES operations(id),admitted_at TEXT NOT NULL); PRAGMA user_version=32;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 32 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE reauthorization_claims(token TEXT PRIMARY KEY REFERENCES action_continuations(token), input_hash TEXT NOT NULL, candidate_json TEXT NOT NULL, authority_id TEXT, result_json TEXT); PRAGMA user_version=33;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 33 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE verified_position_anchors(operation_id TEXT NOT NULL REFERENCES operations(id),resource TEXT NOT NULL,position TEXT NOT NULL,position_kind TEXT NOT NULL,asset_json TEXT NOT NULL,observed_at TEXT NOT NULL,anchor_json TEXT NOT NULL,proof_digest TEXT NOT NULL,conflict INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(operation_id,resource,position,position_kind,asset_json)); CREATE INDEX verified_position_anchor_identity ON verified_position_anchors(resource,position,position_kind,asset_json,observed_at DESC); CREATE INDEX verified_position_anchor_operation ON verified_position_anchors(operation_id); ")?;
+            let rows = {
+                let mut q=tx.prepare("SELECT id,record_json FROM operations WHERE status IN ('completed','pending','submitted','unknown')")?;
+                let values =
+                    q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                values.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (id, raw) in rows {
+                if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+                    project_verified_position_anchors_tx(&tx, &id, &value)?;
+                }
+            }
+            tx.execute_batch("PRAGMA user_version=34;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 34 {
+            let tx = conn.unchecked_transaction()?;
+            for (name, path) in [
+                ("order_key", "$.preview.binding.order_key"),
+                (
+                    "funding_id",
+                    "$.preview.binding.funding_binding.operation_id",
+                ),
+                ("resource", "$.resource"),
+                ("client_id", "$.clientOrderId"),
+                ("binding_client_id", "$.preview.binding.clientOrderId"),
+                ("binding_resource", "$.preview.binding.resource"),
+            ] {
+                tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS operation_binding_{name} ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'{path}') END);"))?;
+            }
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_recovery_parent ON operations(CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_recovery.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_recovery.parent_operation_id')) END); PRAGMA user_version=35;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 35 {
+            let tx = conn.unchecked_transaction()?;
+            for (name, path) in [
+                ("target_resource", "$.preview.binding.targetResource"),
+                ("portfolio_id", "$.preview.binding.portfolioId"),
+                ("target_portfolio_id", "$.preview.binding.targetPortfolioId"),
+            ] {
+                tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS operation_binding_{name} ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'{path}') END);"))?;
+            }
+            tx.execute_batch("PRAGMA user_version=36;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 36 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_binding_successor_client_id ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.preview.binding.successorClientOrderId') END); PRAGMA user_version=37;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 37 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE preapproval_continuations(token TEXT PRIMARY KEY,action_id TEXT NOT NULL REFERENCES operations(id),generation INTEGER NOT NULL,input_hash TEXT,result_json TEXT,retryable INTEGER NOT NULL DEFAULT 0,UNIQUE(action_id,generation)); CREATE INDEX preapproval_action_generation ON preapproval_continuations(action_id,generation DESC);")?;
+            let candidates = {
+                let mut q=tx.prepare("SELECT id FROM operations WHERE status IN ('failed','rejected','expired') AND run_id IS NULL AND CASE WHEN json_valid(record_json) THEN json_type(record_json,'$.last_reconciliation_evidence.engine_predispatch_failure')='true' AND json_extract(record_json,'$.id')=id AND json_extract(record_json,'$.status')=status AND json_type(record_json,'$.fingerprint')='text' AND (json_type(record_json,'$.approval') IS NULL OR json_type(record_json,'$.approval')='null') AND (json_type(record_json,'$.authorization_source') IS NULL OR json_type(record_json,'$.authorization_source')='null') AND (json_type(record_json,'$.run_id') IS NULL OR json_type(record_json,'$.run_id')='null') AND (json_type(record_json,'$.submission') IS NULL OR json_type(record_json,'$.submission')='null') ELSE 0 END AND NOT EXISTS(SELECT 1 FROM submissions WHERE operation_id=operations.id) AND NOT EXISTS(SELECT 1 FROM logical_actions WHERE action_id=operations.id)")?;
+                let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for id in candidates {
+                let token = execution_admission::preapproval_token(&id, 1)?;
+                tx.execute("INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,1)",params![token,id])?;
+            }
+            tx.execute_batch("PRAGMA user_version=38;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 38 {
+            let tx = conn.unchecked_transaction()?;
+            let candidates = {
+                let mut q=tx.prepare("SELECT id FROM operations WHERE status IN ('failed','rejected','expired') AND run_id IS NULL AND CASE WHEN json_valid(record_json) THEN json_type(record_json,'$.last_reconciliation_evidence.engine_predispatch_failure')='true' AND json_extract(record_json,'$.id')=id AND json_extract(record_json,'$.status')=status AND json_type(record_json,'$.fingerprint')='text' AND (json_type(record_json,'$.approval') IS NULL OR json_type(record_json,'$.approval')='null') AND (json_type(record_json,'$.authorization_source') IS NULL OR json_type(record_json,'$.authorization_source')='null') AND (json_type(record_json,'$.run_id') IS NULL OR json_type(record_json,'$.run_id')='null') AND (json_type(record_json,'$.submission') IS NULL OR json_type(record_json,'$.submission')='null') ELSE 0 END AND NOT EXISTS(SELECT 1 FROM submissions WHERE operation_id=operations.id) AND NOT EXISTS(SELECT 1 FROM logical_actions WHERE action_id=operations.id) AND NOT EXISTS(SELECT 1 FROM preapproval_continuations WHERE action_id=operations.id)")?;
+                let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for id in candidates {
+                let token = execution_admission::preapproval_token(&id, 1)?;
+                tx.execute("INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,1)",params![token,id])?;
+            }
+            tx.execute_batch("PRAGMA user_version=39;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 39 {
+            let tx = conn.unchecked_transaction()?;
+            let rows = {
+                let mut q = tx.prepare("SELECT id,record_json FROM operations WHERE status IN ('completed','pending','submitted','unknown') AND json_valid(record_json) AND json_extract(record_json,'$.operation') LIKE 'meteora.%'")?;
+                let rows =
+                    q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (id, raw) in rows {
+                if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+                    project_verified_position_anchors_tx(&tx, &id, &value)?;
+                }
+            }
+            tx.execute_batch("PRAGMA user_version=40;")?;
+            tx.commit()?;
+        }
         Ok(())
+    }
+
+    /// Append evidence without overwriting earlier observations, including conflicts.
+    pub fn append_outcome_observation(
+        &mut self,
+        operation_id: &str,
+        facts: &gofin_domain::outcome::OutcomeFacts,
+        source: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO outcome_observations(operation_id,facts_json,source) VALUES (?1,?2,?3)",
+            params![operation_id, serde_json::to_string(facts)?, source],
+        )?;
+        Ok(())
+    }
+
+    pub fn outcome_observations(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<gofin_domain::outcome::OutcomeObservation>> {
+        let mut statement = self.conn.prepare("SELECT facts_json,source FROM outcome_observations WHERE operation_id=?1 ORDER BY sequence")?;
+        let rows = statement.query_map([operation_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut observations = Vec::new();
+        for row in rows {
+            let (facts, source) = row?;
+            observations.push(gofin_domain::outcome::OutcomeObservation {
+                facts: serde_json::from_str(&facts)?,
+                source,
+            });
+        }
+        Ok(observations)
+    }
+
+    pub fn dismiss_operation(&mut self, operation_id: &str, timestamp: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO outcome_dismissals(operation_id,dismissed_at) VALUES (?1,?2)",
+            params![operation_id, timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_operation_dismissed(&self, operation_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outcome_dismissals WHERE operation_id=?1)",
+            [operation_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Create the first durable row for a logical request, or return the exact
@@ -1689,6 +2052,204 @@ impl Store {
             record: record.clone(),
             created: true,
         })
+    }
+
+    /// Atomically link a bridge step, create its operation and claim its exact candidate.
+    #[expect(clippy::too_many_arguments)]
+    pub fn create_bridge_stage_attempt(
+        &mut self,
+        operation_id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        run_id: Option<&str>,
+        status: &str,
+        record: &Value,
+        timestamp: &str,
+        bridge_step: &gofin_domain::BridgeStepLink,
+        stage_token: &str,
+        candidate: &Value,
+    ) -> Result<(RequestRow, execution_admission::Claim)> {
+        if operation != "bridge.transfer"
+            || bridge_step.operation_id.as_deref() != Some(operation_id)
+            || bridge_step.state != gofin_domain::BridgeStepState::Submitted
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stage = execution_admission::read_attempt(&tx, stage_token)?
+            .ok_or(StoreError::ExecutionConflict)?;
+        if stage.stage_id != format!("{}:{}", bridge_step.transfer_id, bridge_step.step_id) {
+            return Err(StoreError::ExecutionConflict);
+        }
+        if stage.state != "issued" {
+            let prior_id = stage
+                .operation_id
+                .as_deref()
+                .ok_or(StoreError::ExecutionConflict)?;
+            let prior_request: String = tx.query_row(
+                "SELECT request_id FROM operations WHERE id=?1",
+                [prior_id],
+                |r| r.get(0),
+            )?;
+            let row = get_request_tx(&tx, &prior_request)?.ok_or(StoreError::OperationNotFound)?;
+            tx.commit()?;
+            return Ok((
+                row,
+                execution_admission::Claim {
+                    attempt: stage,
+                    created: false,
+                },
+            ));
+        }
+        let times: (String,String) = tx.query_row("SELECT a.deadline,b.expires_at FROM logical_actions a JOIN action_authorities b ON b.action_id=a.action_id WHERE a.action_id=?1 AND b.authority_id=?2", params![stage.action_id,stage.authority_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        if !execution_admission::valid_future(&times.0)
+            || !execution_admission::valid_future(&times.1)
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let existing = get_request_tx(&tx, request_id)?;
+        if let Some(draft) = &existing {
+            if draft.fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            if draft.operation_id != operation_id
+                || draft.operation != operation
+                || status != "awaiting_approval"
+                || draft.record["status"] != "awaiting_approval"
+                || record["status"] != "awaiting_approval"
+                || !draft.record["submission"].is_null()
+                || !record["submission"].is_null()
+            {
+                return Err(StoreError::ExecutionConflict);
+            }
+            let mut old = draft.record.clone();
+            let mut new = record.clone();
+            for value in [&mut old, &mut new] {
+                let object = value.as_object_mut().ok_or(StoreError::ExecutionConflict)?;
+                object.remove("preview");
+                object.remove("updated_at");
+            }
+            if old != new {
+                return Err(StoreError::ExecutionConflict);
+            }
+            let used:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1) OR EXISTS(SELECT 1 FROM stage_attempts WHERE operation_id=?1) OR EXISTS(SELECT 1 FROM bridge_step_links WHERE operation_id=?1)",[operation_id],|r|r.get(0))?;
+            if used {
+                return Err(StoreError::ExecutionConflict);
+            }
+        }
+        let transfer_json: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [&bridge_step.transfer_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(transfer_json) = transfer_json else {
+            return Err(StoreError::BridgeConflict);
+        };
+        let mut transfer: gofin_domain::BridgeTransferRecord =
+            serde_json::from_str(&transfer_json)?;
+        if bridge_step.grant_id != transfer.grant_id || transfer.plan_scope.is_some() {
+            // Named-plan parents can be claimed only through their dedicated
+            // plan attempt transaction, never adopted by an ordinary exact write.
+            return Err(StoreError::BridgeConflict);
+        }
+        let Some(index) = transfer
+            .steps
+            .iter()
+            .position(|candidate| candidate.step_id == bridge_step.step_id)
+        else {
+            return Err(StoreError::BridgeConflict);
+        };
+        let planned = &transfer.steps[index];
+        if planned.kind != bridge_step.kind
+            || planned.grant_id != bridge_step.grant_id
+            || planned.operation_id.is_some()
+            || planned.state != gofin_domain::BridgeStepState::Unsubmitted
+            || planned.depends_on != bridge_step.depends_on
+            || bridge_step.depends_on.iter().any(|dependency| {
+                !transfer.steps.iter().any(|candidate| {
+                    candidate.step_id == *dependency
+                        && candidate.state == gofin_domain::BridgeStepState::Settled
+                })
+            })
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        if bridge_step.kind == gofin_domain::BridgeStepKind::Deposit {
+            if !matches!(
+                transfer.state,
+                gofin_domain::BridgeTransferState::Prepared
+                    | gofin_domain::BridgeTransferState::ApprovalPending
+            ) {
+                return Err(StoreError::BridgeConflict);
+            }
+            transfer.state = gofin_domain::BridgeTransferState::SourcePending;
+        } else if bridge_step.kind.is_destination_stage() {
+            if transfer.transit.is_none()
+                || !matches!(
+                    transfer.state,
+                    gofin_domain::BridgeTransferState::InTransit
+                        | gofin_domain::BridgeTransferState::DestinationPending
+                        | gofin_domain::BridgeTransferState::NeedsAttention
+                )
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            transfer.state = gofin_domain::BridgeTransferState::DestinationPending;
+        }
+        transfer.steps[index] = bridge_step.clone();
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        if existing.is_some() {
+            tx.execute(
+                "UPDATE operations SET record_json=?2,updated_at=?3 WHERE id=?1",
+                params![operation_id, record.to_string(), timestamp],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO operations(id, request_id, fingerprint, operation, status, run_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![operation_id, request_id, fingerprint, operation, status, run_id, record.to_string(), timestamp],
+            )?;
+        }
+        let changed = tx.execute(
+            "UPDATE bridge_step_links SET operation_id=?3,step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id IS NULL",
+            params![bridge_step.transfer_id, bridge_step.step_id, operation_id, serde_json::to_string(bridge_step)?],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.execute("UPDATE stage_attempts SET operation_id=?2,candidate_json=?3,state='claimed' WHERE token=?1 AND state='issued'", params![stage_token,operation_id,candidate.to_string()])?;
+        let stage = execution_admission::read_attempt(&tx, stage_token)?
+            .ok_or(StoreError::ExecutionConflict)?;
+        tx.commit()?;
+        Ok((
+            RequestRow {
+                operation_id: operation_id.to_owned(),
+                request_id: request_id.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                operation: operation.to_owned(),
+                record: record.clone(),
+                created: true,
+            },
+            execution_admission::Claim {
+                attempt: stage,
+                created: true,
+            },
+        ))
     }
 
     /// Persist the complete reservation before authorization or dispatch.
@@ -2657,8 +3218,8 @@ impl Store {
     /// have crossed the external boundary uncertain. Submission rows and their
     /// reservations are retained for original-identity reconciliation.
     pub fn recover_interrupted(&mut self) -> Result<RecoveryReport> {
-        self.recover_boundary_authorization_requests(&chrono::Utc::now().to_rfc3339())?;
-        self.recover_financial_plan_requests(&chrono::Utc::now().to_rfc3339())?;
+        // Legacy grants and plans admit no new work; their historical rows do
+        // not participate in startup or block recovery of ordinary actions.
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2668,29 +3229,39 @@ impl Store {
             let mut statement =
                 tx.prepare("SELECT id, status, record_json FROM operations ORDER BY created_at")?;
             let rows = statement.query_map([], |r| {
-                let raw: String = r.get(2)?;
-                let record = serde_json::from_str::<Value>(&raw).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, record))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             for row in rows {
-                records.push(row?);
+                let (id, status, raw) = row?;
+                // Keep corrupt bytes and any separate submission identity intact;
+                // neither recovery nor unrelated work should depend on them.
+                if let Ok(record) = serde_json::from_str::<Value>(&raw)
+                    && gofin_domain::product_names::validate(&record).is_ok()
+                    && serde_json::from_value::<gofin_domain::OperationRecord>(record.clone())
+                        .is_ok()
+                {
+                    records.push((id, status, record));
+                }
             }
         }
         for (id, status, mut record) in records {
             match status.as_str() {
                 "awaiting_approval" => {
+                    // Approved but unsubmitted work retains its audit. Recovery
+                    // never manufactures authority; a continuation must verify it.
+                    if record.get("approval").is_some_and(|value| !value.is_null()) {
+                        continue;
+                    }
                     record["status"] = Value::String("cancelled".into());
                     record["error"] = json!({
                         "code": "INTERRUPTED_APPROVAL",
                         "stage": "approval",
                         "message": "The operation was interrupted before submission. Nothing was submitted.",
-                        "next_action": "Use a new request ID for a deliberate retry. An active named plan can cover an in-scope retry without fresh Touch ID; standalone writes require fresh approval."
+                        "next_action": "Review the original action before a deliberate retry."
                     });
                     release_unsubmitted_bridge_claim_tx(&tx, &id, &record)?;
                     tx.execute(
@@ -2990,23 +3561,33 @@ impl Store {
     }
 
     pub fn get_record(&self, operation_id: &str) -> Result<Option<Value>> {
-        self.conn
-            .query_row(
-                "SELECT record_json FROM operations WHERE id=?1",
-                [operation_id],
-                |r| {
-                    let text: String = r.get(0)?;
-                    serde_json::from_str(&text).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
+        read_record_isolated(&self.conn, operation_id)
+    }
+
+    /// Typed history readers isolate valid JSON with an invalid record shape.
+    pub fn get_typed_record(&self, operation_id: &str) -> Result<Option<Value>> {
+        read_record_isolated_mode(&self.conn, operation_id, true)
+    }
+    pub fn list_typed_records(&self) -> Result<Vec<Value>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM operations ORDER BY created_at DESC,id DESC")?;
+        let ids = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(record) = read_record_isolated_mode(&self.conn, &id, true)? {
+                records.push(record)
+            }
+        }
+        Ok(records)
+    }
+
+    /// Durable admission time; historical submissions fall back to their
+    /// original operation creation time without rewriting their audit history.
+    pub fn submission_admitted_at(&self, operation_id: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT COALESCE(a.admitted_at,o.created_at) FROM operations o JOIN submissions s ON s.operation_id=o.id LEFT JOIN submission_admissions a ON a.operation_id=o.id WHERE o.id=?1",[operation_id],|r|r.get(0)).optional()?)
     }
 
     pub fn by_request(&self, request_id: &str) -> Result<Option<RequestRow>> {
@@ -3015,6 +3596,85 @@ impl Store {
 
     pub fn list_records(&self) -> Result<Vec<Value>> {
         list_records_conn(&self.conn)
+    }
+
+    /// Read-only recovery candidates. Callers must verify approval version,
+    /// binding, expiry and protected authorization before creating authority.
+    pub fn approved_unsubmitted_records(&self) -> Result<Vec<Value>> {
+        let mut statement=self.conn.prepare("SELECT id FROM operations WHERE status='awaiting_approval' AND NOT EXISTS (SELECT 1 FROM submissions WHERE operation_id=operations.id) ORDER BY created_at,id")?;
+        let ids = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut result = Vec::new();
+        for id in ids {
+            let Some(record) = read_record_isolated_mode(&self.conn, &id, true)? else {
+                continue;
+            };
+            if record.get("approval").is_some_and(|value| !value.is_null())
+                && record
+                    .get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(Value::as_str)
+                    != Some("history_unreadable")
+            {
+                result.push(record)
+            }
+        }
+        Ok(result)
+    }
+
+    /// Bounded, best-effort advisory; never an admission or accounting gate.
+    pub fn similar_open_operation_records(
+        &self,
+        operation: &str,
+        resource_ids: &[String],
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        if operation.is_empty() || resource_ids.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement=self.conn.prepare("SELECT id,status,record_json FROM operations WHERE operation=?1 AND status IN ('unknown','pending','submitted') AND NOT EXISTS (SELECT 1 FROM outcome_dismissals d WHERE d.operation_id=operations.id) ORDER BY updated_at DESC,id DESC LIMIT 500")?;
+        let rows = statement.query_map([operation], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (id, status, raw) = row?;
+            let Ok(record) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            let Some(debits) = record
+                .pointer("/preview/intent/debits")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            if !debits.iter().any(|d| {
+                d.get("resource")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| resource_ids.iter().any(|known| known == r))
+            }) {
+                continue;
+            }
+            let horizon_passed = record
+                .pointer("/last_reconciliation_evidence/observation_horizon_at")
+                .and_then(Value::as_str)
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .is_some_and(|t| t.with_timezone(&chrono::Utc) <= chrono::Utc::now());
+            let uncertain:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM outcome_observations WHERE operation_id=?1 AND CASE WHEN json_valid(facts_json) THEN json_extract(facts_json,'$.dispatch')='uncertain' ELSE 0 END)",[&id],|r|r.get(0))?;
+            if status != "unknown" && !horizon_passed && !uncertain {
+                continue;
+            }
+            results.push(json!({"id":id,"operation":operation,"amounts":debits}));
+            if results.len() >= limit.min(100) {
+                break;
+            }
+        }
+        Ok(results)
     }
 
     /// Check whether a prepared exact-parent amendment/cancellation may share
@@ -3063,20 +3723,37 @@ impl Store {
         if operation.trim().is_empty() || !binding_pointer.starts_with('/') {
             return Err(StoreError::ReservationConflict);
         }
-        let mut records = list_records_conn(&self.conn)?
-            .into_iter()
-            .filter(|record| {
-                record.get("operation").and_then(Value::as_str) == Some(operation)
-                    && record
-                        .pointer(binding_pointer)
-                        .is_some_and(|bound| bound == value)
-            })
-            .collect::<Vec<_>>();
-        records.sort_by(|left, right| {
-            left.get("id")
-                .and_then(Value::as_str)
-                .cmp(&right.get("id").and_then(Value::as_str))
-        });
+        let path = match binding_pointer {
+            "/preview/binding/order_key" => "$.preview.binding.order_key",
+            "/preview/binding/funding_binding/operation_id" => {
+                "$.preview.binding.funding_binding.operation_id"
+            }
+            "/resource" => "$.resource",
+            "/clientOrderId" => "$.clientOrderId",
+            "/preview/binding/clientOrderId" => "$.preview.binding.clientOrderId",
+            "/preview/binding/successorClientOrderId" => "$.preview.binding.successorClientOrderId",
+            "/preview/binding/resource" => "$.preview.binding.resource",
+            "/preview/binding/targetResource" => "$.preview.binding.targetResource",
+            "/preview/binding/portfolioId" => "$.preview.binding.portfolioId",
+            "/preview/binding/targetPortfolioId" => "$.preview.binding.targetPortfolioId",
+            _ => return Err(StoreError::ReservationConflict),
+        };
+        let Some(needle) = value.as_str() else {
+            return Err(StoreError::ReservationConflict);
+        };
+        let sql = format!(
+            "SELECT record_json FROM operations WHERE CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END=?1 AND CASE WHEN json_valid(record_json) THEN json_extract(record_json,'{path}') END=?2 ORDER BY id"
+        );
+        let mut query = self.conn.prepare(&sql)?;
+        let rows = query.query_map(params![operation, needle], |row| row.get::<_, String>(0))?;
+        let mut records = Vec::new();
+        for row in rows {
+            if let Ok(record) = serde_json::from_str::<Value>(&row?)
+                && record.pointer(binding_pointer) == Some(value)
+            {
+                records.push(record)
+            }
+        }
         Ok(records)
     }
 
@@ -3084,17 +3761,22 @@ impl Store {
     /// child remains queryable after terminal settlement so its adapter can
     /// inspect the persisted receipt while reconciling the parent.
     pub fn recovery_child(&self, parent_operation_id: &str) -> Result<Option<Value>> {
-        let mut matches: Vec<Value> = list_records_conn(&self.conn)?
-            .into_iter()
-            .filter(|record| {
-                record
+        let mut query=self.conn.prepare("SELECT record_json FROM operations WHERE CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_recovery.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_recovery.parent_operation_id')) END=?1")?;
+        let rows = query.query_map([parent_operation_id], |row| row.get::<_, String>(0))?;
+        let mut matches = Vec::new();
+        for row in rows {
+            if let Ok(record) = serde_json::from_str::<Value>(&row?)
+                && record
                     .product_pointer("/preview/binding/__gofin_recovery/parent_operation_id")
                     .ok()
                     .flatten()
                     .and_then(Value::as_str)
                     == Some(parent_operation_id)
-            })
-            .collect();
+            {
+                matches.push(record)
+            }
+        }
+        drop(query);
         if matches.is_empty() {
             return Ok(None);
         }
@@ -3623,6 +4305,355 @@ impl Store {
         Ok(())
     }
 
+    /// Persist correlated external stage evidence and its bridge progress atomically,
+    /// without consulting or changing cross-operation accounting or reservations.
+    pub fn record_bridge_stage_observation(
+        &mut self,
+        operation_id: &str,
+        terminal_record: &Value,
+        transit: Option<&gofin_domain::TransitResource>,
+        timestamp: &str,
+    ) -> Result<()> {
+        if terminal_record.get("id").and_then(Value::as_str) != Some(operation_id)
+            || terminal_record.get("status").and_then(Value::as_str) != Some("completed")
+            || terminal_record.get("operation").and_then(Value::as_str) != Some("bridge.transfer")
+            || terminal_record.get("effects").is_none_or(Value::is_null)
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let submission: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
+                [operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((kind, reference, data)) = submission else {
+            return Err(StoreError::SubmissionConflict);
+        };
+        let expected =
+            json!({"kind":kind,"reference":reference,"data":serde_json::from_str::<Value>(&data)?});
+        if terminal_record.get("submission") != Some(&expected) {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let step_json: String = tx
+            .query_row(
+                "SELECT step_json FROM bridge_step_links WHERE operation_id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::BridgeConflict)?;
+        let mut step: gofin_domain::BridgeStepLink = serde_json::from_str(&step_json)?;
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+            [&step.transfer_id],
+            |r| r.get(0),
+        )?;
+        let mut transfer: gofin_domain::BridgeTransferRecord = serde_json::from_str(&raw)?;
+        let index = transfer
+            .steps
+            .iter()
+            .position(|s| {
+                s.step_id == step.step_id && s.operation_id.as_deref() == Some(operation_id)
+            })
+            .ok_or(StoreError::BridgeConflict)?;
+        if step.state == gofin_domain::BridgeStepState::Settled {
+            let old_raw: String = tx.query_row(
+                "SELECT record_json FROM operations WHERE id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )?;
+            let old: Value = serde_json::from_str(&old_raw)?;
+            if old == *terminal_record
+                && transit.is_none_or(|t| transfer.transit.as_ref().is_none_or(|prior| prior == t))
+            {
+                tx.commit()?;
+                return Ok(());
+            }
+            let mut immutable_old = old.clone();
+            let mut immutable_new = terminal_record.clone();
+            for key in ["effects", "last_reconciliation_evidence", "updated_at"] {
+                immutable_old
+                    .as_object_mut()
+                    .ok_or(StoreError::BridgeConflict)?
+                    .remove(key);
+                immutable_new
+                    .as_object_mut()
+                    .ok_or(StoreError::BridgeConflict)?
+                    .remove(key);
+            }
+            if immutable_old != immutable_new {
+                return Err(StoreError::BridgeConflict);
+            }
+            let old_effects = old
+                .pointer("/effects/effects")
+                .and_then(Value::as_array)
+                .ok_or(StoreError::BridgeConflict)?;
+            let new_effects = terminal_record
+                .pointer("/effects/effects")
+                .and_then(Value::as_array)
+                .ok_or(StoreError::BridgeConflict)?;
+            if old_effects.iter().any(|e| !new_effects.contains(e))
+                || new_effects
+                    .iter()
+                    .filter(|e| !old_effects.contains(e))
+                    .any(|e| e.get("kind").and_then(Value::as_str) != Some("cost"))
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            if old_effects
+                .iter()
+                .any(|e| e.get("kind").and_then(Value::as_str) == Some("cost"))
+                && new_effects.iter().any(|e| !old_effects.contains(e))
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            for key in [
+                "correlation",
+                "evidence_id",
+                "original_hash",
+                "transaction_hash",
+            ] {
+                if let Some(previous) = old
+                    .pointer(&format!("/effects/evidence/{key}"))
+                    .filter(|v| !v.is_null())
+                    && terminal_record.pointer(&format!("/effects/evidence/{key}"))
+                        != Some(previous)
+                {
+                    return Err(StoreError::BridgeConflict);
+                }
+            }
+            if let Some(new_transit) = transit {
+                let source_id:Option<String>=tx.query_row("SELECT evidence_id FROM bridge_evidence_ids WHERE transfer_id=?1 AND role='source' LIMIT 1",[&transfer.id],|r|r.get(0)).optional()?;
+                if source_id.as_deref() != Some(new_transit.evidence_id.as_str())
+                    || new_transit.transfer_id != transfer.id
+                    || new_transit.spendable
+                    || terminal_record
+                        .pointer("/effects/proof_digest")
+                        .and_then(Value::as_str)
+                        != Some(new_transit.proof_digest.as_str())
+                {
+                    return Err(StoreError::BridgeConflict);
+                }
+            }
+            if let (Some(old_transit), Some(new_transit)) = (transfer.transit.as_ref(), transit)
+                && (old_transit.transfer_id != new_transit.transfer_id
+                    || old_transit.amount != new_transit.amount
+                    || old_transit.evidence_id != new_transit.evidence_id
+                    || old_transit.destination_locator != new_transit.destination_locator
+                    || old_transit.spendable != new_transit.spendable)
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.execute(
+                "UPDATE operations SET record_json=?2,updated_at=?3 WHERE id=?1",
+                params![operation_id, terminal_record.to_string(), timestamp],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
+        if step.state != gofin_domain::BridgeStepState::Submitted || transfer.steps[index] != step {
+            return Err(StoreError::BridgeConflict);
+        }
+        if step.kind == gofin_domain::BridgeStepKind::Deposit {
+            let transit = transit.ok_or(StoreError::BridgeConflict)?;
+            if transit.transfer_id != transfer.id
+                || transit.spendable
+                || transit.evidence_id.is_empty()
+                || transit.proof_digest.is_empty()
+                || !valid_transit_locator(transit)
+                || terminal_record
+                    .pointer("/effects/proof_digest")
+                    .and_then(Value::as_str)
+                    != Some(transit.proof_digest.as_str())
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.execute("INSERT INTO bridge_transit(transfer_id,proof_digest,transit_json,evidence_id) VALUES (?1,?2,?3,?4)",params![transfer.id,transit.proof_digest,serde_json::to_string(transit)?,transit.evidence_id])?;
+            tx.execute("INSERT INTO bridge_evidence_ids(evidence_id,transfer_id,role) VALUES (?1,?2,'source')",params![transit.evidence_id,transfer.id])?;
+            transfer.transit = Some(transit.clone());
+            if !transfer.applied_proofs.contains(&transit.proof_digest) {
+                transfer.applied_proofs.push(transit.proof_digest.clone());
+            }
+            transfer.state = gofin_domain::BridgeTransferState::InTransit;
+        } else {
+            if transit.is_some() {
+                return Err(StoreError::BridgeConflict);
+            }
+            transfer.state = step.kind.settled_stage_state();
+        }
+        step.state = gofin_domain::BridgeStepState::Settled;
+        transfer.steps[index] = step.clone();
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        tx.execute(
+            "UPDATE bridge_step_links SET step_json=?2 WHERE operation_id=?1",
+            params![operation_id, serde_json::to_string(&step)?],
+        )?;
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.execute(
+            "UPDATE operations SET status='completed',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![operation_id, terminal_record.to_string(), timestamp],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically retain verified failure evidence and advance only the linked
+    /// bridge stage. Prior settled stages and transit evidence remain intact.
+    pub fn record_bridge_stage_failure(
+        &mut self,
+        operation_id: &str,
+        terminal_record: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        if terminal_record.get("id").and_then(Value::as_str) != Some(operation_id)
+            || terminal_record.get("status").and_then(Value::as_str) != Some("failed")
+            || terminal_record.get("operation").and_then(Value::as_str) != Some("bridge.transfer")
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let proof: gofin_domain::VerifiedEffects = serde_json::from_value(
+            terminal_record
+                .get("effects")
+                .cloned()
+                .ok_or(StoreError::BridgeConflict)?,
+        )?;
+        if gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+            != Some(proof.proof_digest.as_str())
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let submission: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
+                [operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((kind, reference, data)) = submission else {
+            return Err(StoreError::SubmissionConflict);
+        };
+        let expected =
+            json!({"kind":kind,"reference":reference,"data":serde_json::from_str::<Value>(&data)?});
+        if terminal_record.get("submission") != Some(&expected)
+            || serde_json::to_value(&proof.submission)? != expected
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let step_json: String = tx
+            .query_row(
+                "SELECT step_json FROM bridge_step_links WHERE operation_id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::BridgeConflict)?;
+        let mut step: gofin_domain::BridgeStepLink = serde_json::from_str(&step_json)?;
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+            [&step.transfer_id],
+            |r| r.get(0),
+        )?;
+        let mut transfer: gofin_domain::BridgeTransferRecord = serde_json::from_str(&raw)?;
+        let index = transfer
+            .steps
+            .iter()
+            .position(|s| {
+                s.step_id == step.step_id && s.operation_id.as_deref() == Some(operation_id)
+            })
+            .ok_or(StoreError::BridgeConflict)?;
+        if step.state == gofin_domain::BridgeStepState::NeedsAttention {
+            let old: String = tx.query_row(
+                "SELECT record_json FROM operations WHERE id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )?;
+            if transfer.steps[index] != step
+                || serde_json::from_str::<Value>(&old)? != *terminal_record
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        if step.state != gofin_domain::BridgeStepState::Submitted
+            || transfer.steps[index] != step
+            || (!step.kind.is_destination_stage() && transfer.transit.is_some())
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let old_raw: String = tx.query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [operation_id],
+            |r| r.get(0),
+        )?;
+        let mut old: Value = serde_json::from_str(&old_raw)?;
+        let mut new = terminal_record.clone();
+        for key in [
+            "status",
+            "effects",
+            "last_reconciliation_evidence",
+            "updated_at",
+            "error",
+        ] {
+            old.as_object_mut()
+                .ok_or(StoreError::BridgeConflict)?
+                .remove(key);
+            new.as_object_mut()
+                .ok_or(StoreError::BridgeConflict)?
+                .remove(key);
+        }
+        if old != new {
+            return Err(StoreError::BridgeConflict);
+        }
+        step.state = gofin_domain::BridgeStepState::NeedsAttention;
+        transfer.state = if step.kind.is_destination_stage() {
+            gofin_domain::BridgeTransferState::NeedsAttention
+        } else {
+            gofin_domain::BridgeTransferState::Failed
+        };
+        transfer.steps[index] = step.clone();
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        tx.execute(
+            "UPDATE bridge_step_links SET step_json=?2 WHERE operation_id=?1",
+            params![operation_id, serde_json::to_string(&step)?],
+        )?;
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.execute(
+            "UPDATE operations SET status='failed',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![operation_id, terminal_record.to_string(), timestamp],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Transfer unresolved rolling-budget ownership from one settled source
     /// operation to its parent. UNIQUE constraints make duplicate handoffs safe.
     pub fn handoff_bridge_allocation(
@@ -3989,6 +5020,253 @@ impl Store {
     /// ordinary usable account state only through the verified adapter effects;
     /// this operation merely closes the nonspendable transit record and ages
     /// the transferred rolling-budget owner from this settlement timestamp.
+    /// Append a correlated destination/refund observation without accounting gates.
+    /// Conflicting final observations remain visible in settlement_proofs.
+    pub fn record_bridge_transfer_observation(
+        &mut self,
+        proof: &gofin_domain::BridgeSettlementProof,
+        observed_at: &str,
+    ) -> Result<gofin_domain::BridgeTransferRecord> {
+        if proof.transfer_id.is_empty()
+            || proof.evidence_id.is_empty()
+            || proof.evidence.is_null()
+            || gofin_domain::bridge_settlement_digest(proof)
+                .map_err(|_| StoreError::BridgeConflict)?
+                != proof.proof_digest
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: String = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [&proof.transfer_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::BridgeConflict)?;
+        let mut transfer: gofin_domain::BridgeTransferRecord = serde_json::from_str(&raw)?;
+        let prior:Option<String>=tx.query_row("SELECT proof_json FROM bridge_settlement_proofs WHERE transfer_id=?1 AND proof_digest=?2",params![proof.transfer_id,proof.proof_digest],|r|r.get(0)).optional()?;
+        if let Some(prior) = prior {
+            if serde_json::from_str::<gofin_domain::BridgeSettlementProof>(&prior)? != *proof {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.commit()?;
+            return Ok(transfer);
+        }
+        let source: Option<String> = tx
+            .query_row(
+                "SELECT transit_json FROM bridge_transit WHERE transfer_id=?1",
+                [&proof.transfer_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let source = source
+            .map(|s| serde_json::from_str::<gofin_domain::TransitResource>(&s))
+            .transpose()?;
+        let source = source
+            .as_ref()
+            .or(transfer.transit.as_ref())
+            .ok_or(StoreError::BridgeConflict)?;
+        if source.destination_locator.is_none() {
+            // Relay legacy transfers use the saved protocol order ID as their
+            // source-to-destination join. A destination receipt alone is not
+            // evidence that this particular transfer settled.
+            let correlation = proof
+                .evidence
+                .get("correlation")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or(StoreError::BridgeConflict)?;
+            let protocol_id = proof
+                .evidence
+                .get("protocol_order_id")
+                .and_then(Value::as_str)
+                .unwrap_or(correlation);
+            let revision = transfer
+                .quote_revisions
+                .iter()
+                .find(|q| {
+                    q.order_id
+                        .as_deref()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(protocol_id))
+                })
+                .ok_or(StoreError::BridgeConflict)?;
+            let source_matches = transfer
+                .steps
+                .iter()
+                .filter(|s| {
+                    s.kind == gofin_domain::BridgeStepKind::Deposit
+                        && s.state == gofin_domain::BridgeStepState::Settled
+                })
+                .filter_map(|s| s.operation_id.as_deref())
+                .any(|id| {
+                    get_record_tx(&tx, id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| {
+                            r.pointer("/effects/evidence/correlation")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .is_some_and(|value| value.eq_ignore_ascii_case(protocol_id))
+                });
+            if !source_matches {
+                return Err(StoreError::BridgeConflict);
+            }
+            if !correlation.eq_ignore_ascii_case(protocol_id) {
+                let saved_request = revision
+                    .payload
+                    .pointer("/quote/provider_request_id")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::BridgeConflict)?;
+                let observed_request = proof
+                    .evidence
+                    .get("provider_request_id")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::BridgeConflict)?;
+                if !saved_request.eq_ignore_ascii_case(correlation)
+                    || !saved_request.eq_ignore_ascii_case(observed_request)
+                {
+                    return Err(StoreError::BridgeConflict);
+                }
+            }
+        } else if !settlement_locator_matches(Some(source), proof) {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "INSERT INTO bridge_evidence_ids(evidence_id,transfer_id,role) VALUES (?1,?2,'final')",
+            params![proof.evidence_id, proof.transfer_id],
+        )?;
+        tx.execute("INSERT INTO bridge_settlement_proofs(transfer_id,proof_digest,proof_json,settled_at,evidence_id) VALUES (?1,?2,?3,?4,?5)",params![proof.transfer_id,proof.proof_digest,serde_json::to_string(proof)?,observed_at,proof.evidence_id])?;
+        if !transfer.applied_proofs.contains(&proof.proof_digest) {
+            transfer.applied_proofs.push(proof.proof_digest.clone());
+        }
+        transfer.settlement_proofs.push(proof.clone());
+        if !matches!(
+            transfer.state,
+            gofin_domain::BridgeTransferState::Completed
+                | gofin_domain::BridgeTransferState::Refunded
+        ) {
+            transfer.state = match proof.outcome {
+                gofin_domain::BridgeSettlementOutcome::Destination => {
+                    gofin_domain::BridgeTransferState::Completed
+                }
+                gofin_domain::BridgeSettlementOutcome::Refund => {
+                    gofin_domain::BridgeTransferState::Refunded
+                }
+            };
+            transfer.transit = None;
+        }
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(transfer)
+    }
+
+    /// Append a separately derived native-cost refinement while preserving the
+    /// exact original settlement evidence and all previously verified effects.
+    pub fn record_bridge_cost_refinement(
+        &mut self,
+        original_digest: &str,
+        proof: &gofin_domain::BridgeSettlementProof,
+        observed_at: &str,
+    ) -> Result<gofin_domain::BridgeTransferRecord> {
+        if proof.transfer_id.is_empty()
+            || gofin_domain::bridge_settlement_digest(proof)
+                .map_err(|_| StoreError::BridgeConflict)?
+                != proof.proof_digest
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: String = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [&proof.transfer_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::BridgeConflict)?;
+        let mut transfer: gofin_domain::BridgeTransferRecord = serde_json::from_str(&raw)?;
+        let original = transfer
+            .settlement_proofs
+            .iter()
+            .find(|p| p.proof_digest == original_digest)
+            .ok_or(StoreError::BridgeConflict)?;
+        if original.transfer_id != proof.transfer_id
+            || original.outcome != proof.outcome
+            || proof.evidence_id != format!("{}:native-cost-v1", original.evidence_id)
+            || original.evidence_id.is_empty()
+            || proof.evidence != original.evidence
+            || !proof.effects.starts_with(&original.effects)
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let added = proof.effects[original.effects.len()..]
+            .iter()
+            .collect::<Vec<_>>();
+        if added.is_empty() || added.iter().any(|effect| match effect {
+            gofin_domain::FinancialEffect::Cost{location,amount,category,treatment} => original.effects.iter().any(|existing|matches!(existing,gofin_domain::FinancialEffect::Cost{location:old_location,amount:old_amount,category:old_category,treatment:old_treatment} if location==old_location && amount.asset==old_amount.asset && category==old_category && treatment==old_treatment)),
+            _=>true,
+        }) {return Err(StoreError::BridgeConflict)}
+        for (index, effect) in added.iter().enumerate() {
+            if let gofin_domain::FinancialEffect::Cost{location,amount,category,treatment}=effect
+                && added[..index].iter().any(|old|matches!(old,gofin_domain::FinancialEffect::Cost{location:old_location,amount:old_amount,category:old_category,treatment:old_treatment} if location==old_location && amount.asset==old_amount.asset && category==old_category && treatment==old_treatment)) {return Err(StoreError::BridgeConflict)}
+        }
+        let prior:Option<String>=tx.query_row("SELECT proof_json FROM bridge_settlement_proofs WHERE transfer_id=?1 AND proof_digest=?2",params![proof.transfer_id,proof.proof_digest],|r|r.get(0)).optional()?;
+        if let Some(prior) = prior {
+            if serde_json::from_str::<gofin_domain::BridgeSettlementProof>(&prior)? != *proof {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.commit()?;
+            return Ok(transfer);
+        }
+        let duplicate: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM bridge_evidence_ids WHERE evidence_id=?1)",
+            [&proof.evidence_id],
+            |r| r.get(0),
+        )?;
+        if duplicate {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "INSERT INTO bridge_evidence_ids(evidence_id,transfer_id,role) VALUES (?1,?2,'final')",
+            params![proof.evidence_id, proof.transfer_id],
+        )?;
+        tx.execute("INSERT INTO bridge_settlement_proofs(transfer_id,proof_digest,proof_json,settled_at,evidence_id) VALUES (?1,?2,?3,?4,?5)",params![proof.transfer_id,proof.proof_digest,serde_json::to_string(proof)?,observed_at,proof.evidence_id])?;
+        transfer.applied_proofs.push(proof.proof_digest.clone());
+        transfer.settlement_proofs.push(proof.clone());
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(transfer)
+    }
+
     pub fn commit_bridge_transfer_settlement(
         &mut self,
         transfer: &gofin_domain::BridgeTransferRecord,
@@ -7015,12 +8293,33 @@ impl Store {
         } else if record.get("submission").is_some_and(|s| !s.is_null()) {
             return Err(StoreError::SubmissionConflict);
         }
+        project_verified_position_anchors_tx(&tx, operation_id, record)?;
         tx.execute(
             "UPDATE operations SET status=?1, record_json=?2, updated_at=?3 WHERE id=?4",
             params![status, record.to_string(), timestamp, operation_id],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Latest nonconflicting verified predecessor per exact position identity.
+    /// Excluding the observed operation prevents applying its own partial
+    /// effects again during a later reconciliation.
+    pub fn current_position_anchors(
+        &self,
+        excluded_operation_id: Option<&str>,
+    ) -> Result<Vec<gofin_domain::PositionAnchor>> {
+        let mut q=self.conn.prepare("SELECT a.anchor_json FROM verified_position_anchors a WHERE (?1 IS NULL OR a.operation_id<>?1) AND a.conflict=0 AND NOT EXISTS (SELECT 1 FROM verified_position_anchors b WHERE (?1 IS NULL OR b.operation_id<>?1) AND b.resource=a.resource AND b.position=a.position AND b.position_kind=a.position_kind AND b.asset_json=a.asset_json AND (b.observed_at>a.observed_at OR (b.observed_at=a.observed_at AND (b.conflict<>0 OR b.anchor_json<>a.anchor_json)))) ORDER BY a.resource,a.position,a.position_kind,a.asset_json,a.operation_id")?;
+        let rows = q.query_map([excluded_operation_id], |r| r.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for raw in rows {
+            if let Ok(anchor) = serde_json::from_str::<gofin_domain::PositionAnchor>(&raw?)
+                && !result.contains(&anchor)
+            {
+                result.push(anchor)
+            }
+        }
+        Ok(result)
     }
 
     pub fn get_run(&self, run_id: &str) -> Result<Option<Value>> {
@@ -7201,6 +8500,31 @@ fn legacy_cash_cost_resource(record_json: &str, reservation_key: &str) -> Result
     Ok(None)
 }
 
+/// Index only recoverable Ethereum signer identity; unidentifiable corrupt
+/// rows remain isolated rather than making every account unavailable.
+fn project_evm_submission_nonce_tx(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    data: &Value,
+) -> Result<()> {
+    let Some(transaction) = data.get("transaction") else {
+        return Ok(());
+    };
+    let (Some(chain), Some(sender)) = (
+        transaction.get("chain_id").and_then(Value::as_u64),
+        transaction.get("sender").and_then(Value::as_str),
+    ) else {
+        return Ok(());
+    };
+    let scope = format!("ethereum:{chain}:{}", sender.to_ascii_lowercase());
+    let nonce = transaction
+        .get("nonce")
+        .and_then(Value::as_u64)
+        .and_then(|n| i64::try_from(n).ok());
+    tx.execute("INSERT OR IGNORE INTO evm_submission_nonces(operation_id,signer_scope,nonce) VALUES (?1,?2,?3)",params![operation_id,scope,nonce])?;
+    Ok(())
+}
+
 fn persist_submission_tx(
     tx: &Transaction<'_>,
     operation_id: &str,
@@ -7260,6 +8584,13 @@ fn persist_submission_tx(
             submission.data.to_string()
         ],
     )?;
+    tx.execute(
+        "INSERT INTO submission_admissions(operation_id,admitted_at) VALUES (?1,?2)",
+        params![operation_id, timestamp],
+    )?;
+    if submission.kind == "ethereum" {
+        project_evm_submission_nonce_tx(tx, operation_id, &submission.data)?;
+    }
     tx.execute(
         "UPDATE operations SET status='submitted', record_json=?1, updated_at=?2 WHERE id=?3",
         params![record.to_string(), timestamp, operation_id],
@@ -8315,20 +9646,51 @@ fn settlement_locator_matches(
         && locator_matches
 }
 
+fn read_record_isolated(conn: &Connection, operation_id: &str) -> Result<Option<Value>> {
+    read_record_isolated_mode(conn, operation_id, false)
+}
+fn read_record_isolated_mode(
+    conn: &Connection,
+    operation_id: &str,
+    require_typed: bool,
+) -> Result<Option<Value>> {
+    let row = conn.query_row("SELECT request_id,fingerprint,operation,run_id,record_json,created_at,updated_at FROM operations WHERE id=?1", [operation_id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?))).optional()?;
+    let Some((request_id, fingerprint, operation, run_id, text, created_at, updated_at)) = row
+    else {
+        return Ok(None);
+    };
+    if let Ok(record) = serde_json::from_str::<Value>(&text)
+        && gofin_domain::product_names::validate(&record).is_ok()
+        && (!require_typed
+            || serde_json::from_value::<gofin_domain::OperationRecord>(record.clone()).is_ok())
+    {
+        return Ok(Some(record));
+    }
+    // Keep recoverable identity visible, but do not infer any financial result.
+    let submission: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
+            [operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let submission = submission.map(|(kind,reference,data)| serde_json::json!({"kind":kind,"reference":reference,"data":serde_json::from_str::<Value>(&data).unwrap_or(Value::Null)}));
+    Ok(Some(
+        serde_json::json!({"id":operation_id,"request_id":request_id,"fingerprint":fingerprint,"fingerprint_version":1,"operation":operation,"input":{},"status":"unknown","created_at":created_at,"updated_at":updated_at,"preview":null,"approval":null,"submission":submission,"effects":null,"last_reconciliation_evidence":null,"error":{"code":"history_unreadable","stage":"history","message":"Historical operation data is incomplete.","next_action":"Observe the original identity when evidence is available."},"run_id":run_id}),
+    ))
+}
+
 fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
     let mut statement =
-        conn.prepare("SELECT record_json FROM operations ORDER BY created_at DESC, id DESC")?;
-    let rows = statement.query_map([], |r| {
-        let text: String = r.get(0)?;
-        serde_json::from_str(&text).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })
-    })?;
-    let records = rows
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(StoreError::from)?;
-    for record in &records {
-        gofin_domain::product_names::validate(record)?;
+        conn.prepare("SELECT id FROM operations ORDER BY created_at DESC, id DESC")?;
+    let ids = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut records = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(record) = read_record_isolated(conn, &id)? {
+            records.push(record);
+        }
     }
     Ok(records)
 }
@@ -10073,18 +11435,7 @@ fn validate_plan_bridge_terminal_transition(
 }
 
 fn get_request_tx(tx: &Transaction<'_>, request_id: &str) -> Result<Option<RequestRow>> {
-    let row = tx
-        .query_row(
-            "SELECT id, request_id, fingerprint, operation, record_json FROM operations WHERE request_id=?1",
-            [request_id],
-            |r| {
-                let text: String = r.get(4)?;
-                let record = serde_json::from_str(&text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
-                Ok(RequestRow { operation_id: r.get(0)?, request_id: r.get(1)?, fingerprint: r.get(2)?, operation: r.get(3)?, record, created: false })
-            },
-        )
-        .optional()?;
-    Ok(row)
+    get_request_conn(tx, request_id)
 }
 
 fn get_record_tx(tx: &Transaction<'_>, operation_id: &str) -> Result<Option<Value>> {
@@ -10106,19 +11457,147 @@ fn get_record_tx(tx: &Transaction<'_>, operation_id: &str) -> Result<Option<Valu
     .map_err(StoreError::from)
 }
 
-fn get_request_conn(conn: &Connection, request_id: &str) -> Result<Option<RequestRow>> {
-    let row = conn
+fn project_verified_position_anchors_tx(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    record: &Value,
+) -> Result<()> {
+    use gofin_domain::{FinancialEffect, PositionKind, VerifiedEffects};
+    if record.get("id").and_then(Value::as_str) != Some(operation_id) {
+        return Ok(());
+    }
+    let Some(raw) = record.get("effects").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let Ok(proof) = serde_json::from_value::<VerifiedEffects>(raw.clone()) else {
+        return Ok(());
+    };
+    if gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+        != Some(proof.proof_digest.as_str())
+    {
+        return Ok(());
+    }
+    let submission: Option<(String, String, String)> = tx
         .query_row(
-            "SELECT id, request_id, fingerprint, operation, record_json FROM operations WHERE request_id=?1",
-            [request_id],
-            |r| {
-                let text: String = r.get(4)?;
-                let record = serde_json::from_str(&text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
-                Ok(RequestRow { operation_id: r.get(0)?, request_id: r.get(1)?, fingerprint: r.get(2)?, operation: r.get(3)?, record, created: false })
-            },
+            "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
+            [operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    Ok(row)
+    let Some((kind, reference, data)) = submission else {
+        return Ok(());
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&data) else {
+        return Ok(());
+    };
+    if proof.submission.kind != kind
+        || proof.submission.reference != reference
+        || proof.submission.data != data
+    {
+        return Ok(());
+    }
+    for effect in &proof.effects {
+        let anchor = match effect {
+            FinancialEffect::PositionChange {
+                resource,
+                position,
+                asset,
+                anchor: Some(anchor),
+                ..
+            } if &anchor.resource == resource
+                && &anchor.position == position
+                && &anchor.principal.asset == asset =>
+            {
+                anchor
+            }
+            FinancialEffect::DebtChange {
+                resource,
+                debt,
+                asset,
+                anchor: Some(anchor),
+                ..
+            } if &anchor.resource == resource
+                && &anchor.position == debt
+                && &anchor.principal.asset == asset
+                && matches!(
+                    anchor.position_kind,
+                    PositionKind::StableDebt | PositionKind::VariableDebt
+                ) =>
+            {
+                anchor
+            }
+            _ => continue,
+        };
+        let supported = anchor.evidence_version == 1
+            || (anchor.evidence_version == 2
+                && anchor.position_kind == PositionKind::Investment
+                && anchor.evidence["share_scope"].as_str() == Some("transaction_attributed")
+                && anchor.evidence["transaction_hash"].as_str()
+                    == Some(proof.submission.reference.as_str()))
+            || (anchor.evidence_version == 3
+                && anchor.position_kind == PositionKind::Liquidity
+                && proof.submission.kind == "solana.transaction"
+                && anchor.evidence["version"].as_u64() == Some(3)
+                && anchor.evidence["source"].as_str()
+                    == Some("finalized_meteora_liquidity_unit_delta")
+                && anchor.evidence["basis"].as_str() == Some("stable_protocol_liquidity_units")
+                && anchor.evidence["signature"].as_str()
+                    == proof.submission.data["chain_signature"].as_str()
+                && proof.submission.data["chain_signature"]
+                    .as_str()
+                    .is_some_and(|signature| !signature.is_empty())
+                && serde_json::from_value::<gofin_domain::LiquidityPositionEvidence>(
+                    anchor.evidence["liquidity_position"].clone(),
+                )
+                .is_ok_and(|lp| {
+                    lp.version == 1
+                        && matches!(lp.family.as_str(), "dlmm" | "damm_v2")
+                        && lp.anchor_position_id.as_deref() == Some(anchor.position.as_str())
+                        && lp.liquidity_units_known
+                        && lp.liquidity_units_atoms.as_ref() == Some(&anchor.principal.atoms)
+                        && lp.history.last().is_some_and(|event| {
+                            Some(event.signature.as_str())
+                                == proof.submission.data["chain_signature"].as_str()
+                                && event.submission.as_ref() == Some(&proof.submission)
+                        })
+                }));
+        if !supported || anchor.position.is_empty() || anchor.resource.0.is_empty() {
+            continue;
+        }
+        let Ok(observed) = chrono::DateTime::parse_from_rfc3339(&anchor.observed_at) else {
+            continue;
+        };
+        let observed = observed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let kind = serde_json::to_string(&anchor.position_kind)?;
+        let asset = serde_json::to_string(&anchor.principal.asset)?;
+        let encoded = serde_json::to_string(anchor)?;
+        tx.execute("INSERT INTO verified_position_anchors(operation_id,resource,position,position_kind,asset_json,observed_at,anchor_json,proof_digest,conflict) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0) ON CONFLICT(operation_id,resource,position,position_kind,asset_json) DO UPDATE SET conflict=CASE WHEN excluded.observed_at=observed_at AND excluded.anchor_json<>anchor_json THEN 1 WHEN excluded.observed_at>observed_at THEN 0 ELSE conflict END,anchor_json=CASE WHEN excluded.observed_at>observed_at THEN excluded.anchor_json ELSE anchor_json END,proof_digest=CASE WHEN excluded.observed_at>observed_at THEN excluded.proof_digest ELSE proof_digest END,observed_at=MAX(observed_at,excluded.observed_at)",params![operation_id,anchor.resource.0,anchor.position,kind,asset,observed,encoded,proof.proof_digest])?;
+    }
+    Ok(())
+}
+
+fn get_request_conn(conn: &Connection, request_id: &str) -> Result<Option<RequestRow>> {
+    let identity: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT id,request_id,fingerprint,operation FROM operations WHERE request_id=?1",
+            [request_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((operation_id, request_id, fingerprint, operation)) = identity else {
+        return Ok(None);
+    };
+    let record = read_record_isolated(conn, &operation_id)?.ok_or(StoreError::OperationNotFound)?;
+    Ok(Some(RequestRow {
+        operation_id,
+        request_id,
+        fingerprint,
+        operation,
+        record,
+        created: false,
+    }))
 }
 
 impl Store {
@@ -10547,8 +12026,23 @@ mod tests {
         json!({"status": status, "input": {"amount": "1000000000000000001"}})
     }
 
+    fn typed_fixture(
+        id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        status: &str,
+    ) -> Value {
+        json!({"id":id,"request_id":request_id,"fingerprint":fingerprint,"fingerprint_version":1,"operation":operation,"input":{},"status":status,"created_at":"t0","updated_at":"t0","preview":null,"approval":null,"submission":null,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null})
+    }
     fn ordinary_request(store: &mut Store, id: &str) -> Value {
-        let value = json!({"id":id,"request_id":format!("request-{id}"),"fingerprint":format!("fingerprint-{id}"),"status":"awaiting_approval"});
+        let value = typed_fixture(
+            id,
+            &format!("request-{id}"),
+            &format!("fingerprint-{id}"),
+            "synthetic.transfer",
+            "awaiting_approval",
+        );
         store
             .create_request(
                 id,
@@ -10562,6 +12056,48 @@ mod tests {
             )
             .unwrap();
         value
+    }
+
+    #[test]
+    fn binding_identity_index_ignores_corrupt_unrelated_rows_and_survives_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binding-index.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let mut good = ordinary_request(&mut store, "good");
+        good["operation"] = json!("papertrade.withdraw");
+        good["preview"] = json!({"binding":{"funding_binding":{"operation_id":"route-1"}}});
+        store.update_record("good", &good, "t1").unwrap();
+        ordinary_request(&mut store, "bad");
+        store
+            .conn
+            .execute(
+                "UPDATE operations SET record_json='{broken' WHERE id='bad'",
+                [],
+            )
+            .unwrap();
+        store.conn.execute_batch("DROP TABLE preapproval_continuations; DROP INDEX operation_binding_order_key; DROP INDEX operation_binding_funding_id; DROP INDEX operation_binding_resource; DROP INDEX operation_binding_client_id; DROP INDEX operation_binding_binding_client_id; DROP INDEX operation_binding_binding_resource; DROP INDEX operation_recovery_parent; PRAGMA user_version=34;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let records = store
+            .operations_by_prepared_binding(
+                "papertrade.withdraw",
+                "/preview/binding/funding_binding/operation_id",
+                &json!("route-1"),
+            )
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], "good");
+        let plan:String=store.conn.query_row("EXPLAIN QUERY PLAN SELECT record_json FROM operations WHERE CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END=?1 AND CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.preview.binding.funding_binding.operation_id') END=?2",params!["papertrade.withdraw","route-1"],|row|row.get(3)).unwrap();
+        assert!(plan.contains("operation_binding_funding_id"), "{plan}");
+        assert!(
+            store
+                .operations_by_prepared_binding(
+                    "papertrade.withdraw",
+                    "/unknown",
+                    &json!("route-1")
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -11562,7 +13098,7 @@ mod tests {
         let path = directory.path().join("dispatch-evidence.sqlite");
         let mut store = Store::open(&path).unwrap();
         let mut initial = ordinary_request(&mut store, "dispatch");
-        initial["approval"] = json!({"mechanism":"synthetic","expires_at":"already-expired"});
+        initial["approval"] = json!({"mechanism":"synthetic","binding_hash":"hash","challenge_nonce":"nonce","approved_at":"t0","expires_at":"already-expired"});
         store.update_record("dispatch", &initial, "t0").unwrap();
         let submission = SubmissionRow {
             kind: "synthetic_tx".into(),
@@ -12622,7 +14158,7 @@ mod tests {
                 "transfer",
                 None,
                 "awaiting_approval",
-                &record("awaiting_approval"),
+                &typed_fixture("pre", "req-pre", "fp-pre", "transfer", "awaiting_approval"),
                 "t0",
             )
             .unwrap();
@@ -12644,7 +14180,13 @@ mod tests {
                 "transfer",
                 None,
                 "awaiting_approval",
-                &record("awaiting_approval"),
+                &typed_fixture(
+                    "sent",
+                    "req-sent",
+                    "fp-sent",
+                    "transfer",
+                    "awaiting_approval",
+                ),
                 "t0",
             )
             .unwrap();
@@ -12687,7 +14229,7 @@ mod tests {
             store.get_record("pre").unwrap().unwrap()["error"]["next_action"]
                 .as_str()
                 .unwrap()
-                .contains("without fresh Touch ID")
+                .contains("original action")
         );
         assert_eq!(
             store.submission("sent").unwrap().unwrap().reference,

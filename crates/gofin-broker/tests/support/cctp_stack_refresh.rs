@@ -91,57 +91,33 @@ async fn exercise() {
         Arc::new(Iris::new(chain)),
         OffsetClock::realtime(),
     );
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    let request = |index: usize| OperationRequest {
-        request_id: format!("stack-refresh-stage-{index}"),
-        operation: "bridge.transfer".into(),
-        input: inputs[index].clone(),
-        run_id: None,
-    };
-    h.settle(h.execute_public(&plan, "stage-0", request(0)).await)
+    h.chain.lock().unwrap().lose_source_ordinal = Some(1);
+    let (id, transfer) = Box::pin(h.start_compound("stack-refresh")).await;
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id: id.clone() },
+        )
         .await;
     let before = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(before.quote_revisions.len(), 1);
     let expires = chrono::DateTime::parse_from_rfc3339(&before.quote_revisions[0].valid_until)
         .unwrap()
         .with_timezone(&chrono::Utc);
     if let Ok(wait) = (expires - chrono::Utc::now()).to_std() {
         tokio::time::sleep(wait + std::time::Duration::from_millis(5)).await;
     }
-    assert!(expires < chrono::Utc::now());
     fault.armed.store(true, Ordering::SeqCst);
-    let burn = h
-        .settle(h.execute_public(&plan, "stage-1", request(1)).await)
-        .await;
+    let _ = Box::pin(h.continue_compound(&id)).await;
     assert_eq!(fault.failures.load(Ordering::SeqCst), 1);
-    assert_eq!(fault.quotes.load(Ordering::SeqCst), 3);
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(refreshed.id, before.id);
-    assert_eq!(refreshed.steps[0], before.steps[0]);
-    assert_eq!(refreshed.approved_bounds, before.approved_bounds);
-    assert_eq!(refreshed.plan_scope, before.plan_scope);
-    assert_eq!(refreshed.quote_revisions.len(), 2);
     assert_eq!(
-        refreshed
-            .steps
-            .iter()
-            .map(|step| &step.step_id)
-            .collect::<Vec<_>>(),
-        before
-            .steps
-            .iter()
-            .map(|step| &step.step_id)
-            .collect::<Vec<_>>()
+        refreshed.steps[0].operation_id,
+        before.steps[0].operation_id
     );
-    let replay = h.execute_public(&plan, "stage-1", request(1)).await;
-    assert_eq!(replay.id, burn.id);
-    assert_eq!(replay.submission, burn.submission);
+    assert!(refreshed.quote_revisions.len() > before.quote_revisions.len());
     assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute_public(&plan, "stage-2", request(2)).await)
-        .await;
+    let _ = Box::pin(h.continue_compound(&id)).await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(

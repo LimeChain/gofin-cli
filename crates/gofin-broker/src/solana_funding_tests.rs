@@ -7,14 +7,9 @@ use gofin_binance::{
     BinancePriceProvider, BinanceRequest, BinanceTransport, CredentialHandle, EthereumDestination,
     PriceQuote, TransportError,
 };
-use gofin_domain::financial_plans::{
-    FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanFundingDependency,
-    FinancialPlanFundingIdentity, FinancialPlanFundingScope, FinancialPlanSpec,
-    FinancialPlanStepSpec, FinancialStepCompletion,
-};
 use gofin_domain::{
     Amount, ApprovalAudit, AssetId, AssetPrice, AuthorizationChallenge, Authorizer,
-    FinancialIntent, OperationRequest, Quantity, ResourceAmount, ResourceId, now,
+    OperationRequest, Quantity, ResourceId, now,
 };
 use gofin_protocol::BrokerRequest;
 use serde_json::{Value, json};
@@ -464,7 +459,7 @@ async fn solana_funding_cli_binance_withdrawals_verify_native_and_exact_usdc_pay
 }
 
 #[tokio::test]
-async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
+async fn solana_funding_native_actions_withdraw_usdc_then_deposit_verified_credit() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("binance-solana-future-funding.sqlite");
     let fixture = SolanaFundingFixture::new("synthetic-solana", 5_000_000_000, 0);
@@ -472,176 +467,14 @@ async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
     let venue = Arc::new(Venue::new(fixture.clone()));
     venue.set_free("USDC", "5");
     let approval = Arc::new(Allow(AtomicUsize::new(0)));
-    // Obtain exact reviewed scopes from the production adapters with sufficient
-    // synthetic balance, then remove that token balance before the plan is run.
-    // The approved funding edge must supply it from the preceding Binance payout.
-    fixture.set_balance(5_000_000_000, 1_000_000);
-    let withdraw_input =
-        withdrawal_input("SYNTHETIC-PLAN-USDC-WITHDRAW", "USDC", "0.6", "0.1", "0.5");
-    let deposit = deposit_input("SYNTHETIC-PLAN-USDC-DEPOSIT", "USDC", "0.5");
-    let (_, binance, deposit_adapter) =
-        runtime_and_adapters(&db, venue.clone(), &fixture, approval.clone());
-    let withdraw_prepared = binance
-        .prepare("binance.withdraw", &withdraw_input)
-        .await
-        .unwrap();
-    let deposit_prepared = deposit_adapter
-        .prepare("binance.deposit", &deposit)
-        .await
-        .unwrap();
-    fixture.set_balance(5_000_000_000, 0);
-
-    let wallet_resource = ResourceId(format!("solana:mainnet-beta:{}", fixture.signer_address()));
-    let sol_usdc = AssetId {
-        network: "solana:mainnet-beta".into(),
-        reference: USDC_MINT.into(),
-        decimals: 6,
-    };
-    let usdc_identity = |intent: &FinancialIntent| {
-        intent
-            .expected
-            .iter()
-            .filter_map(|effect| match effect {
-                gofin_domain::EffectConstraint::Transfer {
-                    to, credit_asset, ..
-                } => Some(FinancialPlanFundingIdentity {
-                    resource: to.clone(),
-                    asset: credit_asset.clone(),
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let exact_scope = |prepared: &PreparedOperation| {
-        json!({"mode":"exact", "maximum_debits":prepared.intent.debits,
-            "maximum_costs":prepared.intent.maximum_costs,
-            "possible_credits":usdc_identity(&prepared.intent)})
-    };
-    let wallet_minimum = ResourceAmount {
-        resource: wallet_resource.clone(),
-        amount: Amount {
-            asset: sol_usdc.clone(),
-            atoms: Quantity::from_decimal("0.5", 6).unwrap(),
-        },
-    };
-    let cex_minimum = ResourceAmount {
-        resource: ResourceId(ACCOUNT_RESOURCE.into()),
-        amount: Amount {
-            asset: AssetId {
-                network: "binance".into(),
-                reference: "USDC".into(),
-                decimals: 36,
-            },
-            atoms: Quantity::from_decimal("0.5", 36).unwrap(),
-        },
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Synthetic Binance Solana USDC funding".into(),
-        summary: Some("Withdraw USDC to Solana, then deposit the verified proceeds.".into()),
-        steps: vec![
-            FinancialPlanStepSpec {
-                step_id: "withdraw".into(),
-                operation: "binance.withdraw".into(),
-                input: withdraw_input.clone(),
-                permitted_variations: exact_scope(&withdraw_prepared),
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: Some(wallet_minimum.clone()),
-                },
-            },
-            FinancialPlanStepSpec {
-                step_id: "deposit".into(),
-                operation: "binance.deposit".into(),
-                input: deposit.clone(),
-                permitted_variations: exact_scope(&deposit_prepared),
-                funding_dependencies: vec![FinancialPlanFundingDependency {
-                    producing_step_id: "withdraw".into(),
-                    resource: wallet_resource,
-                    asset: sol_usdc,
-                    funding_scope: Some(FinancialPlanFundingScope::PrincipalOnly),
-                    maximum_fraction_bps: None,
-                }],
-                action_deadline_seconds: None,
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: Some(cex_minimum),
-                },
-            },
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: withdraw_prepared
-                .intent
-                .debits
-                .iter()
-                .chain(&deposit_prepared.intent.debits)
-                .cloned()
-                .collect(),
-            maximum_costs: withdraw_prepared
-                .intent
-                .maximum_costs
-                .iter()
-                .chain(&deposit_prepared.intent.maximum_costs)
-                .cloned()
-                .collect(),
-        },
-    };
+    let withdraw_input = withdrawal_input("SYNTHETIC-USDC-WITHDRAW", "USDC", "0.6", "0.1", "0.5");
+    let deposit = deposit_input("SYNTHETIC-USDC-DEPOSIT", "USDC", "0.5");
     let client = Client::new(
         runtime(&db, venue.clone(), &fixture, approval.clone()),
         temp.path(),
     )
     .await;
-    let plan_json = serde_json::to_string(&plan).unwrap();
-    let mut auth = FinancialPlanAuthorizationRequest {
-        request_id: "SYNTHETIC-BINANCE-SOLANA-FUNDING-PLAN".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(1800),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &plan_json,
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: auth.clone(),
-            },
-            true,
-        )
-        .await;
-    auth.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let authorized = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &plan_json,
-                "--id",
-                &auth.request_id,
-                "--review-hash",
-                auth.expected_review_hash.as_ref().unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request: auth },
-            true,
-        )
-        .await;
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.token_balance(&fixture.signer_address()), 0);
 
     let withdraw_id = "SYNTHETIC-PLAN-USDC-WITHDRAW-ATTEMPT";
@@ -652,18 +485,12 @@ async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
         &withdraw_input.to_string(),
         "--id",
         withdraw_id,
-        "--plan",
-        &plan_id,
-        "--step",
-        "withdraw",
         "--json",
     ]);
     let payout = client
         .call(
             withdraw_argv,
-            BrokerRequest::ExecutePlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "withdraw".into(),
+            BrokerRequest::Execute {
                 request: OperationRequest {
                     request_id: withdraw_id.into(),
                     operation: "binance.withdraw".into(),
@@ -684,15 +511,9 @@ async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
         &deposit.to_string(),
         "--id",
         deposit_id,
-        "--plan",
-        &plan_id,
-        "--step",
-        "deposit",
         "--json",
     ]);
-    let request = BrokerRequest::ExecutePlanStep {
-        plan_id,
-        step_id: "deposit".into(),
+    let request = BrokerRequest::Execute {
         request: OperationRequest {
             request_id: deposit_id.into(),
             operation: "binance.deposit".into(),
@@ -729,7 +550,7 @@ async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
         "restart must not replay the wallet source write"
     );
     assert_eq!(venue.0.lock().unwrap().withdrawal_history.len(), 1);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

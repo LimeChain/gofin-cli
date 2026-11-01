@@ -1,9 +1,8 @@
 //! Protected human configuration path. Financial RPC cannot invoke this module.
 use crate::{
     BrokerConfigV2, BrokerCredentialProvider, BrokerPolicy, CONFIG_PATH, ConnectionConfig,
-    DeploymentConfig, NetworkConfig, ProtectedCredentialProvider,
-    hyperliquid_owner_has_pending_operations, load_protected_config, load_stored_protected_config,
-    lock_protected_configuration, open_protected_store, resource_has_pending_operations,
+    DeploymentConfig, NetworkConfig, ProtectedCredentialProvider, load_protected_config,
+    load_stored_protected_config, lock_protected_configuration, open_protected_store,
     save_protected_config, strip_derived_hyperliquid_links,
 };
 use gofin_authorization::{MacOsAuthorizer, SudoConfigurationAuthorizer, validate_installation};
@@ -96,6 +95,43 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let mut terminal = HumanTerminal::open(config.approver_uid)?;
     gofin_analytics::set_broker_user(config.approver_uid);
     let journal = open_protected_store()?;
+    if action == "operation_dismiss" {
+        let args: gofin_discovery::IdInput = parse(request)?;
+        terminal.finish()?;
+        let applications = crate::build_protected_applications(
+            &effective_config,
+            Arc::new(ProtectedCredentialProvider::open()?),
+        )?;
+        let runtime = crate::compose_runtime(
+            effective_config,
+            crate::RuntimeDependencies {
+                store: journal,
+                adapters: applications.adapters,
+                authorizer: Arc::new(MacOsAuthorizer::protected(config.approver_uid)?),
+                valuator: applications.valuator,
+                bridge: applications.bridge,
+            },
+        )?;
+        let record = runtime.engine.status(&args.id, false).await?;
+        let view = runtime.engine.operation_view(&record)?;
+        if view["outcome"]["phase"] != "unconfirmed" {
+            return Err(GoFinError::validation(
+                "Only an unconfirmed operation can be dismissed.",
+            ));
+        }
+        let binding = json!({"action":"operation_dismiss", "operation_id":args.id,
+            "financial_movement":false, "future_financial_authority":false});
+        let challenge = approve_and_audit(
+            config.approver_uid,
+            &binding,
+            "Dismiss unconfirmed operation",
+            ui,
+        )
+        .await?;
+        gofin_authorization::validate_challenge(&challenge, &now())?;
+        return runtime.engine.dismiss_operation(&args.id);
+    }
+
     if action == "policy_set" {
         terminal.finish()?;
         let args: gofin_discovery::PolicySetArgs = parse(request)?;
@@ -283,49 +319,15 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     }
 }
 
-// Preserve the mappings needed for recovery while allowing unrelated enrollment.
+// Validate configuration independently of financial history. Original operations
+// retain their immutable account/asset/signing identity; missing observation
+// credentials are reported on that operation, never as a configuration lock.
 pub(crate) fn ensure_connection_changes_safe(
-    journal: &gofin_store::Store,
-    previous: &BrokerConfigV2,
+    _journal: &gofin_store::Store,
+    _previous: &BrokerConfigV2,
     candidate: &BrokerConfigV2,
 ) -> Result<()> {
-    for connection in &previous.connections {
-        // Compare effective mappings, including derived aliases and network scope.
-        // An unrelated new wallet must not interfere with ongoing recovery.
-        if candidate.connections.iter().any(|next| {
-            next == connection
-                && connection_resources(next, candidate)
-                    == connection_resources(connection, previous)
-        }) {
-            continue;
-        }
-        let pending_hyperliquid_signer = match connection {
-            ConnectionConfig::Evm { address, .. } => {
-                hyperliquid_owner_has_pending_operations(journal, address)?
-            }
-            ConnectionConfig::Hyperliquid { owner, .. } => {
-                hyperliquid_owner_has_pending_operations(journal, owner)?
-            }
-            _ => false,
-        };
-        if pending_hyperliquid_signer
-            || connection_resources(connection, previous)
-                .iter()
-                .map(|resource| resource_has_pending_operations(journal, resource))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .any(|pending| pending)
-        {
-            return Err(error(
-                "CONNECTION_HAS_PENDING_OPERATION",
-                &format!(
-                    "Connection {} has unresolved financial operations. Reconcile them before changing or removing this connection.",
-                    name(connection)
-                ),
-            ));
-        }
-    }
-    Ok(())
+    candidate.validate()
 }
 
 // Shared by imports and generation: reject duplicate names before generating/staging keys.
@@ -451,33 +453,6 @@ async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) 
     })
 }
 
-fn collect_setup_policy(mut read: impl FnMut(&str) -> Result<String>) -> Result<BrokerPolicy> {
-    let movement = read(
-        "Movement limit in USD, including maximum execution costs (0 = no limit; Enter = 100)",
-    )?;
-    let allocation = read(
-        "Rolling 24-hour gross allocation in USD: movement + maximum costs + additional borrowing across all commands (0 = no limit; Enter = 100)",
-    )?;
-    let args = gofin_discovery::PolicySetArgs {
-        max_movement_usd: if movement.is_empty() {
-            "100".into()
-        } else {
-            movement
-        },
-        max_run_allocation_usd: if allocation.is_empty() {
-            "100".into()
-        } else {
-            allocation
-        },
-        allow_unpriced_exchange_assets: None,
-    };
-    let (movement, allocation) = args.micros()?;
-    let mut policy = BrokerPolicy::beta();
-    policy.max_movement_usd_micros = movement;
-    policy.max_run_allocation_usd_micros = allocation;
-    Ok(policy)
-}
-
 /// Canonical first-install configuration, shared with the protected review.
 fn setup_configuration(approver_uid: u32, policy: BrokerPolicy) -> BrokerConfigV2 {
     BrokerConfigV2 {
@@ -493,7 +468,7 @@ fn setup_configuration(approver_uid: u32, policy: BrokerPolicy) -> BrokerConfigV
 
 async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
-    let mut terminal = HumanTerminal::open(args.approver_uid)?;
+    let terminal = HumanTerminal::open(args.approver_uid)?;
     // Initial setup has no stored configuration. HumanTerminal independently
     // validates this requested account before it can receive analytics delegation.
     gofin_analytics::set_broker_user(args.approver_uid);
@@ -508,7 +483,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
             "Setup cannot replace an existing journal or configuration. Use connection management or a reviewed upgrade.",
         ));
     }
-    let policy = collect_setup_policy(|label| terminal.read_public_line(label))?;
+    let policy = BrokerPolicy::beta();
     terminal.finish()?;
     let config = setup_configuration(args.approver_uid, policy);
     config.validate()?;
@@ -2124,6 +2099,7 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
         }
     }
 }
+#[cfg(test)]
 fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {
     match connection {
         ConnectionConfig::Evm {
@@ -3346,57 +3322,14 @@ mod tests {
     }
 
     #[test]
-    fn setup_collects_defaults_exact_limits_or_zero_before_approval() {
-        for (inputs, expected) in [
-            (["", ""], ["100000000", "100000000"]),
-            (["1000.000001", "5000"], ["1000000001", "5000000000"]),
-            (["0", "0"], ["0", "0"]),
-            (["0", "5000"], ["0", "5000000000"]),
-        ] {
-            let mut index = 0;
-            let policy = collect_setup_policy(|label| {
-                assert!(label.contains("0 = no limit; Enter = 100"));
-                let value = inputs[index].into();
-                index += 1;
-                Ok(value)
-            })
-            .unwrap();
-            assert_eq!(policy.max_movement_usd_micros, expected[0]);
-            assert_eq!(policy.max_run_allocation_usd_micros, expected[1]);
-            assert!(!policy.require_run_for_writes);
-            assert_eq!(policy.preview_ttl_seconds, 90);
-        }
-        for invalid in ["-1", "1e3", "0.0000001", "18446744073709.551616"] {
-            assert!(collect_setup_policy(|_| Ok(invalid.into())).is_err());
-        }
-        assert_eq!(
-            collect_setup_policy(|_| Err(error("ENROLLMENT_CANCELLED", "Synthetic cancellation")))
-                .unwrap_err()
-                .code,
-            "ENROLLMENT_CANCELLED"
-        );
-    }
-
-    #[test]
-    fn setup_review_accepts_collected_limits_and_current_reviewed_deployments() {
-        for inputs in [["50", "50"], ["", ""], ["0", "0"], ["1000.000001", "5000"]] {
-            let mut inputs = inputs.into_iter();
-            let policy = collect_setup_policy(|_| Ok(inputs.next().unwrap().into())).unwrap();
-            let movement =
-                gofin_domain::policy::format_limit(&policy.max_movement_usd_micros).unwrap();
-            let allocation =
-                gofin_domain::policy::format_limit(&policy.max_run_allocation_usd_micros).unwrap();
-            let config = setup_configuration(501, policy);
-            let binding = json!({
-                "action":"initialize", "configuration":config,
-                "financial_movement":false, "future_financial_authority":false
-            });
-            let text = presentation::review(&binding).unwrap();
-            assert!(text.contains(&format!("Movement limit: {movement}")));
-            assert!(text.contains(&format!("24-hour allocation limit: {allocation}")));
-            assert!(text.contains("Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo."));
-            assert!(text.contains("Your terminal confirmation approves GoFin setup"));
-        }
+    fn setup_reviews_native_approval_without_personal_limit_prompts() {
+        let config = setup_configuration(501, BrokerPolicy::beta());
+        let binding = json!({"action":"initialize", "configuration":config,
+            "financial_movement":false, "future_financial_authority":false});
+        let text = presentation::review(&binding).unwrap();
+        assert!(text.contains("No personal USD limits"));
+        assert!(text.contains("native economic terms"));
+        assert!(!text.contains("Movement limit:"));
     }
 
     #[test]

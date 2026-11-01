@@ -1,0 +1,80 @@
+{
+  "version": 2,
+  "networks": [
+    {
+      "id": "ethereum:1",
+      "chain_id": 1,
+      "rpc_urls": [
+        "https://ethereum-rpc.publicnode.com",
+        "https://eth.drpc.org"
+      ],
+      "confirmations": 2,
+      "snapshot_tokens": []
+    }
+  ],
+  "deployments": [
+    {
+      "network": "ethereum:1",
+      "weth": null,
+      "snapshot_tokens": [],
+      "uniswap": {
+        "factory": "0x1f98431c8ad98523631ae4a59f267346ea31f984",
+        "quoter": "0x61ffe014ba17989e743c5f6cb21bf9697530b21e",
+        "router": "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45",
+        "router_kind": "swap_router02",
+        "v4": {
+          "router": "0x23617e59a5925b2a4bf75d73ff6711cd0b29de85",
+          "quoter": "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203",
+          "pool_manager": "0x000000000004444c5dc75cb358380d2e3de08a90",
+          "state_view": "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
+          "router_has_hop_price": true
+        }
+      },
+      "v3_deployments": {
+        "sushi": {
+          "factory": "0xbACEB8eC6b9355Dfc0269C18bac9d6E2Bdc29C4F",
+          "quoter": "0x64e8802FE490fa7cc61d3463958199161Bb608A7",
+          "router": "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F",
+          "router_kind": "legacy_v3",
+          "pool_abi": "uniswap_v3",
+          "router_metadata_abi": "uniswap_v3",
+          "allowed_fee_tiers": [
+            100,
+            500,
+            3000,
+            10000
+          ]
+        },
+        "pancakeswap": {
+          "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+          "quoter": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+          "router": "0x1b81D678ffb9C0263b24A97847620C99d213eB14",
+          "router_kind": "legacy_v3",
+          "pool_deployer": "0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9",
+          "pool_abi": "pancake_v3",
+          "router_metadata_abi": "pancake_v3",
+          "allowed_fee_tiers": [
+            100,
+            500,
+            2500,
+            10000
+          ]
+        }
+      },
+      "aave": {
+        "pool": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+        "oracle": "0x54586be62e3c3580375ae3723c145253060ca0c2"
+      }
+    }
+  ],
+  "connections": [],
+  "policy": {
+    "require_run_for_writes": false,
+    "max_movement_usd_micros": "50000000",
+    "max_run_allocation_usd_micros": "50000000",
+    "preview_ttl_seconds": 60,
+    "allow_unpriced_exchange_assets": false
+  },
+  "approver_uid": 501,
+  "extensions": {}
+}

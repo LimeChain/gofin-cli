@@ -289,6 +289,7 @@ impl Store {
             proof,
             effects,
             children,
+            true,
         )?;
         progress::commit_progress_tx(
             &tx,
@@ -325,6 +326,7 @@ impl Store {
             &settlement.proof,
             &settlement.effects,
             children,
+            true,
         )?;
         let unresolved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM compound_amendment_children WHERE amendment_operation_id=?1 AND outcome='pending')",[&settlement.operation_id],|row|row.get(0))?;
         if unresolved {
@@ -336,6 +338,10 @@ impl Store {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Atomic validation needs proof, all children and accounting mode."
+)]
 pub(super) fn commit_children_tx(
     tx: &Transaction<'_>,
     operation: &str,
@@ -344,6 +350,7 @@ pub(super) fn commit_children_tx(
     proof: &Value,
     effects: &Value,
     settlements: &[CompoundChildSettlement],
+    accounting: bool,
 ) -> Result<()> {
     let current = amendments::get_operation_record_tx(tx, operation)?;
     if current != *expected {
@@ -458,8 +465,9 @@ pub(super) fn commit_children_tx(
         {
             return Err(StoreError::ConcurrentReservation);
         }
-        if reservation_rows_tx(tx, &child.original_id)?
-            != sorted_reservations(&child.expected_original_reservations)?
+        if accounting
+            && reservation_rows_tx(tx, &child.original_id)?
+                != sorted_reservations(&child.expected_original_reservations)?
         {
             return Err(StoreError::ConcurrentReservation);
         }
@@ -489,7 +497,9 @@ pub(super) fn commit_children_tx(
                     successor = Some((next.kind.as_str(), next.reference.as_str()));
                 }
                 ordinal = Some(amendments::next_revision_tx(tx, &child.original_id)?);
-                replace_reservations_tx(tx, &child.original_id, &child.reservations)?;
+                if accounting {
+                    replace_reservations_tx(tx, &child.original_id, &child.reservations)?;
+                }
                 "accepted"
             }
             (ChildMutation::Cancel, ChildMutationOutcome::Accepted { successor: None }, None) => {
@@ -502,7 +512,8 @@ pub(super) fn commit_children_tx(
             }
             _ => return Err(StoreError::SubmissionConflict),
         };
-        if child.revision.is_none()
+        if accounting
+            && child.revision.is_none()
             && reservation_rows_tx(tx, &child.original_id)?
                 != sorted_reservations(&child.reservations)?
         {

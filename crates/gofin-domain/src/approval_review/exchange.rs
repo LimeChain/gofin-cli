@@ -961,6 +961,10 @@ mod tests {
             treatment: CostTreatment::VenueCalculatedAdditionalDebit,
         });
         let review = crate::approval_review::approval_review(&p).unwrap();
+        assert!(review.terms.iter().any(|term| term.label == "Venue fee"
+            && term.enforcement
+                == crate::approval_review::ApprovalTermEnforcement::AfterExecution
+            && term.value.contains("Not capped")));
         assert_eq!(review.output.unwrap().account.unwrap().name, "vault");
         let details = review.other_details.unwrap();
         assert!(details.contains("Address: 0x123"));
@@ -1007,6 +1011,8 @@ mod tests {
             description: None,
             step_count: None,
             valid_for_seconds: None,
+            terms: Vec::new(),
+            advisories: Vec::new(),
         };
         enrich(&p, &mut review).unwrap();
         assert_eq!(review.input.unwrap().account.unwrap().name, "desk");

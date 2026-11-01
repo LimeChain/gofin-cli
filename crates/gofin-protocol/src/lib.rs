@@ -135,9 +135,25 @@ pub enum BrokerRequest {
     Execute {
         request: OperationRequest,
     },
+    /// Continue the original action with one broker-issued, idempotent token.
+    ContinueOperation {
+        id: String,
+        token: String,
+    },
+    /// Review explicit replacement terms for unfinished work on the same logical action.
+    ReauthorizeOperation {
+        id: String,
+        token: String,
+        input: Value,
+    },
     Status {
         id: String,
     },
+    StatusSide {
+        id: String,
+        side: String,
+    },
+    OpenOperations,
     Operations,
     /// Describe supported recovery actions without executing or releasing anything.
     OperationRecovery {
@@ -192,6 +208,7 @@ impl BrokerRequest {
         match self {
             Self::Snapshot
             | Self::Status { .. }
+            | Self::StatusSide { .. }
             | Self::PlanStatus { .. }
             | Self::BoundaryStatus { .. }
             | Self::YoloStatus

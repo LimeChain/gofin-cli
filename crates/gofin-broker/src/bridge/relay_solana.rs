@@ -576,7 +576,7 @@ impl BridgeAdapter {
             }],
             locks: vec![quote.intent.wallet.clone()],
         };
-        let valuation = self.value_intent(&intent).await?;
+        let valuation = self.value_intent(&intent).await.ok();
         let runtime = wallet.runtime();
         let latest = runtime
             .rpc()
@@ -616,18 +616,15 @@ impl BridgeAdapter {
         let alias = record.metadata["wallet_alias"]
             .as_str()
             .ok_or_else(internal_error)?;
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             action_deadline: None, operation: "bridge.transfer".into(), input: input.clone(),
             binding: json!({"resource":quote.intent.wallet,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":record.grant_id,"quote_id":quote.quote_id,"route_id":quote.route_id,"provider_request_id":quote.provider_request_id,"protocol_order_id":quote.protocol_order_id,"quote":quote,"intent":quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"relay_solana_source_instructions":tx.instructions,"relay_solana_source_lookup_tables":tx.lookup_tables,"relay_solana_source_blockhash":blockhash,"relay_solana_source_last_valid_block_height":height,"relay_solana_source_expire_at":tx.expire_at,"relay_solana_source_max_network_fee_lamports":tx.max_network_fee_lamports,"relay_solana_source_message_sha256":validated.message_sha256,"relay_solana_source_expected":expected,"relay_solana_source_validated":validated,(gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":record.grant_id,"step_id":link.step_id,"kind":"deposit","bounds":bounds,"settlement_expectation":record.settlement_expectation,"prospective_debit":record.prospective_debit}}),
             summary: self.summary(saved, &link.kind, alias),
             checks: vec![Check { name: "Relay Solana direct deposit".into(), status: CheckStatus::Passed, detail: "Exact order, source wallet, mint, instructions and fee limits verified against the frozen message.".into() }],
             warnings: vec!["Destination settlement requires independently finalized recipient credit.".into()],
             observed_at: self.clock.now().to_rfc3339(), expires_at: quote.valid_until.clone(),
-            valuation: Some(valuation), intent, operation_version: 1,
+            valuation, intent, operation_version: 1,
         };
-        if record.grant_id.is_none() {
-            gofin_domain::value_bounds::bind(&mut prepared);
-        }
         Ok(prepared)
     }
 
@@ -703,8 +700,7 @@ impl BridgeAdapter {
         )
         .await?;
         let mut fresh = prepared.clone();
-        fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
-        gofin_domain::value_bounds::carry_at(prepared, &mut fresh, self.clock.now())?;
+        fresh.valuation = self.value_intent(&fresh.intent).await.ok();
         Ok(fresh)
     }
 
@@ -770,13 +766,18 @@ impl BridgeAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => {
-                Ok(gofin_domain::Reconciliation {
-                    status: Status::Pending,
-                    evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                    verified: None,
-                })
-            }
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(gofin_domain::Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),

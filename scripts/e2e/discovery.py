@@ -62,7 +62,7 @@ def main():
             return json.loads(output.stdout) if machine else output.stdout
 
         help_text = call("--help", machine=False)
-        for name in ["capabilities", "explain", "schema", "preview", "execute", "connections", "authorizations"]:
+        for name in ["capabilities", "explain", "schema", "preview", "execute", "connections", "operations", "status"]:
             assert name in help_text, f"Missing public command {name}"
         caps = call("capabilities", "--json")
         assert caps["service_required"] is False
@@ -77,7 +77,7 @@ def main():
         assert spot["semantics"]["orderType"] == ["LIMIT", "MARKET", "LIMIT_MAKER"]
         assert spot["semantics"]["timeInForce"] == ["IOC", "FOK", "GTC"]
         assert spot["semantics"]["standingOrders"] is True
-        assert spot["semantics"]["scopedTimeInForce"] == ["FOK"]
+        assert "scopedTimeInForce" not in spot["semantics"]
         assert "LIMIT IOC/FOK" in spot["semantics"]["approval"]
         assert any(row.get("order_type") == "MARKET" and "quote_order_quantity" in row
                    for row in spot["examples"]), "No quote-budget market buy example"
@@ -106,7 +106,7 @@ def main():
         for name in ["connections.add", "wallet.transfer", "jupiter.swap"]:
             assert name in human_capabilities
         assert "input_schema:" not in human_capabilities
-        for name in ["setup", "connections.add", "plans.preview", *OPERATIONS]:
+        for name in ["setup", "connections.add", "operations.continue", "operations.reauthorize", *OPERATIONS]:
             definition = call("explain", name, "--json")
             schema = call("schema", name, "--json")
             assert definition["name"] == schema["name"] == name
@@ -121,20 +121,20 @@ def main():
         assert "input_schema:" in verbose and "minimum_output_atoms" in verbose
         enrollment = call("explain", "connections.add", machine=False)
         assert "sudo" in enrollment and "gofin connections add" in enrollment
-        for name, actor in [("authorizations.authorize", "agent_invocable"),
-                            ("execute.boundary", "agent_invocable"),
-                            ("authorizations.status", "agent_readable"),
-                            ("authorizations.cancel", "agent_invocable")]:
+        for name, actor in [("operations.continue", "agent_invocable"),
+                            ("operations.reauthorize", "agent_invocable"),
+                            ("status", "agent_readable"),
+                            ("operations.dismiss", "human_interactive")]:
             definition = call("explain", name, "--json")
             assert definition["execution_actor"] == actor
-            assert isinstance(definition["semantics"], dict)
-        authority = call("schema", "authorizations.authorize", "--json")
-        assert authority["semantics"]["requires_fresh_human_approval"] is True
-        assert authority["semantics"]["human_terminal_review"] is True
-        assert {"operation", "id", "input", "bounds", "valid_for", "replaces"} <= authority["input"]["properties"].keys()
-        boundary = call("schema", "execute.boundary", "--json")
-        assert {"operation", "input", "authorization", "id", "replaces_attempt", "dry_run"} <= boundary["input"]["properties"].keys()
-        assert "unsubmitted" in boundary["semantics"]["candidate_replacement"]
+        continuation = call("schema", "operations.continue", "--json")
+        assert {"id", "token"} <= continuation["input"]["properties"].keys()
+        assert continuation["semantics"]["idempotent"] is True
+        reauthorization = call("schema", "operations.reauthorize", "--json")
+        assert {"id", "token", "input"} <= reauthorization["input"]["properties"].keys()
+        status = call("schema", "status", "--json")
+        assert {"id", "wait", "side"} <= status["input"]["properties"].keys()
+        assert status["semantics"]["read_only"] is True
         assert not any(path.is_file() for path in Path(home).rglob("*.sqlite")), "Discovery initialized financial state"
     print(f"PASS cli.discovery: {len(actual)} operations; {len(OPERATIONS) + 3} explain/schema roundtrips; offline human and JSON output")
 

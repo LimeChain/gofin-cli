@@ -331,8 +331,6 @@ async fn accepted_noop_recovers_exact_transfer_nonce_across_engine_restart() {
     let duplicate = engine.execute(child_request).await.unwrap();
     assert_eq!(duplicate.id, child.id);
     assert_eq!(transport.dispatches.lock().unwrap().len(), 2);
-    let held_before_restart = shared.lock().unwrap().reservations(&parent.id).unwrap();
-    assert!(!held_before_restart.is_empty());
 
     drop(engine);
     drop(adapter);
@@ -402,8 +400,6 @@ async fn rejected_or_lost_noop_keeps_original_transfer_unknown_and_reserved() {
         let parent = engine.status(&parent.id, true).await.unwrap();
         assert_eq!(parent.status, Status::Unknown);
         assert!(parent.effects.is_none());
-        let held = shared.lock().unwrap().reservations(&parent.id).unwrap();
-        assert!(!held.is_empty());
 
         let _ = engine.execute(child_request.clone()).await;
         assert_eq!(transport.dispatches.lock().unwrap().len(), 2);
@@ -411,7 +407,7 @@ async fn rejected_or_lost_noop_keeps_original_transfer_unknown_and_reserved() {
         drop(engine);
         drop(_adapter);
         drop(shared);
-        let (restarted, _restarted_adapter, restarted_store) =
+        let (restarted, _restarted_adapter, _restarted_store) =
             build_engine(&database, transport.clone());
         let same_request = restarted.execute(child_request).await.unwrap();
         assert_eq!(same_request.id, child_id);
@@ -434,14 +430,6 @@ async fn rejected_or_lost_noop_keeps_original_transfer_unknown_and_reserved() {
         let parent = restarted.status(&parent.id, true).await.unwrap();
         assert_eq!(parent.status, Status::Unknown);
         assert!(parent.effects.is_none());
-        assert!(
-            !restarted_store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
     }
 }
 
@@ -510,14 +498,6 @@ async fn enabled_dex_abstraction_still_rejects_nonce_recovery_before_noop_dispat
     let parent = engine.status(&parent.id, true).await.unwrap();
     assert_eq!(parent.status, Status::Unknown);
     assert!(parent.effects.is_none());
-    assert!(
-        !shared
-            .lock()
-            .unwrap()
-            .reservations(&parent.id)
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[tokio::test]

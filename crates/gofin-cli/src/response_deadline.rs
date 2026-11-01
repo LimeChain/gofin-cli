@@ -8,6 +8,8 @@ pub fn execution_progress_required(request: &BrokerRequest) -> bool {
     matches!(
         request,
         BrokerRequest::Execute { .. }
+            | BrokerRequest::ContinueOperation { .. }
+            | BrokerRequest::ReauthorizeOperation { .. }
             | BrokerRequest::ExecuteBoundary { .. }
             | BrokerRequest::ReplaceBoundaryCandidate { .. }
             | BrokerRequest::ExecutePlanStep { .. }
@@ -19,6 +21,7 @@ pub struct ResponseDeadline {
     deadline: Option<Instant>,
     idle_timeout: Option<Duration>,
     last_stage: Option<Stage>,
+    bounded_observation: bool,
 }
 
 impl ResponseDeadline {
@@ -29,6 +32,10 @@ impl ResponseDeadline {
                 .filter(|request| execution_progress_required(request))
                 .map(broker_response_timeout),
             last_stage: None,
+            bounded_observation: matches!(
+                request,
+                Some(BrokerRequest::Status { .. } | BrokerRequest::StatusSide { .. })
+            ),
         }
     }
 
@@ -50,6 +57,8 @@ impl ResponseDeadline {
 
     /// The caller first validates the authenticated, read-only RPC wait frame.
     pub fn allow_rpc_read(&mut self) {
-        self.deadline = None;
+        if !self.bounded_observation {
+            self.deadline = None;
+        }
     }
 }

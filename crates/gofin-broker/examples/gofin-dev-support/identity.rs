@@ -243,6 +243,7 @@ fn safe_transport_error(error: gofin_binance::TransportError) -> String {
             ..
         } => "Binance rate limited the identity read",
         TransportError::Rejected
+        | TransportError::OrderNotFound
         | TransportError::HttpFailure {
             kind: HttpFailureKind::Rejected,
             ..

@@ -533,6 +533,13 @@ impl CoinbaseProfile {
                             .chars()
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                 });
+            if contract.route == "order" && raw.status == 404 && native_code == Some("NOT_FOUND") {
+                return Err(failure(
+                    "VENUE_ORDER_NOT_FOUND",
+                    "Coinbase reports that the selected venue order ID was not found.",
+                )
+                .with_details(json!({"http_status":raw.status,"native_code":native_code})));
+            }
             return Err(failure(
                 "COINBASE_REQUEST_FAILED",
                 "Coinbase rejected or could not complete this read.",
@@ -953,10 +960,10 @@ impl CoinbaseProfile {
                 CostTreatment::AdditionalDebit
             },
         }];
-        let valuation = self.financial_valuation(&debits, &costs).await?;
+        let valuation = self.financial_valuation(&debits, &costs).await.ok();
         let observed_at = gofin_domain::now();
         let expires_at = (Utc::now() + Duration::seconds(45)).to_rfc3339();
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "coinbase.create-order".into(),
             input: input.clone(),
             binding: json!({"version":1,"provider":"coinbase","account":account.name,"resource":account.resource,"physicalIdentity":account.physical_identity,"portfolioId":account.portfolio_id,"productId":product_id,"clientOrderId":order_id,"requestBodyExact":create_body,"previewRequestBodyExact":preview_body,"preview":preview_value,"baseCurrencyId":base,"quoteCurrencyId":quote,"maximumSpend":input["maximumSpend"],"minimumReceive":input["minimumReceive"],"maximumFee":input["maximumFee"]}),
@@ -987,7 +994,7 @@ impl CoinbaseProfile {
             },
             observed_at,
             expires_at,
-            valuation: Some(valuation),
+            valuation,
             intent: FinancialIntent {
                 debits,
                 maximum_costs: costs,
@@ -1003,7 +1010,6 @@ impl CoinbaseProfile {
             operation_version: 1,
             action_deadline: None,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
     async fn prepare_cancel_order(&self, input: &Value) -> Result<PreparedOperation> {
@@ -2725,7 +2731,7 @@ impl CoinbaseProfile {
         let commit_body = gofin_domain::canonical_json(&json!({
             "from_account":from_currency,"to_account":to_currency
         }))?;
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "coinbase.convert".into(),
             input: input.clone(),
             binding: json!({"version":1,"provider":"coinbase","account":account.name,"resource":account.resource,"physicalIdentity":account.physical_identity,"portfolioId":account.portfolio_id,"requestId":input["requestId"],"tradeId":trade_id,"fromAccountId":from_id,"fromCurrency":from_currency,"toAccountId":to_id,"toCurrency":to_currency,"amount":principal,"output":output,"fee":fee,"quote":quote,"quoteRequestBodyExact":quote_body,"requestBodyExact":commit_body}),
@@ -2745,7 +2751,6 @@ impl CoinbaseProfile {
         // Retain quote fee as an explicit valuation debit if value bounds are
         // introduced by the caller; every amount remains exact decimal text.
         let _ = (amount, fee_amount);
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
     async fn advanced_portfolio_contains(
@@ -3235,7 +3240,7 @@ impl CoinbaseProfile {
             "source_portfolio_uuid":source_portfolio,
             "target_portfolio_uuid":target_portfolio
         }))?;
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "coinbase.move-portfolio-funds".into(),
             input: input.clone(),
             binding: json!({
@@ -3262,7 +3267,6 @@ impl CoinbaseProfile {
             },
             operation_version:1,action_deadline:None,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
     async fn advanced_cash_snapshot(
@@ -6016,13 +6020,12 @@ impl ExchangeProfile for CoinbaseProfile {
             )
             .await?;
         }
-        gofin_domain::value_bounds::carry(approved, &mut fresh)?;
         if approved.operation == "coinbase.create-order" {
             // A Coinbase preview is a time-bound observation, not the identity
             // of the order we will submit. `prepare` above has re-read the
             // product, regenerated the venue preview, validated its native
             // errors and exact principal/fee against the approved input, and
-            // `carry` has revalidated any Fin-owned USD ceilings. Keep that
+            // Native preview values remain checked. Keep that
             // fresh evidence in checks/valuation while retaining the complete
             // approved binding (including broker-owned plan metadata and the
             // original preview as historical evidence). The durable execution
@@ -6092,18 +6095,11 @@ impl ExchangeProfile for CoinbaseProfile {
     }
     fn valuation_matches(
         &self,
-        approved: &PreparedOperation,
-        refreshed: &PreparedOperation,
+        _approved: &PreparedOperation,
+        _refreshed: &PreparedOperation,
     ) -> bool {
-        if approved
-            .binding
-            .get(gofin_domain::value_bounds::KEY)
-            .is_some()
-        {
-            gofin_domain::value_bounds::validate(refreshed).is_ok()
-        } else {
-            approved.valuation == refreshed.valuation
-        }
+        // USD is optional reporting; native request, fees and identities are checked separately.
+        true
     }
     async fn plan_submission(
         &self,
@@ -6800,6 +6796,14 @@ impl ExchangeProfile for CoinbaseProfile {
             .unwrap_or_else(|_| json!({"raw":"invalid-json"}));
         Ok(json!({"status":response.status,"body":body}))
     }
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        submission: &gofin_domain::Submission,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation> {
+        self.observe_withdrawal_side(record, submission, side).await
+    }
     async fn reconcile_submission(
         &self,
         record: &OperationRecord,
@@ -6823,7 +6827,7 @@ impl ExchangeProfile for CoinbaseProfile {
             });
         }
         if record.operation == "coinbase.withdraw" {
-            return self.reconcile_withdrawal(record, submission).await;
+            return self.reconcile_withdrawal(record, submission, false).await;
         }
         if record.operation == "coinbase.set-cfm-margin-setting" && submission.kind == "coinbase" {
             let binding = &submission.data["binding"];

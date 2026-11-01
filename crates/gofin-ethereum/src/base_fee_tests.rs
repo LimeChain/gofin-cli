@@ -115,7 +115,7 @@ async fn base_native_and_erc20_transfers_settle_at_one_full_block_with_total_fee
         assert!(binding.transaction.rollup_fee.is_some());
         assert_eq!(
             prepared.intent.maximum_costs[0].amount.atoms,
-            quantity(binding.transaction.maximum_cost().unwrap())
+            quantity(exact("0.001", 18).unwrap())
         );
         assert!(binding.transaction.maximum_cost().unwrap() <= exact("0.001", 18).unwrap());
         let logs = if token == "native" {
@@ -211,7 +211,7 @@ async fn base_wrap_unwrap_and_allowance_reads_use_reviewed_contract_identity() {
 }
 
 #[tokio::test]
-async fn base_receipt_missing_fee_evidence_and_fee_rise_never_settle_or_dispatch() {
+async fn base_receipt_missing_fee_is_partial_and_fee_rise_never_dispatches() {
     let rpc = Arc::new(BaseRpc::new());
     let adapter = base_adapter(rpc.clone());
     let mut input = base_input();
@@ -222,7 +222,10 @@ async fn base_receipt_missing_fee_evidence_and_fee_rise_never_settle_or_dispatch
     rpc.inner.latest.store(21, Ordering::SeqCst);
     rpc.inner.set_receipt(&binding, 21, vec![]);
     *rpc.l1_actual.lock().unwrap() = None;
-    assert!(adapter.reconcile(&record(prepared)).await.is_err());
+    let result = adapter.reconcile(&record(prepared)).await.unwrap();
+    assert_eq!(result.status, Status::Completed);
+    assert!(result.verified.is_some());
+    assert_eq!(result.evidence["outcome_reporting"], "partial");
     rpc.l1_estimate.store(2000, Ordering::SeqCst);
     assert_eq!(
         adapter

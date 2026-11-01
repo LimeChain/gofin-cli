@@ -76,6 +76,12 @@ pub(super) fn try_reconcile(
         "sourceDebitObserved": "0",
         "payoutEffects": "none",
         "noEffects": true,
+        "outcome_dispatch": "rejected",
+        "definitive_nonexecution": true,
+        "submission_reference": submission.reference,
+        "source": "Binance exact withdrawal allowlist rejection corroborated by original identity",
+        "outcome_replay_safe": true,
+        "outcome_reporting": "complete",
         "reason": "Binance definitively rejected this exact withdrawal because its destination is not whitelisted; complete withdrawal history has no matching record and the source balance is unchanged."
     });
     let verified = make_verified(submission.clone(), vec![], evidence.clone())?;
@@ -157,6 +163,13 @@ mod tests {
         assert_eq!(result.evidence["matchingHistoryRows"], 0);
         assert_eq!(result.evidence["sourceDebitObserved"], "0");
         assert_eq!(result.evidence["payoutEffects"], "none");
+        assert_eq!(result.evidence["outcome_dispatch"], "rejected");
+        assert_eq!(result.evidence["definitive_nonexecution"], true);
+        assert_eq!(
+            result.evidence["submission_reference"],
+            submission.reference
+        );
+        assert_eq!(result.evidence["outcome_replay_safe"], true);
         let verified = result.verified.unwrap();
         assert_eq!(verified.submission, submission);
         assert!(verified.effects.is_empty());

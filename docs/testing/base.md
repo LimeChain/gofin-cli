@@ -24,7 +24,7 @@ compatibility reads have no signer.
 | Ethereum → Base | Canonical ETH / verified StandardBridge ERC-20 pair | Source deposit proof, derived type-`0x7e` locator, separate destination credit | Cover ABI vectors, source proof and destination credit separately. |
 | Base → Ethereum | Canonical initiation, proof, wait, finalize | Exact source withdrawal identity; broker-derived deferred calls; current portal/game checks | Cover lifecycle fixtures and portal readiness; deployed witness/finalization and delayed live roundtrips require separate verification. |
 | Base ↔ Binance | Applicable venue deposit / withdrawal | Discover exact live `coin` / `network=BASE`, representations, address/memo, limits and permissions; correlated account credit / destination receipt | Cover synthetic funding correlation and reorg handling; live account acceptance is separate. |
-| Ethereum ↔ Base | CCTP | No existing CCTP adapter to reuse on current `main`; not implemented | No CCTP coverage claim. |
+| Ethereum ↔ Base | CCTP V2 native USDC | Implemented with explicit burn, attestation and mint stages | Cover standard/fast modes and exact source/destination proofs; owned fixtures do not establish live Iris acceptance. |
 
 ## Fee and confirmation contract
 
@@ -55,14 +55,13 @@ Each quote supplies persisted step IDs. Base withdrawals contain `deposit`
 (initiation), `prove` and `finalize`; each is a separate immutable
 `bridge.transfer` operation. Prove/finalize placeholders are not executable
 calldata: the protected broker materializes them only after the original source
-receipt settles. Exact per-write approval or a named sequential plan is required.
-Base canonical operation-boundary grants are unavailable; use exact approvals or
-list every stage explicitly in one named plan.
+receipt settles. Use a standalone `bridge.execute` action with native bounds and
+an explicit admission deadline to approve its declared stages together.
 
 Source quote expiry does not discard a settled withdrawal. Future stages retain
 the original identity and approved cumulative fees, but require fresh stage
-evidence and unexpired authority. A named plan may need an explicitly approved
-new revision after the wait. Current portal proof maturity, respected dispute
+evidence and unexpired authority. After expiry, remaining stages need explicit
+reauthorization under revised bounds. Current portal proof maturity, respected dispute
 game, resolution, invalidation and simulation checks determine readiness; GoFin
 does not copy a fixed seven-day delay or automatically refresh consent.
 
@@ -70,8 +69,8 @@ does not copy a fixed seven-day delay or automatically refresh consent.
 evidence. It never reinitiates a withdrawal. `bridge.recovery` declares finite
 new deferred stage identities for an invalidated proof or verified reverted
 stage; it preserves all earlier operations, transit, costs and bounds. It cannot
-approve or broadcast. Execute returned stages only after fresh exact approval or
-an approved revision of the same named plan. Insufficient remaining cumulative
+approve or broadcast. Advance returned stages under valid original authority or
+explicit reauthorization of the same action. Insufficient remaining cumulative
 gas budget is an explicit error rather than a silently widened permission.
 
 ## Reproducible checks

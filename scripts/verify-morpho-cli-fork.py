@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Morpho V2 public CLI named-plan lifecycle on an independently owned fork.
+"""Morpho V2 public CLI standalone lifecycle on an independently owned fork.
 
 The immutable deployed vault/bundle/distributor contracts execute normally.
 Fixture funding, Merkl tree data and exact USD prices are synthetic, confined
@@ -186,7 +186,7 @@ class MorphoRehearsal(AMM.Rehearsal):
         self.install_reward_fixture()
         self.started = True
         self.make("dev-env-start", DEV_MODE="live", DEV_FLAGS="--json")
-        for operation in ["morpho.vaults", "morpho.vault", "morpho.positions", "morpho.deposit", "morpho.withdraw", "morpho.redeem", "morpho.rewards", "morpho.rewards.claim", "plans.authorize"]:
+        for operation in ["morpho.vaults", "morpho.vault", "morpho.positions", "morpho.deposit", "morpho.withdraw", "morpho.redeem", "morpho.rewards", "morpho.rewards.claim"]:
             self.cli("schema", operation)
 
     def state(self):
@@ -233,16 +233,10 @@ class MorphoRehearsal(AMM.Rehearsal):
         rewards = self.read("morpho.rewards", {**self.base, "tokens": [self.token]})
         assert rewards["rewards"][0]["claimable"] == "1000000"
         plan = self.plan(vault["state"])
-        review = self.cli("plans", "preview", "--input", json.dumps(plan), "--valid-for", "30m")
-        grant = self.cli("plans", "authorize", "--input", json.dumps(plan), "--id", self.name + "-grant", "--review-hash", review["review_hash"], "--valid-for", "30m")
-        pid = grant["plan_id"]
         start_submissions = self.submissions()
-        if not positive_only:
-            self.cli("execute", plan["steps"][1]["operation"], "--input", json.dumps(plan["steps"][1]["input"]), "--id", self.name + "-out-of-order", "--plan", pid, "--step", "deposit", "--dry-run", error=True)
-            assert self.submissions() == start_submissions
         records = []
         for step in plan["steps"]:
-            record = self.settled(step["operation"], step["input"], pid, step["step_id"])
+            record = self.settled(step["operation"], step["input"])
             records.append(record)
             if step["step_id"] == "deposit":
                 held = self.read("morpho.positions", {**self.base, "vault": self.vault})["positions"][0]
@@ -265,10 +259,8 @@ class MorphoRehearsal(AMM.Rehearsal):
         assert debits == 1_000_000 and credits >= 1_400_000
         assert final_cash[self.token] == initial_cash[self.token] - debits + credits
         assert final_cash["native"] == initial_cash["native"] - fees
-        status = self.cli("plans", "status", pid)
-        assert all(step["state"] == "completed" for step in status["steps"]) and not status["usage"]["reservations"]
         assert self.submissions() == start_submissions + 7
-        self.save("result", {"chain_id": self.chain, "status": "passed", "approval": "automatic isolated development approval", "authorization_mode": "single named plan", "production_writes": 0, "financial_submissions": 7, "position_closed": True, "allowances_zero": True, "cash_conservation_exact": True, "native_fees_atoms": str(fees), "duplicate_submissions_preserved": True, "restart_with_position": True, "merkl_evidence": "positive synthetic entitlement against deployed immutable distributor implementation on owned fork", "baseline": self.initial, "final": final, "plan_status": status, "native_approval": "not run", "valuation_evidence": "synthetic fixed USD prices guarded by exact owned fork identity; not live pricing", "base_fee_evidence": "local modeled receipt components, not authentic rollup fee evidence" if self.chain == 8453 else "canonical fork receipt"})
+        self.save("result", {"chain_id": self.chain, "status": "passed", "approval": "automatic isolated development approval for each action", "authorization_mode": "standalone native actions", "production_writes": 0, "financial_submissions": 7, "position_closed": True, "allowances_zero": True, "cash_conservation_exact": True, "native_fees_atoms": str(fees), "duplicate_submissions_preserved": True, "restart_with_position": True, "merkl_evidence": "positive synthetic entitlement against deployed immutable distributor implementation on owned fork", "baseline": self.initial, "final": final, "native_approval": "not run", "valuation_evidence": "synthetic fixed USD prices guarded by exact owned fork identity; not live pricing", "base_fee_evidence": "local modeled receipt components, not authentic rollup fee evidence" if self.chain == 8453 else "canonical fork receipt"})
 
 
 def main():
@@ -276,7 +268,7 @@ def main():
     parser.add_argument("--chain", required=True, type=int, choices=(1, 8453))
     parser.add_argument("--pin", type=Path, help="Reuse an earlier exact public block/hash")
     parser.add_argument("--rpc-url", help="Archive RPC override; chain identity and pinned block/hash checks remain required")
-    parser.add_argument("--positive-only", action="store_true", help="Run the successful lifecycle without the out-of-order rejection case")
+    parser.add_argument("--positive-only", action="store_true", help="Run the standalone successful lifecycle (legacy option retained for compatibility)")
     args = parser.parse_args()
     AMM.CHAIN, AMM.TOKEN = args.chain, AMM.FORK.TOKENS[args.chain]
     AMM.BASE = {"wallet": "dev-wallet", "network": "ethereum", "chain_id": args.chain}

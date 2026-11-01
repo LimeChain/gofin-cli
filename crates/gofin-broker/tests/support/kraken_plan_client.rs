@@ -35,14 +35,29 @@ impl Client {
                     let input: Value = serde_json::from_str(&line).unwrap();
                     let request: BrokerRequest =
                         serde_json::from_value(input["request"].clone()).unwrap();
-                    // Match production's boxed request boundary on broker-sized
-                    // workers; this transport does not negotiate cancellable reads.
-                    let response = gofin_protocol::progress::observe(
-                        reader.get_mut(),
-                        input["progress"].as_bool().unwrap_or(false),
-                        runtime.handle_client_request(request, false),
-                    )
-                    .await;
+                    let financial = input["cancel_on_disconnect"].as_bool().unwrap_or(false)
+                        && matches!(
+                            request,
+                            BrokerRequest::Execute { .. }
+                                | BrokerRequest::ContinueOperation { .. }
+                                | BrokerRequest::ReauthorizeOperation { .. }
+                        );
+                    let response = if financial {
+                        gofin_protocol::progress::observe_financial_request(
+                            reader.get_mut(),
+                            input["progress"].as_bool().unwrap_or(false),
+                            false,
+                            Box::pin(runtime.handle_client_request(request, false)),
+                        )
+                        .await
+                    } else {
+                        gofin_protocol::progress::observe(
+                            reader.get_mut(),
+                            input["progress"].as_bool().unwrap_or(false),
+                            Box::pin(runtime.handle_client_request(request, false)),
+                        )
+                        .await
+                    };
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
                     reader
                         .get_mut()
@@ -87,7 +102,12 @@ impl Client {
             assert_eq!(output.status.success(), ok, "{value}");
             value
         } else {
-            let result = self.runtime.handle(request).await;
+            let invocation = gofin_domain::execution_progress::Invocation::new(
+                std::time::Duration::from_secs(300),
+            );
+            let result = invocation
+                .scope(Box::pin(self.runtime.handle(request)))
+                .await;
             assert_eq!(result.ok, ok, "{:?}", result.error);
             if ok {
                 result.result.unwrap()

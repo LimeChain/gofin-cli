@@ -76,42 +76,31 @@ async fn native_batch_fee_overrun_keeps_both_receipts_and_one_global_cap_across_
     let result = running.execute(request.clone()).await.unwrap();
     assert_eq!(result.status, Status::Unknown, "{result:#?}");
     assert!(result.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("200000".into())
-    );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
-    let proof = store
-        .unresolved_consumption_proof(&result.id)
-        .unwrap()
-        .unwrap();
+    let proof = gofin_domain::unresolved_consumption::read(
+        result.last_reconciliation_evidence.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(proof.evidence["proofEvents"].as_array().unwrap().len(), 2);
     assert!(proof.costs.iter().any(|effect|matches!(effect, FinancialEffect::Cost {amount, category,..} if category=="krakenfutures_commission" && amount.atoms.to_decimal(36)=="1.2")));
     assert_eq!(
         result.preview.as_ref().unwrap().input["maximumFees"]["USD"],
         "1"
     );
-    drop(store);
     drop(running);
     let running = engine(&path, venue.clone());
     let recovered = running.status(&result.id, true).await.unwrap();
     assert_eq!(recovered.status, Status::Unknown);
     assert!(recovered.effects.is_none());
     assert_eq!(running.execute(request).await.unwrap().id, result.id);
-    let store = gofin_store::Store::open(&path).unwrap();
     assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("200000".into())
-    );
-    assert_eq!(
-        store
-            .unresolved_consumption_proof(&result.id)
-            .unwrap()
-            .unwrap()
-            .evidence,
+        gofin_domain::unresolved_consumption::read(
+            recovered.last_reconciliation_evidence.as_ref().unwrap()
+        )
+        .unwrap()
+        .unwrap()
+        .evidence,
         proof.evidence
     );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
     assert_eq!(*venue.0.dispatches.lock().unwrap(), 1);
 }

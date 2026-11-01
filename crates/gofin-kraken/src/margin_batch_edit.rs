@@ -488,7 +488,7 @@ impl KrakenProfile {
             "Revise original Kraken margin batch member {}; retain all unselected orders, full loans and original fill ownership.",
             selected + 1
         );
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
 }

@@ -761,9 +761,6 @@ impl KrakenProfile {
         );
         prepared.checks.push(gofin_domain::Check{name:"issued child relationship and generated-credit pool".into(),status:gofin_domain::CheckStatus::Passed,detail:format!("Exact child {target} is linked to entry {parent_id}; proved generated credit is {} {}. Original external principal remains unchanged.",root.received.atoms.to_decimal(36),root.received.asset.reference)});
         prepared.warnings.push("The original entry and conditional template remain unchanged. This exact child remains within the original generated-credit ceiling and the independently proved entry credit; every native fill and fee remains owned by the original operation.".into());
-        if !prepared.valuation.as_ref().unwrap().prices.is_empty() {
-            gofin_domain::value_bounds::bind(&mut prepared);
-        }
         Ok(prepared)
     }
 }

@@ -130,7 +130,7 @@ fn commit_mutations_tx(
         {
             return Err(StoreError::SubmissionConflict);
         }
-        grouped_amendments::commit_group_tx(tx, id, expected, record, proof, effects, group)?;
+        grouped_amendments::commit_group_tx(tx, id, expected, record, proof, effects, group, true)?;
     }
     if record["preview"]["intent"]["expected"]
         .as_array()
@@ -153,7 +153,7 @@ fn commit_mutations_tx(
                 });
         if has_wrapper {
             compound_amendments::commit_children_tx(
-                tx, id, expected, record, proof, effects, children,
+                tx, id, expected, record, proof, effects, children, true,
             )?;
         } else {
             let prior:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM compound_amendment_children WHERE amendment_operation_id=?1 AND proof_json IS NOT NULL)",[id],|row|row.get(0))?;
@@ -171,6 +171,175 @@ fn commit_mutations_tx(
     Ok(())
 }
 impl Store {
+    /// Record all native batch outcomes atomically without reservation or USD accounting.
+    pub fn record_mutation_batch_revisions(
+        &mut self,
+        settlement: &Settlement,
+        expected: &Value,
+        groups: &[GroupedSettlement],
+        children: &[CompoundChildSettlement],
+        at: &str,
+    ) -> Result<()> {
+        if settlement.run_id.is_some()
+            || settlement.run_record.is_some()
+            || settlement.terminal_record["status"] != "completed"
+            || settlement.terminal_record["id"] != settlement.operation_id
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let proof: gofin_domain::VerifiedEffects =
+            serde_json::from_value(settlement.proof.clone())?;
+        if gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+            != Some(proof.proof_digest.as_str())
+            || settlement.terminal_record["effects"] != settlement.proof
+            || serde_json::to_value(&proof.effects)? != settlement.effects
+            || serde_json::to_value(&proof.submission)? != expected["submission"]
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = amendments::get_operation_record_tx(&tx, &settlement.operation_id)?;
+        if current != *expected {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let mut before = current.clone();
+        let mut after = settlement.terminal_record.clone();
+        for key in [
+            "status",
+            "effects",
+            "last_reconciliation_evidence",
+            "updated_at",
+            "error",
+        ] {
+            before
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+            after
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+        }
+        if before != after {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let declared_groups = grouped_amendments::groups(&current)?;
+        if declared_groups.len() != groups.len()
+            || declared_groups.iter().any(|g| {
+                groups
+                    .iter()
+                    .filter(|x| x.original_id == g.operation_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let has_compound = current["preview"]["intent"]["expected"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["kind"] == "compound_submission_mutations")
+            });
+        let declared_children = if has_compound {
+            compound_amendments::links(&current)?
+        } else {
+            Vec::new()
+        };
+        if declared_children.len() != children.len()
+            || declared_children.iter().any(|c| {
+                children
+                    .iter()
+                    .filter(|x| x.child_tag == c.child_tag && x.original_id == c.operation_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let mut owners = BTreeSet::new();
+        let mut originals = Vec::new();
+        for group in &declared_groups {
+            if !owners.insert(group.operation_id.clone()) {
+                return Err(StoreError::SubmissionConflict);
+            }
+            let original = amendments::get_operation_record_tx(&tx, &group.operation_id)?;
+            let supplied = groups
+                .iter()
+                .find(|x| x.original_id == group.operation_id)
+                .ok_or(StoreError::SubmissionConflict)?;
+            if original != supplied.expected_original
+                || original["submission"] != serde_json::to_value(&group.submission)?
+                || group.original_scope.intent.locks
+                    != serde_json::from_value::<Vec<gofin_domain::ResourceId>>(
+                        original["preview"]["intent"]["locks"].clone(),
+                    )?
+            {
+                return Err(StoreError::SubmissionConflict);
+            }
+            originals.push(original);
+        }
+        for child in &declared_children {
+            if !owners.insert(child.operation_id.clone()) {
+                return Err(StoreError::SubmissionConflict);
+            }
+            originals.push(amendments::get_operation_record_tx(
+                &tx,
+                &child.operation_id,
+            )?);
+        }
+        if !declared_children.is_empty() {
+            compound_amendments::validate_linked_record(&current, &originals)?;
+            compound_amendments::persist_links_tx(
+                &tx,
+                &settlement.operation_id,
+                &declared_children,
+            )?;
+        }
+        if !declared_groups.is_empty() {
+            grouped_amendments::persist_link_tx(&tx, &settlement.operation_id, &current)?;
+        }
+        for group in groups {
+            grouped_amendments::commit_group_tx(
+                &tx,
+                &settlement.operation_id,
+                expected,
+                &settlement.terminal_record,
+                &settlement.proof,
+                &settlement.effects,
+                group,
+                false,
+            )?;
+        }
+        if !declared_children.is_empty() {
+            compound_amendments::commit_children_tx(
+                &tx,
+                &settlement.operation_id,
+                expected,
+                &settlement.terminal_record,
+                &settlement.proof,
+                &settlement.effects,
+                children,
+                false,
+            )?;
+        }
+        let incomplete:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM grouped_amendment_children WHERE amendment_operation_id=?1 AND proof_json IS NULL UNION ALL SELECT 1 FROM compound_amendment_children WHERE amendment_operation_id=?1 AND outcome='pending')",[&settlement.operation_id],|r|r.get(0))?;
+        if incomplete {
+            return Err(StoreError::SubmissionConflict);
+        }
+        tx.execute(
+            "UPDATE operations SET status='completed',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![
+                settlement.operation_id,
+                settlement.terminal_record.to_string(),
+                at
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn persist_mutation_batch_reservation(
         &mut self,
         id: &str,

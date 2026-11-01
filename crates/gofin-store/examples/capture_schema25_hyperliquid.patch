@@ -1,0 +1,85 @@
+diff --git a/crates/gofin-hyperliquid/tests/orders.rs b/crates/gofin-hyperliquid/tests/orders.rs
+index 8a57d3f..fb1b859 100644
+--- a/crates/gofin-hyperliquid/tests/orders.rs
++++ b/crates/gofin-hyperliquid/tests/orders.rs
+@@ -58,7 +58,7 @@ impl HyperliquidTransport for Venue {
+     async fn info(&self, request: HyperliquidInfoRequest) -> Result<Value, GoFinError> {
+         Ok(match request {
+             HyperliquidInfoRequest::MetaAndAssetCtxs => json!([
+-                {"universe":[{"name":"BTC","szDecimals":3,"maxLeverage":50,"isDelisted":self.delisted}]},
++                {"universe":[{"name":"SOL","szDecimals":3,"maxLeverage":50,"isDelisted":self.delisted}]},
+                 [{"markPx":"10","midPx":"10","oraclePx":"10"}]
+             ]),
+             HyperliquidInfoRequest::SpotMetaAndAssetCtxs => json!([
+@@ -163,7 +163,7 @@ impl HyperliquidTransport for Venue {
+ 
+ fn order_status(order: &HyperliquidOrder, oid: u64, status: &str, remaining: &str) -> Value {
+     json!({"status":"order","order":{"status":status,"order":{
+-        "coin":if order.asset == 0 {"BTC"} else {"@0"},
++        "coin":if order.asset == 0 {"SOL"} else {"@0"},
+         "side":if order.is_buy {"B"} else {"A"},
+         "cloid":order.client_order_id,
+         "origSz":order.size,
+@@ -1927,11 +1927,6 @@ async fn unsupported_price_bands_fail_before_approval_for_single_and_batch_order
+ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_limits() {
+     for (side, fill_price, fee, notional, completes) in [
+         ("sell", "95.75", "0.01", "95", true),
+-        ("buy", "85", "0.01", "95", true),
+-        ("sell", "89", "0.01", "95", false),
+-        ("buy", "92", "0.01", "95", false),
+-        ("sell", "110", "0.01", "95", false),
+-        ("sell", "95.75", "1.01", "95", false),
+     ] {
+         let dir = tempfile::tempdir().unwrap();
+         let path = dir.path().join("close.sqlite");
+@@ -1950,7 +1945,7 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
+         .await;
+         // Establish the owned verified anchor by settling the opening order;
+         // a bare native position snapshot is not a GoFin settlement baseline.
+-        let mut opening = request("opening", "perpetual", "BTC/USDC:USDC", "0.95", "90.95");
++        let mut opening = request("opening", "perpetual", "SOL/USDC:USDC", "0.95", "90.95");
+         opening.input["side"] = json!(if side == "sell" { "buy" } else { "sell" });
+         opening.input["max_notional_usdc"] = json!(notional);
+         let opened = first.execute(opening).await.unwrap();
+@@ -1958,7 +1953,7 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
+         venue.fills.lock().unwrap().push(fill(
+             100,
+             1,
+-            "BTC",
++            "SOL",
+             if side == "sell" { "B" } else { "A" },
+             "0.95",
+             "90.95",
+@@ -1970,12 +1965,12 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
+         let opened = first.status(&opened.id, true).await.unwrap();
+         assert_eq!(opened.status, Status::Completed, "{:?}", opened.error);
+         *venue.positions.lock().unwrap() = Some(vec![json!({"position":{
+-            "coin":"BTC","szi":if side == "sell" {"0.95"} else {"-0.95"}
++            "coin":"SOL","szi":if side == "sell" {"0.95"} else {"-0.95"}
+         }})]);
+         let mut request = request(
+             "directional-close",
+             "perpetual",
+-            "BTC/USDC:USDC",
++            "SOL/USDC:USDC",
+             "0.95",
+             "90.95",
+         );
+@@ -1993,7 +1988,7 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
+         venue.fills.lock().unwrap().push(fill_economics(
+             oid,
+             1,
+-            "BTC",
++            "SOL",
+             if side == "buy" { "B" } else { "A" },
+             "0.95",
+             fill_price,
+@@ -2029,6 +2024,8 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
+             2,
+             "one opening plus one close; reconciliation must not replay either"
+         );
++        drop(resumed);
++        std::fs::copy(&path, std::env::var("GOFIN_SCHEMA25_HL_CAPTURE").unwrap()).unwrap();
+     }
+ }
+ 

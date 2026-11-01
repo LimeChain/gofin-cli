@@ -198,7 +198,11 @@ impl Chain {
         let id = record["id"].as_str().unwrap();
         assert_eq!(store.submission(id).unwrap().unwrap().reference, original);
         assert_eq!(record["submission"]["reference"], original);
-        assert!(store.reservation_count(id).unwrap() > 0);
+        assert_eq!(store.reservation_count(id).unwrap(), 0);
+        assert!(
+            store.stage_attempt_by_operation(id).unwrap().is_some(),
+            "durable admission precedes dispatch"
+        );
         *self.hash.lock().unwrap() = Some(original);
         let value = u256(&transaction.value).unwrap();
         *self.sender_balance.lock().unwrap() -= value + U256::from(42_000_000_000_000u64);
@@ -612,12 +616,12 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
         false
     );
     let allocated = client.runtime.engine.allocation_used_usd_micros().unwrap();
-    assert_ne!(allocated, "0");
     let saved = Store::open(&path).unwrap();
     assert_eq!(saved.get_record(&id).unwrap().unwrap()["status"], "pending");
     let submission = saved.submission(&id).unwrap().unwrap();
     let reservations = saved.reservations(&id).unwrap();
-    assert!(!reservations.is_empty());
+    assert!(reservations.is_empty());
+    assert_eq!(initial_pending["outcome"]["replay_safe"], false);
     drop(saved);
     let old_runtime = Arc::downgrade(&client.runtime);
     let primary_reads = primary.requests.lock().unwrap().len();
@@ -705,6 +709,12 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     assert_eq!(counters.approvals.load(Ordering::SeqCst), 1);
     assert_eq!(counters.signatures.load(Ordering::SeqCst), 1);
     assert_eq!(counters.broadcasts.load(Ordering::SeqCst), 1);
+    primary.drain().await;
+    backup.drain().await;
+    let before_receipt = (
+        primary.requests.lock().unwrap().len(),
+        backup.requests.lock().unwrap().len(),
+    );
     chain.receipt_ready.store(true, Ordering::SeqCst);
     let completed = restarted
         .call(BrokerRequest::Status { id: id.clone() })
@@ -816,14 +826,19 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     );
     assert_eq!(Store::open(&path).unwrap().list_records().unwrap().len(), 1);
     restarted.stop().await;
-    for (endpoint, expected) in [(&primary, 1), (&backup, 0)] {
+    for (endpoint, expected, before) in [
+        (&primary, 1, before_receipt.0),
+        (&backup, 0, before_receipt.1),
+    ] {
         if chain_id == 4663 {
             assert!(
-                endpoint.requests.lock().unwrap().iter().all(|request| {
-                    request["method"] != "eth_getBlockByNumber"
-                        || request["params"][0] != "finalized"
-                }),
-                "Robinhood recovery retains sequencer-inclusion settlement"
+                endpoint.requests.lock().unwrap()[before..]
+                    .iter()
+                    .all(|request| {
+                        request["method"] != "eth_getBlockByNumber"
+                            || request["params"][0] != "finalized"
+                    }),
+                "Once the original receipt exists, Robinhood settlement needs no finalized head; earlier missing-receipt replacement probes remain independent."
             );
         }
         assert_eq!(

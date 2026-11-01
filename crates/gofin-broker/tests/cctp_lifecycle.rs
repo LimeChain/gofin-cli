@@ -6,10 +6,6 @@
 use async_trait::async_trait;
 use gofin_bridge::{BridgeBounds, FeeCap, FeeKind, cctp::*};
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
-use gofin_domain::financial_plans::{
-    FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-    FinancialPlanStepSpec, FinancialStepCompletion,
-};
 use gofin_domain::{
     Adapter, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer, BridgeStepLink,
     GoFinError, OperationRequest, Quantity, ResourceId, Result, Status, now,
@@ -143,6 +139,8 @@ fn source_message(call: &depositForBurnCall, sender: Address, chain: u64) -> Vec
 }
 #[derive(Default)]
 struct ChainState {
+    owned_forks: Option<BTreeMap<u64, Arc<owned_fork::Fork>>>,
+    alternate_fork_signer: bool,
     source_chain: u64,
     destination_chain: u64,
     refresh_fault: Option<Arc<stack_refresh::RefreshFault>>,
@@ -165,7 +163,13 @@ struct ChainState {
     reject_mint_revalidation: bool,
     mint_simulations: usize,
     source_gas_balance: Option<U256>,
+    reject_preparation_reads: bool,
+    stall_source_response: bool,
+    release_source_response: Arc<AtomicBool>,
+    source_fee_after_approval: bool,
+    source_large_fee_after_approval: bool,
     lose_response: Option<u64>,
+    lose_source_ordinal: Option<usize>,
     revert_next: Option<u64>,
     mutate_attestation: bool,
     attestation_expiration: Option<u64>,
@@ -278,6 +282,54 @@ impl Drop for Iris {
         }
     }
 }
+struct OwnedForkRpc {
+    fork: Arc<owned_fork::Fork>,
+    state: Arc<Mutex<ChainState>>,
+}
+#[async_trait]
+impl EvmRpc for OwnedForkRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.fork.guard().await?;
+        if method == "eth_maxPriorityFeePerGas" {
+            let state = self.state.lock().unwrap();
+            if self.fork.chain() == state.source_chain()
+                && state.source_large_fee_after_approval
+                && state
+                    .broadcasts
+                    .get(&self.fork.chain())
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            {
+                return Ok(json!("0x2e90edd000"));
+            }
+            if self.fork.chain() == state.source_chain()
+                && state.source_fee_after_approval
+                && state
+                    .broadcasts
+                    .get(&self.fork.chain())
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            {
+                return Ok(json!("0x77359400"));
+            }
+            return Ok(json!("0x3b9aca00"));
+        }
+        let result = self.fork.raw(method, params).await?;
+        if method == "eth_sendRawTransaction" {
+            *self
+                .state
+                .lock()
+                .unwrap()
+                .broadcasts
+                .entry(self.fork.chain())
+                .or_default() += 1;
+        }
+        Ok(result)
+    }
+}
+
 struct Rpc {
     chain: u64,
     state: Arc<Mutex<ChainState>>,
@@ -395,230 +447,279 @@ impl Rpc {
 #[async_trait]
 impl EvmRpc for Rpc {
     async fn request(&self, method: &str, p: Value) -> Result<Value> {
-        let mut s = self.state.lock().unwrap();
-        if method == "eth_call"
-            && p[0]["data"]
-                .as_str()
-                .is_some_and(|data| data.starts_with(&hex_bytes(&receiveMessageCall::SELECTOR)))
-        {
-            s.mint_simulations += 1;
-            if s.reject_mint_revalidation && s.mint_simulations > 1 {
-                return Err(fail("RPC_REQUEST_FAILED"));
+        let mut response_gate = None;
+        let result = {
+            let mut s = self.state.lock().unwrap();
+            if s.reject_preparation_reads && method == "eth_getBalance" {
+                return Err(fail("RPC_UNAVAILABLE"));
             }
-        }
-        Ok(match method {
-            "eth_chainId" => json!(format!("{:#x}", self.chain)),
-            "eth_getCode" => json!("0x6000"),
-            "eth_getBalance" => json!(if self.chain == s.destination_chain() && s.gas_missing {
-                "0x0".to_owned()
-            } else if self.chain != s.destination_chain() && s.source_gas_balance.is_some() {
-                format!("{:#x}", s.source_gas_balance.unwrap())
-            } else {
-                "0x56bc75e2d63100000".to_owned()
-            }),
-            "eth_blockNumber" => json!(format!(
-                "{:#x}",
-                if self.chain != s.destination_chain() {
-                    s.source_head.unwrap_or(110)
-                } else {
-                    110
+            if method == "eth_call"
+                && p[0]["data"]
+                    .as_str()
+                    .is_some_and(|data| data.starts_with(&hex_bytes(&receiveMessageCall::SELECTOR)))
+            {
+                s.mint_simulations += 1;
+                if s.reject_mint_revalidation && s.mint_simulations > 1 {
+                    return Err(fail("RPC_REQUEST_FAILED"));
                 }
-            )),
-            "eth_getBlockByHash" => block(self.chain, 100),
-            "eth_getBlockByNumber" => block(
-                self.chain,
-                if p[0] == "latest" || p[0] == "finalized" {
-                    110
+            }
+            match method {
+                "eth_chainId" => json!(format!("{:#x}", self.chain)),
+                "eth_getCode" => json!(if p[0].as_str().is_some_and(|address| address
+                    .eq_ignore_ascii_case("0x1111111111111111111111111111111111111111"))
+                {
+                    "0x"
                 } else {
-                    rpc_u64(&p[0])?
-                },
-            ),
-            "eth_getTransactionCount" => json!(format!(
-                "{:#x}",
-                s.broadcasts.get(&self.chain).copied().unwrap_or(0)
-            )),
-            "eth_maxPriorityFeePerGas" => json!("0x3b9aca00"),
-            "eth_estimateGas" => json!("0x186a0"),
-            "eth_call" => self.call(&p, &s)?,
-            "eth_getLogs" => {
-                if self.chain == s.destination_chain() {
-                    s.destination_log_scans += 1;
-                    if s.reject_destination_log_scan {
-                        return Err(fail("RPC_UNAVAILABLE"));
+                    "0x6000"
+                }),
+                "eth_getBalance" => {
+                    json!(if self.chain == s.destination_chain() && s.gas_missing {
+                        "0x0".to_owned()
+                    } else if self.chain != s.destination_chain() && s.source_gas_balance.is_some()
+                    {
+                        format!("{:#x}", s.source_gas_balance.unwrap())
+                    } else {
+                        "0x56bc75e2d63100000".to_owned()
+                    })
+                }
+                "eth_blockNumber" => json!(format!(
+                    "{:#x}",
+                    if self.chain != s.destination_chain() {
+                        s.source_head.unwrap_or(110)
+                    } else {
+                        110
+                    }
+                )),
+                "eth_getBlockByHash" => block(self.chain, 100),
+                "eth_getBlockByNumber" => block(
+                    self.chain,
+                    if p[0] == "latest" || p[0] == "finalized" {
+                        110
+                    } else {
+                        rpc_u64(&p[0])?
+                    },
+                ),
+                "eth_getTransactionCount" => json!(format!(
+                    "{:#x}",
+                    s.broadcasts.get(&self.chain).copied().unwrap_or(0)
+                )),
+                "eth_maxPriorityFeePerGas" => json!(if self.chain == s.source_chain()
+                    && s.source_large_fee_after_approval
+                    && s.allowance > U256::ZERO
+                {
+                    "0x4a817c800"
+                } else if self.chain == s.source_chain()
+                    && s.source_fee_after_approval
+                    && s.allowance > U256::ZERO
+                {
+                    "0x77359400"
+                } else {
+                    "0x3b9aca00"
+                }),
+                "eth_estimateGas" => json!("0x186a0"),
+                "eth_call" if p[0]["data"].as_str().is_none_or(|data| data == "0x") => json!("0x"),
+                "eth_call" => self.call(&p, &s)?,
+                "eth_getLogs" => {
+                    if self.chain == s.destination_chain() {
+                        s.destination_log_scans += 1;
+                        if s.reject_destination_log_scan {
+                            return Err(fail("RPC_UNAVAILABLE"));
+                        }
+                    }
+                    json!(
+                        s.transactions
+                            .iter()
+                            .filter(|((chain, _), _)| *chain == self.chain)
+                            .flat_map(|(_, (_, r))| r["logs"].as_array().unwrap().clone())
+                            .collect::<Vec<_>>()
+                    )
+                }
+                "eth_getTransactionReceipt" | "eth_getTransactionByHash" => {
+                    if self.chain == s.destination_chain() && s.hide_destination_receipt {
+                        Value::Null
+                    } else {
+                        s.transactions
+                            .get(&(self.chain, p[0].as_str().unwrap_or_default().into()))
+                            .map(|(tx, r)| {
+                                if method == "eth_getTransactionReceipt" {
+                                    r.clone()
+                                } else {
+                                    tx.clone()
+                                }
+                            })
+                            .unwrap_or(Value::Null)
                     }
                 }
-                json!(
-                    s.transactions
-                        .iter()
-                        .filter(|((chain, _), _)| *chain == self.chain)
-                        .flat_map(|(_, (_, r))| r["logs"].as_array().unwrap().clone())
-                        .collect::<Vec<_>>()
-                )
-            }
-            "eth_getTransactionReceipt" | "eth_getTransactionByHash" => {
-                if self.chain == s.destination_chain() && s.hide_destination_receipt {
-                    Value::Null
-                } else {
-                    s.transactions
-                        .get(&(self.chain, p[0].as_str().unwrap_or_default().into()))
-                        .map(|(tx, r)| {
-                            if method == "eth_getTransactionReceipt" {
-                                r.clone()
-                            } else {
-                                tx.clone()
+                "eth_sendRawTransaction" => {
+                    let raw = gofin_evm::rpc_bytes(&p[0])?.as_ref().to_vec();
+                    let envelope = TxEnvelope::decode_2718(&mut raw.as_slice())
+                        .map_err(|_| fail("BAD_SIGNED_TRANSACTION"))?;
+                    let sender = envelope.recover_signer().map_err(|_| fail("BAD_SENDER"))?;
+                    let tx_hash = format!("{:#x}", envelope.tx_hash());
+                    if s.transactions.contains_key(&(self.chain, tx_hash.clone())) {
+                        return Ok(json!(tx_hash));
+                    }
+                    let reverted = s.revert_next == Some(self.chain);
+                    if reverted {
+                        s.revert_next = None;
+                    }
+                    let selector = envelope.input().get(..4).unwrap_or_default();
+                    let mut logs = vec![];
+                    if !reverted {
+                        if selector == approveCall::SELECTOR {
+                            let call = approveCall::abi_decode(envelope.input()).unwrap();
+                            s.allowance = call.amount;
+                            logs.push(event(
+                                self.chain,
+                                &usdc_asset(self.chain)?.token.unwrap(),
+                                0,
+                                Approval {
+                                    owner: sender,
+                                    spender: call.spender,
+                                    value: call.amount,
+                                },
+                            ));
+                        } else if selector == depositForBurnCall::SELECTOR {
+                            let call = depositForBurnCall::abi_decode(envelope.input()).unwrap();
+                            if s.allowance < call.amount || s.source_balance < call.amount {
+                                return Err(fail("INSUFFICIENT_BURN_BALANCE"));
                             }
-                        })
-                        .unwrap_or(Value::Null)
-                }
-            }
-            "eth_sendRawTransaction" => {
-                let raw = gofin_evm::rpc_bytes(&p[0])?.as_ref().to_vec();
-                let envelope = TxEnvelope::decode_2718(&mut raw.as_slice())
-                    .map_err(|_| fail("BAD_SIGNED_TRANSACTION"))?;
-                let sender = envelope.recover_signer().map_err(|_| fail("BAD_SENDER"))?;
-                let tx_hash = format!("{:#x}", envelope.tx_hash());
-                if s.transactions.contains_key(&(self.chain, tx_hash.clone())) {
-                    return Ok(json!(tx_hash));
-                }
-                let reverted = s.revert_next == Some(self.chain);
-                if reverted {
-                    s.revert_next = None;
-                }
-                let selector = envelope.input().get(..4).unwrap_or_default();
-                let mut logs = vec![];
-                if !reverted {
-                    if selector == approveCall::SELECTOR {
-                        let call = approveCall::abi_decode(envelope.input()).unwrap();
-                        s.allowance = call.amount;
-                        logs.push(event(
-                            self.chain,
-                            &usdc_asset(self.chain)?.token.unwrap(),
-                            0,
-                            Approval {
-                                owner: sender,
-                                spender: call.spender,
-                                value: call.amount,
-                            },
-                        ));
-                    } else if selector == depositForBurnCall::SELECTOR {
-                        let call = depositForBurnCall::abi_decode(envelope.input()).unwrap();
-                        if s.allowance < call.amount || s.source_balance < call.amount {
-                            return Err(fail("INSUFFICIENT_BURN_BALANCE"));
-                        }
-                        s.source_balance -= call.amount;
-                        s.allowance -= call.amount;
-                        let raw = source_message(&call, sender, self.chain);
-                        s.source_message = Some(raw.clone());
-                        s.source_tx = Some(tx_hash.clone());
-                        logs.push(event(
-                            self.chain,
-                            MESSAGE_TRANSMITTER,
-                            0,
-                            MessageSent {
-                                message: Bytes::from(raw),
-                            },
-                        ));
-                        logs.push(event(
-                            self.chain,
-                            TOKEN_MESSENGER,
-                            1,
-                            DepositForBurn {
-                                burnToken: call.burnToken,
-                                amount: call.amount,
-                                depositor: sender,
-                                mintRecipient: call.mintRecipient,
-                                destinationDomain: call.destinationDomain,
-                                destinationTokenMessenger: remote_messenger(call.destinationDomain),
-                                destinationCaller: call.destinationCaller,
-                                maxFee: call.maxFee,
-                                minFinalityThreshold: call.minFinalityThreshold,
-                                hookData: Bytes::new(),
-                            },
-                        ));
-                    } else if selector == receiveMessageCall::SELECTOR {
-                        let call = receiveMessageCall::abi_decode(envelope.input()).unwrap();
-                        let message = decode_message(&hex_bytes(&call.message))?;
-                        if s.used_nonces.contains(&message.nonce) {
-                            return Err(fail("ALREADY_MINTED"));
-                        }
-                        let net = u256(&message.amount)? - u256(&message.fee_executed)?;
-                        s.used_nonces.insert(message.nonce.clone());
-                        if !s.omit_credit {
-                            s.destination_balance += net;
+                            s.source_balance -= call.amount;
+                            s.allowance -= call.amount;
+                            let raw = source_message(&call, sender, self.chain);
+                            s.source_message = Some(raw.clone());
+                            s.source_tx = Some(tx_hash.clone());
+                            logs.push(event(
+                                self.chain,
+                                MESSAGE_TRANSMITTER,
+                                0,
+                                MessageSent {
+                                    message: Bytes::from(raw),
+                                },
+                            ));
+                            logs.push(event(
+                                self.chain,
+                                TOKEN_MESSENGER,
+                                1,
+                                DepositForBurn {
+                                    burnToken: call.burnToken,
+                                    amount: call.amount,
+                                    depositor: sender,
+                                    mintRecipient: call.mintRecipient,
+                                    destinationDomain: call.destinationDomain,
+                                    destinationTokenMessenger: remote_messenger(
+                                        call.destinationDomain,
+                                    ),
+                                    destinationCaller: call.destinationCaller,
+                                    maxFee: call.maxFee,
+                                    minFinalityThreshold: call.minFinalityThreshold,
+                                    hookData: Bytes::new(),
+                                },
+                            ));
+                        } else if selector == receiveMessageCall::SELECTOR {
+                            let call = receiveMessageCall::abi_decode(envelope.input()).unwrap();
+                            let message = decode_message(&hex_bytes(&call.message))?;
+                            if s.used_nonces.contains(&message.nonce) {
+                                return Err(fail("ALREADY_MINTED"));
+                            }
+                            let net = u256(&message.amount)? - u256(&message.fee_executed)?;
+                            s.used_nonces.insert(message.nonce.clone());
+                            if !s.omit_credit {
+                                s.destination_balance += net;
+                                logs.push(event(
+                                    self.chain,
+                                    &usdc_asset(self.chain)?.token.unwrap(),
+                                    0,
+                                    Transfer {
+                                        from: Address::ZERO,
+                                        to: address(&message.mint_recipient)?,
+                                        value: net,
+                                    },
+                                ));
+                            }
+                            logs.push(event(
+                                self.chain,
+                                MESSAGE_TRANSMITTER,
+                                1,
+                                MessageReceived {
+                                    caller: sender,
+                                    sourceDomain: message.source_domain,
+                                    nonce: message.nonce.parse().unwrap(),
+                                    sender: address(TOKEN_MESSENGER)?.into_word(),
+                                    finalityThresholdExecuted: message.finality_threshold_executed,
+                                    messageBody: Bytes::copy_from_slice(&call.message[148..]),
+                                },
+                            ));
+                        } else if selector == transferCall::SELECTOR {
+                            let call = transferCall::abi_decode(envelope.input()).unwrap();
+                            if self.chain != s.destination_chain()
+                                || call.to != address(HL_BRIDGE)?
+                                || s.destination_balance < call.value
+                            {
+                                return Err(fail("BAD_HL_DEPOSIT"));
+                            }
+                            s.destination_balance -= call.value;
+                            s.hl_tx = Some(tx_hash.clone());
+                            s.hl_amount = call.value;
                             logs.push(event(
                                 self.chain,
                                 &usdc_asset(self.chain)?.token.unwrap(),
                                 0,
                                 Transfer {
-                                    from: Address::ZERO,
-                                    to: address(&message.mint_recipient)?,
-                                    value: net,
+                                    from: sender,
+                                    to: call.to,
+                                    value: call.value,
                                 },
                             ));
+                        } else if selector.is_empty() && envelope.value() > U256::ZERO {
+                            // Independent native transfer used to prove that an
+                            // in-flight bridge does not hold unrelated funds.
+                        } else {
+                            return Err(fail("UNREVIEWED_FINANCIAL_CALL"));
                         }
-                        logs.push(event(
-                            self.chain,
-                            MESSAGE_TRANSMITTER,
-                            1,
-                            MessageReceived {
-                                caller: sender,
-                                sourceDomain: message.source_domain,
-                                nonce: message.nonce.parse().unwrap(),
-                                sender: address(TOKEN_MESSENGER)?.into_word(),
-                                finalityThresholdExecuted: message.finality_threshold_executed,
-                                messageBody: Bytes::copy_from_slice(&call.message[148..]),
-                            },
-                        ));
-                    } else if selector == transferCall::SELECTOR {
-                        let call = transferCall::abi_decode(envelope.input()).unwrap();
-                        if self.chain != s.destination_chain()
-                            || call.to != address(HL_BRIDGE)?
-                            || s.destination_balance < call.value
-                        {
-                            return Err(fail("BAD_HL_DEPOSIT"));
-                        }
-                        s.destination_balance -= call.value;
-                        s.hl_tx = Some(tx_hash.clone());
-                        s.hl_amount = call.value;
-                        logs.push(event(
-                            self.chain,
-                            &usdc_asset(self.chain)?.token.unwrap(),
-                            0,
-                            Transfer {
-                                from: sender,
-                                to: call.to,
-                                value: call.value,
-                            },
-                        ));
-                    } else {
-                        return Err(fail("UNREVIEWED_FINANCIAL_CALL"));
                     }
+                    for log in &mut logs {
+                        log["transactionHash"] = json!(tx_hash);
+                    }
+                    let tx = json!({"hash":tx_hash,"from":lower_address(sender),"to":lower_address(envelope.to().unwrap()),"value":format!("{:#x}",envelope.value()),"input":hex_bytes(envelope.input()),"nonce":format!("{:#x}",envelope.nonce()),"gas":format!("{:#x}",envelope.gas_limit()),"chainId":format!("{:#x}",self.chain),"type":"0x2","maxFeePerGas":format!("{:#x}",envelope.max_fee_per_gas()),"maxPriorityFeePerGas":format!("{:#x}",envelope.max_priority_fee_per_gas().unwrap()),"accessList":[],"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain))});
+                    let receipt = json!({"transactionHash":tx_hash,"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain)),"status":if reverted{"0x0"}else{"0x1"},"gasUsed":"0x7530","effectiveGasPrice":"0x3b9aca00","l1Fee":"0x0","logs":logs});
+                    s.transactions
+                        .insert((self.chain, tx_hash.clone()), (tx, receipt));
+                    *s.broadcasts.entry(self.chain).or_default() += 1;
+                    if self.chain != s.destination_chain()
+                        && let Some(balance) = s.source_gas_balance.as_mut()
+                    {
+                        *balance -= U256::from(30_000_000_000_000u64);
+                    }
+                    if self.chain == s.source_chain() && s.stall_source_response {
+                        s.stall_source_response = false;
+                        response_gate = Some(s.release_source_response.clone());
+                    }
+                    if self.chain == s.source_chain()
+                        && s.lose_source_ordinal == s.broadcasts.get(&self.chain).copied()
+                    {
+                        s.lose_source_ordinal = None;
+                        return Err(fail("RPC_UNAVAILABLE"));
+                    }
+                    if s.lose_response == Some(self.chain) {
+                        s.lose_response = None;
+                        return Err(fail("RPC_UNAVAILABLE"));
+                    }
+                    json!(tx_hash)
                 }
-                for log in &mut logs {
-                    log["transactionHash"] = json!(tx_hash);
+                other => {
+                    return Err(GoFinError::validation(format!(
+                        "Unexpected fixture RPC {other}"
+                    )));
                 }
-                let tx = json!({"hash":tx_hash,"from":lower_address(sender),"to":lower_address(envelope.to().unwrap()),"value":format!("{:#x}",envelope.value()),"input":hex_bytes(envelope.input()),"nonce":format!("{:#x}",envelope.nonce()),"gas":format!("{:#x}",envelope.gas_limit()),"chainId":format!("{:#x}",self.chain),"type":"0x2","maxFeePerGas":format!("{:#x}",envelope.max_fee_per_gas()),"maxPriorityFeePerGas":format!("{:#x}",envelope.max_priority_fee_per_gas().unwrap()),"accessList":[],"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain))});
-                let receipt = json!({"transactionHash":tx_hash,"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain)),"status":if reverted{"0x0"}else{"0x1"},"gasUsed":"0x7530","effectiveGasPrice":"0x3b9aca00","l1Fee":"0x0","logs":logs});
-                s.transactions
-                    .insert((self.chain, tx_hash.clone()), (tx, receipt));
-                *s.broadcasts.entry(self.chain).or_default() += 1;
-                if self.chain != s.destination_chain()
-                    && let Some(balance) = s.source_gas_balance.as_mut()
-                {
-                    *balance -= U256::from(30_000_000_000_000u64);
-                }
-                if s.lose_response == Some(self.chain) {
-                    s.lose_response = None;
-                    return Err(fail("RPC_UNAVAILABLE"));
-                }
-                json!(tx_hash)
             }
-            other => {
-                return Err(GoFinError::validation(format!(
-                    "Unexpected fixture RPC {other}"
-                )));
+        };
+        if let Some(release) = response_gate {
+            while !release.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-        })
+        }
+        Ok(result)
     }
 }
 struct Prices;
@@ -816,7 +917,15 @@ impl Harness {
         solana: Option<Arc<solana::SolanaFixture>>,
         clock: Arc<OffsetClock>,
     ) -> Self {
-        let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
+        let signer_key = {
+            let state = chain.lock().unwrap();
+            if state.owned_forks.is_some() && !state.alternate_fork_signer {
+                owned_fork::ATTESTER_KEY.to_owned()
+            } else {
+                "11".repeat(32)
+            }
+        };
+        let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&signer_key).unwrap());
         let wallet = lower_address(signer.address());
         let prices = solana
             .as_ref()
@@ -830,10 +939,23 @@ impl Harness {
         for chain_id in [1, 42161].into_iter().chain(
             (source_chain == 8453 || destination_chain == 8453 || solana.is_some()).then_some(8453),
         ) {
-            let rpc = Arc::new(Rpc {
-                chain: chain_id,
-                state: chain.clone(),
-            });
+            let fork = chain
+                .lock()
+                .unwrap()
+                .owned_forks
+                .as_ref()
+                .and_then(|forks| forks.get(&chain_id).cloned());
+            let rpc: Arc<dyn EvmRpc> = if let Some(fork) = fork {
+                Arc::new(OwnedForkRpc {
+                    fork,
+                    state: chain.clone(),
+                })
+            } else {
+                Arc::new(Rpc {
+                    chain: chain_id,
+                    state: chain.clone(),
+                })
+            };
             let runtime = Arc::new(EvmRuntime::new(rpc.clone(), chain_id, Some(signer.clone())));
             let mut config = EthereumConfig::wallet_only(
                 chain_id,
@@ -1025,69 +1147,6 @@ impl Harness {
         let inputs=links.iter().map(|s|json!({"transferId":transfer,"stepId":s.step_id,"stepKind":s.kind,"bounds":bounds})).collect();
         (transfer, inputs)
     }
-    fn plan(&self, inputs: &[Value], fast: bool) -> FinancialPlanSpec {
-        let source_chain = self.chain.lock().unwrap().source_chain();
-        let destination_chain = self.chain.lock().unwrap().destination_chain();
-        let source = usdc_asset(source_chain)
-            .unwrap()
-            .amount(Quantity::from_u64(10_000_000));
-        FinancialPlanSpec {
-            version: gofin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
-            name: "Synthetic complete CCTP transfer".into(),
-            summary: None,
-            steps: inputs
-                .iter()
-                .enumerate()
-                .map(|(i, input)| FinancialPlanStepSpec {
-                    action_deadline_seconds: None,
-                    step_id: format!("stage-{i}"),
-                    operation: "bridge.transfer".into(),
-                    input: input.clone(),
-                    permitted_variations: json!({}),
-                    completion: FinancialStepCompletion {
-                        operation_succeeded: true,
-                        principal_spend: None,
-                        minimum_net_receipt: if input["stepKind"] == "mint" {
-                            Some(gofin_domain::ResourceAmount {
-                                resource: ResourceId(format!(
-                                    "ethereum:{destination_chain}:{}",
-                                    self.wallet
-                                )),
-                                amount: usdc_asset(destination_chain).unwrap().amount(
-                                    Quantity::from_u64(if fast { 9_995_000 } else { 10_000_000 }),
-                                ),
-                            })
-                        } else {
-                            None
-                        },
-                    },
-                    funding_dependencies: vec![],
-                })
-                .collect(),
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: ResourceId(format!("ethereum:{source_chain}:{}", self.wallet)),
-                    amount: source,
-                }],
-                maximum_costs: self
-                    .bounds()
-                    .fee_caps
-                    .into_iter()
-                    .filter(|cap| cap.kind == FeeKind::Gas)
-                    .map(|cap| gofin_domain::CostBound {
-                        location: gofin_domain::AccountingLocation::Cash {
-                            resource: ResourceId(format!("{}:{}", cap.asset.network, self.wallet)),
-                        },
-                        amount: gofin_domain::Amount {
-                            asset: cap.asset,
-                            atoms: cap.maximum,
-                        },
-                        treatment: gofin_domain::CostTreatment::AdditionalDebit,
-                    })
-                    .collect(),
-            },
-        }
-    }
     async fn call(&self, args: Vec<String>, request: BrokerRequest) -> Value {
         let client = self
             .client
@@ -1105,113 +1164,8 @@ impl Harness {
         )
         .await
     }
-    async fn authorize(&self, plan: FinancialPlanSpec) -> String {
-        self.authorize_named(plan, "authorize-model").await
-    }
-    async fn authorize_named(&self, plan: FinancialPlanSpec, request_id: &str) -> String {
-        let mut request = FinancialPlanAuthorizationRequest {
-            request_id: request_id.into(),
-            plan: plan.clone(),
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
-        let review = self
-            .call(
-                args(&[
-                    "plans",
-                    "preview",
-                    "--input",
-                    &serde_json::to_string(&plan).unwrap(),
-                    "--valid-for",
-                    "10m",
-                    "--json",
-                ]),
-                BrokerRequest::PreviewPlan {
-                    request: request.clone(),
-                },
-            )
-            .await;
-        request.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
-        let result = self
-            .call(
-                args(&[
-                    "plans",
-                    "authorize",
-                    "--input",
-                    &serde_json::to_string(&plan).unwrap(),
-                    "--id",
-                    &request.request_id,
-                    "--review-hash",
-                    request.expected_review_hash.as_ref().unwrap(),
-                    "--valid-for",
-                    "10m",
-                    "--json",
-                ]),
-                BrokerRequest::AuthorizePlan { request },
-            )
-            .await;
-        result["plan_id"].as_str().unwrap().into()
-    }
-    async fn execute(
-        &self,
-        plan: &str,
-        index: usize,
-        input: &Value,
-    ) -> Result<gofin_domain::OperationRecord> {
-        self.engine
-            .execute_financial_plan_step(
-                plan,
-                &format!("stage-{index}"),
-                OperationRequest {
-                    request_id: format!("execute-stage-{index}"),
-                    operation: "bridge.transfer".into(),
-                    input: input.clone(),
-                    run_id: None,
-                },
-            )
-            .await
-    }
-    async fn execute_public(
-        &self,
-        plan: &str,
-        step: &str,
-        request: OperationRequest,
-    ) -> gofin_domain::OperationRecord {
-        serde_json::from_value(
-            self.call(
-                args(&[
-                    "execute",
-                    &request.operation,
-                    "--input",
-                    &request.input.to_string(),
-                    "--id",
-                    &request.request_id,
-                    "--plan",
-                    plan,
-                    "--step",
-                    step,
-                    "--json",
-                ]),
-                BrokerRequest::ExecutePlanStep {
-                    plan_id: plan.into(),
-                    step_id: step.into(),
-                    request,
-                },
-            )
-            .await,
-        )
-        .unwrap()
-    }
     async fn operation_status(&self, id: &str) -> gofin_domain::OperationRecord {
-        serde_json::from_value(
-            self.call(
-                args(&["status", id, "--json"]),
-                BrokerRequest::Status { id: id.into() },
-            )
-            .await,
-        )
-        .unwrap()
+        Box::pin(self.engine.status(id, true)).await.unwrap()
     }
     async fn settle(&self, mut op: gofin_domain::OperationRecord) -> gofin_domain::OperationRecord {
         for _ in 0..3 {
@@ -1223,36 +1177,174 @@ impl Harness {
         assert_eq!(op.status, Status::Completed, "{op:?}");
         op
     }
+    async fn start_compound(&self, request_id: &str) -> (String, String) {
+        Box::pin(self.start_compound_mode(request_id, false)).await
+    }
+    async fn start_compound_mode(&self, request_id: &str, fast: bool) -> (String, String) {
+        Box::pin(self.start_compound_options(request_id, fast, false)).await
+    }
+    async fn start_compound_options(
+        &self,
+        request_id: &str,
+        fast: bool,
+        reverse_caps: bool,
+    ) -> (String, String) {
+        let source = self.chain.lock().unwrap().source_chain();
+        let destination = self.chain.lock().unwrap().destination_chain();
+        let mut bounds = self.bounds();
+        bounds.input = Some(gofin_bridge::AmountInterval {
+            minimum: Quantity::from_u64(10_000_000),
+            maximum: Quantity::from_u64(10_000_000),
+        });
+        bounds.maximum_source_debit = Some(Quantity::from_u64(10_000_000));
+        bounds.minimum_net_receipt = Some(usdc_asset(destination).unwrap().amount(
+            Quantity::from_u64(if fast { 9_995_000 } else { 10_000_000 }),
+        ));
+        if !fast {
+            bounds.fee_caps.retain(|cap| cap.kind == FeeKind::Gas);
+        }
+        for cap in &mut bounds.fee_caps {
+            cap.maximum_usd_micros = None;
+        }
+        if reverse_caps {
+            bounds.fee_caps.swap(0, 1);
+        }
+        let mut input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":source,"token":usdc_asset(source).unwrap().token},"destinationChainId":destination,"destinationAssets":[{"chainId":destination,"token":usdc_asset(destination).unwrap().token}],"recipient":self.wallet,"refundTo":self.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        if fast {
+            input["cctp"] = json!({"transferMode":"fast"});
+        }
+        let request = OperationRequest {
+            request_id: request_id.into(),
+            operation: "bridge.execute".into(),
+            input: input.clone(),
+            run_id: None,
+        };
+        let result = self
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    request_id,
+                    "--json",
+                ]),
+                BrokerRequest::Execute { request },
+            )
+            .await;
+        let allow_fee_limit = {
+            let state = self.chain.lock().unwrap();
+            state.owned_forks.is_some() && state.source_large_fee_after_approval
+        };
+        assert!(
+            result["error"].is_null()
+                || (allow_fee_limit && result["error"]["code"] == "FEE_LIMIT"),
+            "{result}"
+        );
+        (
+            result["id"].as_str().unwrap().into(),
+            result["preview"]["binding"]["transfer_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+        )
+    }
+    async fn continuation_error(&self, id: &str, token: &str) -> gofin_domain::GoFinError {
+        let engine = self.engine.clone();
+        let id = id.to_owned();
+        let token = token.to_owned();
+        tokio::spawn(Box::pin(async move {
+            let invocation = gofin_domain::execution_progress::Invocation::new(
+                std::time::Duration::from_secs(30),
+            );
+            invocation
+                .scope(Box::pin(engine.continue_operation(&id, &token)))
+                .await
+                .unwrap_err()
+        }))
+        .await
+        .unwrap()
+    }
+    async fn reauthorization_error(
+        &self,
+        id: &str,
+        token: &str,
+        input: Value,
+    ) -> gofin_domain::GoFinError {
+        let engine = self.engine.clone();
+        let id = id.to_owned();
+        let token = token.to_owned();
+        tokio::spawn(Box::pin(async move {
+            let invocation = gofin_domain::execution_progress::Invocation::new(
+                std::time::Duration::from_secs(30),
+            );
+            invocation
+                .scope(Box::pin(engine.reauthorize_operation(&id, &token, input)))
+                .await
+                .unwrap_err()
+        }))
+        .await
+        .unwrap()
+    }
+    async fn continue_compound(&self, id: &str) -> Value {
+        let status = self
+            .call(
+                args(&["status", id, "--json"]),
+                BrokerRequest::Status { id: id.into() },
+            )
+            .await;
+        let token = status
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("missing continuation: {status}"));
+        self.call(
+            args(&["operations", "continue", id, "--token", token, "--json"]),
+            BrokerRequest::ContinueOperation {
+                id: id.into(),
+                token: token.into(),
+            },
+        )
+        .await
+    }
     async fn status(&self, id: &str) -> Value {
         self.read("bridge.status", json!({"transferId":id})).await
     }
 }
 
+#[path = "cctp_fork.rs"]
+mod owned_fork;
 #[path = "support/cctp_stack_refresh.rs"]
 mod stack_refresh;
 #[tokio::test]
 async fn known_canonical_mint_settles_without_destination_log_scan() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound("canonical-mint").await;
+    assert_eq!(h.status(&transfer).await["state"], "in_transit");
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
-    assert_ne!(
-        h.state.transfer(&transfer).unwrap().unwrap().state,
-        gofin_domain::BridgeTransferState::Completed
+    let completed = h.continue_compound(&id).await;
+    assert!(completed["error"].is_null(), "{completed}");
+    assert_eq!(completed["outcome"]["phase"], "done", "{completed}");
+    assert_eq!(completed["outcome"]["transfer"], "available", "{completed}");
+    assert!(
+        completed
+            .pointer("/outcome/next_action/continuation_token")
+            .is_none(),
+        "{completed}"
     );
-    let scans_before = {
+    assert_eq!(
+        completed["outcome"]["attention"]["kind"], "none",
+        "{completed}"
+    );
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    let scans = {
         let mut state = h.chain.lock().unwrap();
         state.reject_destination_log_scan = true;
         state.destination_log_scans
     };
     let h = h.restart();
     assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.chain.lock().unwrap().destination_log_scans, scans_before);
+    assert_eq!(h.chain.lock().unwrap().destination_log_scans, scans);
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
@@ -1261,86 +1353,130 @@ async fn known_canonical_mint_settles_without_destination_log_scan() {
 }
 
 #[tokio::test]
-async fn complete_cctp_named_plan_requires_explicit_mint_and_credits_only_net() {
-    for fast in [false, true] {
-        let h = Harness::new();
-        let (transfer, inputs) = h.quote(fast).await;
-        assert_eq!(inputs.len(), 3);
-        let plan = h.authorize(h.plan(&inputs, fast)).await;
-        for (i, input) in inputs.iter().enumerate().take(2) {
-            h.settle(h.execute(&plan, i, input).await.unwrap()).await;
+async fn complete_cctp_compound_requires_explicit_mint_and_credits_only_net() {
+    Box::pin(async {
+        for fast in [false, true] {
+            let h = Harness::new();
+            let (id, transfer) = h
+                .start_compound_mode(if fast { "fast" } else { "standard" }, fast)
+                .await;
+            assert_eq!(
+                h.state.transfer(&transfer).unwrap().unwrap().state,
+                gofin_domain::BridgeTransferState::InTransit
+            );
+            assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
+            assert_eq!(
+                h.status(&transfer).await["provider_status"]["status"],
+                "attestation_pending"
+            );
+            if fast {
+                let status = h
+                    .call(
+                        args(&["status", &id, "--json"]),
+                        BrokerRequest::Status { id: id.clone() },
+                    )
+                    .await;
+                let token = status
+                    .pointer("/outcome/next_action/continuation_token")
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let mut changed = status["input"].clone();
+                changed["cctp"]["transferMode"] = json!("standard");
+                let _ = h.reauthorization_error(&id, token, changed).await;
+                assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+            }
+            h.chain.lock().unwrap().attestation_ready = true;
+            assert_eq!(
+                h.status(&transfer).await["provider_status"]["status"],
+                "mint_ready"
+            );
+            let result = h.continue_compound(&id).await;
+            assert!(result["error"].is_null(), "{result}");
+            assert_eq!(h.status(&transfer).await["state"], "completed");
+            let saved = h.state.transfer(&transfer).unwrap().unwrap();
+            assert_eq!(h.status(&transfer).await["state"], "completed");
+            assert_eq!(saved, h.state.transfer(&transfer).unwrap().unwrap());
+            assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                h.chain.lock().unwrap().source_balance,
+                U256::from(10_000_000)
+            );
+            assert_eq!(
+                h.chain.lock().unwrap().destination_balance,
+                U256::from(if fast { 9_995_000 } else { 10_000_000 })
+            );
         }
-        assert_eq!(
-            h.state.transfer(&transfer).unwrap().unwrap().state,
-            gofin_domain::BridgeTransferState::InTransit
-        );
-        assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
-        assert_eq!(
-            h.status(&transfer).await["provider_status"]["status"],
-            "attestation_pending"
-        );
-        h.chain.lock().unwrap().attestation_ready = true;
-        assert_eq!(
-            h.status(&transfer).await["provider_status"]["status"],
-            "mint_ready"
-        );
-        h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-            .await;
-        assert_eq!(h.status(&transfer).await["state"], "completed");
-        let original = h.state.transfer(&transfer).unwrap().unwrap();
-        assert_eq!(h.status(&transfer).await["state"], "completed");
-        assert_eq!(original, h.state.transfer(&transfer).unwrap().unwrap());
-        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            h.chain.lock().unwrap().source_balance,
-            U256::from(10_000_000)
-        );
-        assert_eq!(
-            h.chain.lock().unwrap().destination_balance,
-            U256::from(if fast { 9_995_000 } else { 10_000_000 })
-        );
-    }
+    })
+    .await
 }
 
 #[tokio::test]
 async fn response_loss_each_submission_boundary_restarts_without_duplicate_burn_or_mint() {
-    let mut h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    let mut completed = vec![];
-    for (i, input) in inputs.iter().enumerate() {
-        if i == 2 {
+    Box::pin(async {
+        for lost in 1..=3 {
+            let mut h = Harness::new();
+            if lost < 3 {
+                h.chain.lock().unwrap().lose_source_ordinal = Some(lost);
+            }
+            let (id, transfer) = h.start_compound(&format!("lost-{lost}")).await;
+            h = h.restart();
+            for _ in 0..3 {
+                let _ = h
+                    .call(
+                        args(&["status", &id, "--json"]),
+                        BrokerRequest::Status { id: id.clone() },
+                    )
+                    .await;
+                if h.state
+                    .transfer(&transfer)
+                    .unwrap()
+                    .unwrap()
+                    .transit
+                    .is_some()
+                {
+                    break;
+                }
+                let _ = h.continue_compound(&id).await;
+            }
+            assert!(
+                h.state
+                    .transfer(&transfer)
+                    .unwrap()
+                    .unwrap()
+                    .transit
+                    .is_some()
+            );
             h.chain.lock().unwrap().attestation_ready = true;
+            if lost == 3 {
+                h.chain.lock().unwrap().lose_response = Some(42161);
+            }
+            let _ = h.continue_compound(&id).await;
+            h = h.restart();
+            for _ in 0..3 {
+                let _ = h
+                    .call(
+                        args(&["status", &id, "--json"]),
+                        BrokerRequest::Status { id: id.clone() },
+                    )
+                    .await;
+                if h.status(&transfer).await["state"] == "completed" {
+                    break;
+                }
+            }
+            assert_eq!(h.status(&transfer).await["state"], "completed");
+            assert_eq!(
+                h.chain.lock().unwrap().broadcasts,
+                BTreeMap::from([(1, 2), (42161, 1)])
+            );
+            assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
         }
-        h.chain.lock().unwrap().lose_response = Some(if i < 2 { 1 } else { 42161 });
-        let op = h.execute(&plan, i, input).await.unwrap();
-        assert!(op.submission.is_some(), "{:?}", op.error);
-        h = h.restart();
-        completed.push(h.settle(op).await);
-    }
-    for (i, op) in completed.iter().enumerate() {
-        let duplicate = h.execute(&plan, i, &inputs[i]).await.unwrap();
-        assert_eq!(duplicate.id, op.id);
-        assert_eq!(
-            duplicate.submission.as_ref().unwrap().reference,
-            op.submission.as_ref().unwrap().reference
-        );
-    }
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(1, 2), (42161, 1)])
-    );
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    })
+    .await
 }
 #[tokio::test]
 async fn delayed_evidence_and_gas_shortage_preserve_source_then_resume_same_mint() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound("delayed-mint").await;
     let source = h
         .state
         .transfer(&transfer)
@@ -1357,29 +1493,27 @@ async fn delayed_evidence_and_gas_shortage_preserve_source_then_resume_same_mint
         h.status(&transfer).await["provider_status"]["status"],
         "destination_gas_required"
     );
-    assert!(
-        h.bridge
-            .prepare("bridge.transfer", &inputs[2])
-            .await
-            .is_err()
-    );
     assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
     {
         let mut s = h.chain.lock().unwrap();
         s.gas_missing = false;
         s.hide_destination_receipt = true;
     }
-    let op = h.execute(&plan, 2, &inputs[2]).await.unwrap();
-    assert!(op.submission.is_some(), "{:?}", op.error);
+    let _ = h.continue_compound(&id).await;
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&42161), Some(&1));
     let h = h.restart();
-    let pending = h.status(&transfer).await;
-    assert_ne!(pending["state"], "completed");
+    assert_ne!(h.status(&transfer).await["state"], "completed");
     assert_eq!(
         h.state.transfer(&transfer).unwrap().unwrap().transit,
         Some(source)
     );
     h.chain.lock().unwrap().hide_destination_receipt = false;
-    h.settle(op).await;
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id },
+        )
+        .await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
@@ -1387,56 +1521,53 @@ async fn delayed_evidence_and_gas_shortage_preserve_source_then_resume_same_mint
     );
 }
 #[tokio::test]
-async fn invalid_attestation_and_revoked_plan_cannot_dispatch_mint() {
-    let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    {
-        let mut s = h.chain.lock().unwrap();
-        s.attestation_ready = true;
-        s.mutate_attestation = true;
-    }
-    assert!(
-        h.bridge
-            .prepare("bridge.transfer", &inputs[2])
-            .await
-            .is_err()
-    );
-    h.chain.lock().unwrap().mutate_attestation = false;
-    h.engine.revoke_financial_plan(&plan).await.unwrap();
-    assert!(h.execute(&plan, 2, &inputs[2]).await.is_err());
-    assert_eq!(
-        h.status(&transfer).await["provider_status"]["status"],
-        "mint_ready"
-    );
-    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
-    assert!(
-        h.state
-            .transfer(&transfer)
-            .unwrap()
-            .unwrap()
-            .transit
-            .is_some()
-    );
+async fn invalid_attestation_cannot_dispatch_mint() {
+    Box::pin(async {
+        let h = Harness::new();
+        let (id, transfer) = h.start_compound("invalid-attestation").await;
+        {
+            let mut s = h.chain.lock().unwrap();
+            s.attestation_ready = true;
+            s.mutate_attestation = true;
+        }
+        let status = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        let token = status
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let err = h.continuation_error(&id, token).await;
+        assert_eq!(err.code, "CCTP_VALIDATION_FAILED");
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        assert!(
+            h.state
+                .transfer(&transfer)
+                .unwrap()
+                .unwrap()
+                .transit
+                .is_some()
+        );
+        assert_ne!(
+            h.state.transfer(&transfer).unwrap().unwrap().state,
+            gofin_domain::BridgeTransferState::Completed
+        );
+    })
+    .await
 }
 #[tokio::test]
 async fn processed_message_without_native_usdc_credit_never_completes() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound("missing-credit").await;
     {
-        let mut s = h.chain.lock().unwrap();
-        s.attestation_ready = true;
-        s.omit_credit = true;
+        let mut state = h.chain.lock().unwrap();
+        state.attestation_ready = true;
+        state.omit_credit = true;
     }
-    let op = h.execute(&plan, 2, &inputs[2]).await.unwrap();
-    assert!(op.submission.is_some());
+    let _result = h.continue_compound(&id).await;
     let status = h.status(&transfer).await;
     assert_ne!(status["state"], "completed");
     assert_eq!(
@@ -1452,237 +1583,56 @@ async fn processed_message_without_native_usdc_credit_never_completes() {
             .is_some()
     );
     assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
-    assert!(
-        h.bridge
-            .prepare("bridge.transfer", &inputs[2])
-            .await
-            .is_err()
-    );
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&42161), Some(&1));
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id },
+        )
+        .await;
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&42161), Some(&1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exact_cctp_mint_receipt_survives_restart_and_funds_correlated_hyperliquid_credit() {
-    let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
-    let deposit = json!({"requestId":"hl-funding","account":"model-hl","wallet":"model-wallet","amount":"10","maxFeeEth":"0.001","maxAmountUsdc":"10"});
-    let mut spec = h.plan(&inputs, false);
-    let resource = ResourceId(format!("ethereum:42161:{}", h.wallet));
-    let destination_asset = usdc_asset(42161).unwrap().asset_id();
-    // Match an explicitly exact, receipt-only mint permission. The ordinary
-    // fixture's adapter permission does not exercise this authority shape.
-    spec.steps[2].permitted_variations = json!({
-        "mode":"exact",
-        "maximum_debits":[],
-        "maximum_costs":[{
-            "location":{"kind":"cash","resource":resource},
-            "amount":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"2000000000000000"},
-            "treatment":"additional_debit"
-        }],
-        "possible_credits":[{"resource":resource,"asset":destination_asset}]
-    });
-    spec.steps[1].completion.principal_spend = Some(gofin_domain::ResourceAmount {
-        resource: ResourceId(format!("ethereum:1:{}", h.wallet)),
-        amount: usdc_asset(1)
-            .unwrap()
-            .amount(Quantity::from_u64(10_000_000)),
-    });
-    spec.steps.push(FinancialPlanStepSpec {
-        action_deadline_seconds: None,
-        step_id: "hl-credit".into(),
-        operation: "hyperliquid.account.deposit".into(),
-        input: deposit.clone(),
-        permitted_variations: json!({"mode":"exact","maximum_debits":[{"resource":resource,"amount":{"asset":destination_asset,"atoms":"10000000"}}],"maximum_costs":[{"location":{"kind":"cash","resource":resource},"amount":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"1000000000000000"},"treatment":"additional_debit"}],"possible_credits":[{"resource":HyperliquidAccount{name:"model-hl".into(),owner:h.wallet.clone(),credential_ref:None,signing_enabled:false,execution_scope:Default::default()}.resource("perpetual",None),"asset":gofin_hyperliquid::usdc()}]}),
-        completion: FinancialStepCompletion {
-            operation_succeeded: true,
-            principal_spend: None,
-            minimum_net_receipt: None,
-        },
-        funding_dependencies: vec![
-            gofin_domain::financial_plans::FinancialPlanFundingDependency {
-                producing_step_id: "stage-2".into(),
-                resource: resource.clone(),
-                asset: destination_asset.clone(),
-                funding_scope: Some(
-                    gofin_domain::financial_plans::FinancialPlanFundingScope::PrincipalOnly,
-                ),
-                maximum_fraction_bps: None,
-            },
-        ],
-    });
-    spec.aggregate_bounds
-        .maximum_debits
-        .push(gofin_domain::ResourceAmount {
-            resource: resource.clone(),
-            amount: gofin_domain::Amount {
-                asset: destination_asset,
-                atoms: Quantity::from_u64(10_000_000),
-            },
-        });
-    let plan = h.authorize(spec).await;
-    let approved_revision = Store::open(h.temp.path().join("cctp.sqlite"))
-        .unwrap()
-        .financial_plan_revisions(&plan)
-        .unwrap()
-        .remove(0);
-    let revision: gofin_domain::financial_plans::FinancialPlanRevision =
-        serde_json::from_value(approved_revision.clone()).unwrap();
-    let mint_permission = revision.permissions[2].exact.as_ref().unwrap();
-    assert!(mint_permission.scope.maximum_debits.is_empty());
-    assert!(revision.permissions[2].permission.is_none());
-    // A pre-existing wallet balance cannot substitute for this plan's declared producer receipt.
-    h.chain.lock().unwrap().destination_balance = U256::from(10_000_000);
-    let premature = h
-        .engine
-        .execute_financial_plan_step(
-            &plan,
-            "hl-credit",
-            OperationRequest {
-                request_id: "unrelated-funds-cannot-unlock".into(),
-                operation: "hyperliquid.account.deposit".into(),
-                input: deposit.clone(),
-                run_id: None,
-            },
-        )
-        .await;
-    assert!(premature.is_err());
-    assert!(h.chain.lock().unwrap().hl_tx.is_none());
-    h.chain.lock().unwrap().destination_balance = U256::ZERO;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(
-            h.execute_public(
-                &plan,
-                &format!("stage-{i}"),
-                OperationRequest {
-                    request_id: format!("execute-stage-{i}"),
-                    operation: "bridge.transfer".into(),
-                    input: input.clone(),
-                    run_id: None,
-                },
-            )
-            .await,
-        )
-        .await;
-    }
-    let before_restart = h.state.transfer(&transfer).unwrap().unwrap();
-    let h = h.restart();
-    assert_eq!(
-        Store::open(h.temp.path().join("cctp.sqlite"))
-            .unwrap()
-            .financial_plan_revisions(&plan)
-            .unwrap(),
-        vec![approved_revision]
-    );
-    assert_eq!(
-        h.state.transfer(&transfer).unwrap().unwrap(),
-        before_restart
-    );
-    h.chain.lock().unwrap().attestation_ready = true;
-    let prepared = h
-        .bridge
-        .prepare("bridge.transfer", &inputs[2])
-        .await
-        .unwrap();
-    assert!(prepared.intent.debits.is_empty());
-    assert!(
-        prepared.intent.expected.is_empty(),
-        "CCTP settlement must not fabricate a supply-position withdrawal."
-    );
-    let mint_request = OperationRequest {
-        request_id: "execute-stage-2".into(),
-        operation: "bridge.transfer".into(),
-        input: inputs[2].clone(),
-        run_id: None,
-    };
-    let mint = h
-        .settle(
-            h.execute_public(&plan, "stage-2", mint_request.clone())
-                .await,
-        )
-        .await;
-    let replay = h.execute_public(&plan, "stage-2", mint_request).await;
-    assert_eq!(mint.id, replay.id);
-    assert_eq!(mint.submission, replay.submission);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(1, 2), (42161, 1)])
-    );
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert!(h.chain.lock().unwrap().hl_tx.is_none());
-    let request = OperationRequest {
-        request_id: "hl-deposit-write".into(),
-        operation: "hyperliquid.account.deposit".into(),
-        input: deposit,
-        run_id: None,
-    };
-    let mut operation = h.execute_public(&plan, "hl-credit", request).await;
-    assert!(operation.submission.is_some(), "{:?}", operation.error);
-    assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
-    operation = h.operation_status(&operation.id).await;
-    assert_ne!(
-        operation.status,
-        Status::Completed,
-        "A Bridge2 receipt is not account credit"
-    );
-    let h = h.restart();
-    h.chain.lock().unwrap().hl_credit_visible = true;
-    operation = h.settle(operation).await;
-    assert!(operation.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::UsableCredit{amount,..}|gofin_domain::FinancialEffect::Transfer{credit:amount,..} if amount.asset==gofin_hyperliquid::usdc())));
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(1, 2), (42161, 2)])
-    );
-    let status: gofin_domain::financial_plans::FinancialPlanStatus = serde_json::from_value(
-        h.call(
-            args(&["plans", "status", &plan, "--json"]),
-            BrokerRequest::PlanStatus {
-                plan_id: plan.clone(),
-            },
-        )
-        .await,
-    )
-    .unwrap();
-    assert!(
-        status.steps.iter().all(|step| step.state
-            == gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed),
-        "{status:?}"
-    );
-    assert_eq!(status.revision.revision_id, revision.revision_id);
-    assert_eq!(
-        status.revision.approval_binding_hash,
-        revision.approval_binding_hash
-    );
-    let receipts = &status.steps[2].verified_receipts;
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].resource, resource);
-    assert_eq!(receipts[0].asset, usdc_asset(42161).unwrap().asset_id());
-    assert_eq!(receipts[0].available, Quantity::from_u64(10_000_000));
-    assert_eq!(receipts[0].consumed, Quantity::from_u64(10_000_000));
+    Box::pin(async {
+        let h=Harness::new();let (id,transfer)=h.start_compound("cctp-hl").await;
+        h.chain.lock().unwrap().attestation_ready=true;let _=h.continue_compound(&id).await;
+        assert_eq!(h.status(&transfer).await["state"],"completed");
+        let saved=h.state.transfer(&transfer).unwrap().unwrap();assert_eq!(saved.settlement_proofs.len(),1);
+        let proof=saved.settlement_proofs[0].clone();
+        let h=h.restart();assert_eq!(h.status(&transfer).await["state"],"completed");
+        assert_eq!(h.state.transfer(&transfer).unwrap().unwrap().settlement_proofs[0],proof);
+        assert_eq!(h.chain.lock().unwrap().destination_balance,U256::from(10_000_000));
+        let input=json!({"requestId":"hl-funding","account":"model-hl","wallet":"model-wallet","amount":"10","maxFeeEth":"0.001","maxAmountUsdc":"10"});
+        let request=OperationRequest{request_id:"hl-funding".into(),operation:"hyperliquid.account.deposit".into(),input:input.clone(),run_id:None};
+        let deposited=h.call(args(&["execute","hyperliquid.account.deposit","--input",&input.to_string(),"--id","hl-funding","--json"]),BrokerRequest::Execute{request}).await;
+        let operation_id=deposited["id"].as_str().unwrap();let op=h.engine.operations().unwrap().into_iter().find(|op|op.id==operation_id).unwrap();
+        h.chain.lock().unwrap().hl_credit_visible=true;let settled=h.settle(op).await;
+        assert_eq!(settled.status,Status::Completed);assert_eq!(h.approvals.0.load(Ordering::SeqCst),2);
+        assert_eq!(h.chain.lock().unwrap().destination_balance,U256::ZERO);
+        assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(1,2),(42161,2)]));
+    }).await
 }
 
 #[tokio::test]
 async fn sufficient_allowance_skips_approval_and_keeps_two_explicit_stages() {
     let h = Harness::new();
     h.chain.lock().unwrap().allowance = U256::from(10_000_000);
-    let (transfer, inputs) = h.quote(false).await;
-    assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0]["stepKind"], "deposit");
-    assert_eq!(inputs[1]["stepKind"], "mint");
-    let record = h.state.transfer(&transfer).unwrap().unwrap();
-    assert!(
-        record.quote_revisions[0].payload["quote"]["protocol_steps"]
-            .as_array()
-            .unwrap()
+    let (id, transfer) = h.start_compound("existing-allowance").await;
+    let saved = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(
+        saved
+            .steps
             .iter()
-            .any(|step| step["kind"] == "approval")
+            .filter(|step| step.operation_id.is_some())
+            .count(),
+        1
     );
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    h.settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
-        .await;
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1), Some(&1));
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
-        .await;
+    let result = h.continue_compound(&id).await;
+    assert!(result["error"].is_null(), "{result}");
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
@@ -1807,22 +1757,38 @@ impl Client {
                     let hello: Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(hello["identity"], "synthetic-cctp");
                     let reply = json!({"kind":"hello","identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic"});
-                    reader
+                    let _ = reader
                         .get_mut()
                         .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
+                        .await;
                     line.clear();
                     reader.read_line(&mut line).await.unwrap();
                     let envelope: Value = serde_json::from_str(&line).unwrap();
                     let request: BrokerRequest =
                         serde_json::from_value(envelope["request"].clone()).unwrap();
-                    let response = gofin_protocol::progress::observe(
-                        reader.get_mut(),
-                        envelope["progress"].as_bool().unwrap_or(false),
-                        runtime.handle(request),
-                    )
-                    .await;
+                    let financial = envelope["cancel_on_disconnect"].as_bool().unwrap_or(false)
+                        && matches!(
+                            request,
+                            BrokerRequest::Execute { .. }
+                                | BrokerRequest::ContinueOperation { .. }
+                                | BrokerRequest::ReauthorizeOperation { .. }
+                        );
+                    let response = if financial {
+                        gofin_protocol::progress::observe_financial_request(
+                            reader.get_mut(),
+                            envelope["progress"].as_bool().unwrap_or(false),
+                            false,
+                            Box::pin(runtime.handle(request)),
+                        )
+                        .await
+                    } else {
+                        gofin_protocol::progress::observe(
+                            reader.get_mut(),
+                            envelope["progress"].as_bool().unwrap_or(false),
+                            Box::pin(runtime.handle(request)),
+                        )
+                        .await
+                    };
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
                     reader
                         .get_mut()
@@ -1866,7 +1832,15 @@ impl Client {
             assert!(output.status.success(), "CLI failed: {value}");
             value
         } else {
-            let response = Box::pin(self.runtime.handle(request)).await;
+            let runtime = self.runtime.clone();
+            let response = tokio::spawn(Box::pin(async move {
+                let invocation = gofin_domain::execution_progress::Invocation::new(
+                    std::time::Duration::from_secs(30),
+                );
+                invocation.scope(Box::pin(runtime.handle(request))).await
+            }))
+            .await
+            .unwrap();
             assert!(
                 response.ok,
                 "broker failed for {args:?}: {:?}",
@@ -1885,13 +1859,11 @@ impl Drop for Client {
 
 #[tokio::test]
 async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() {
-    let h = Harness::new();
-    let (transfer, inputs) = h.quote(true).await;
-    let plan = h.authorize(h.plan(&inputs, true)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    Box::pin(async { let h = Harness::new();
+    let (id, transfer) = h.start_compound_mode("expired-attestation",true).await;
+    let parent=h.engine.operations().unwrap().into_iter().find(|op|op.id==id).unwrap();
     let before = h.state.transfer(&transfer).unwrap().unwrap();
+    let inputs=before.steps.iter().map(|step|json!({"transferId":transfer,"stepId":step.step_id,"stepKind":step.kind,"bounds":parent.input["bounds"]})).collect::<Vec<_>>();
     {
         let mut state = h.chain.lock().unwrap();
         state.attestation_ready = true;
@@ -1926,80 +1898,70 @@ async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() 
         before.transit
     );
     assert_eq!(h.chain.lock().unwrap().reattest_requests, 1);
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
+    let result=h.continue_compound(&id).await;assert!(result["error"].is_null(),"{result}");
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
         BTreeMap::from([(1, 2), (42161, 1)])
     );
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    }).await
 }
 
 #[tokio::test]
-async fn expired_plan_renews_same_transfer_and_never_replays_source() {
-    let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let spec = h.plan(&inputs, false);
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "short-authority".into(),
-        plan: spec,
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = h
-        .engine
-        .preview_financial_plan(request.clone())
-        .await
-        .unwrap();
-    request.expected_review_hash = Some(preview.review_hash);
-    let plan = h
-        .engine
-        .authorize_financial_plan(request.clone())
+async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
+    Box::pin(async {
+        let h = Harness::new();
+        let (id, transfer) = h.start_compound("expired-action").await;
+        let before = h.state.transfer(&transfer).unwrap().unwrap();
+        h.clock.freeze();
+        h.clock.advance(std::time::Duration::from_secs(601));
+        let h = h.restart();
+        h.chain.lock().unwrap().attestation_ready = true;
+        let status = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(
+            status["outcome"]["next_action"]["code"], "reauthorize",
+            "{status}"
+        );
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        h.clock.unfreeze();
+        let token = status
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let mut input = status["input"].clone();
+        input["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+        let engine = h.engine.clone();
+        let oid = id.clone();
+        let token = token.to_owned();
+        let result = tokio::spawn(Box::pin(async move {
+            let invocation = gofin_domain::execution_progress::Invocation::new(
+                std::time::Duration::from_secs(30),
+            );
+            invocation
+                .scope(Box::pin(engine.reauthorize_operation(&oid, &token, input)))
+                .await
+        }))
         .await
         .unwrap()
-        .plan_id;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    let original = h.state.transfer(&transfer).unwrap().unwrap();
-    h.clock.freeze();
-    h.clock.advance(std::time::Duration::from_secs(601));
-    let h = h.restart();
-    h.chain.lock().unwrap().attestation_ready = true;
-    let expired = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert_eq!(
-        expired.revision.status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
-    );
-    h.clock.unfreeze();
-    assert!(h.execute(&plan, 2, &inputs[2]).await.is_err());
-    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
-    request.request_id = "renew-authority".into();
-    request.valid_for_seconds = Some(600);
-    request.replaces_revision_id = Some(expired.revision.revision_id);
-    request.expected_review_hash = None;
-    let preview = h
-        .engine
-        .preview_financial_plan(request.clone())
-        .await
         .unwrap();
-    request.expected_review_hash = Some(preview.review_hash);
-    let renewed = h.engine.authorize_financial_plan(request).await.unwrap();
-    assert_eq!(renewed.plan_id, plan);
-    assert_eq!(
-        h.state.transfer(&transfer).unwrap().unwrap().transit,
-        original.transit
-    );
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(1, 2), (42161, 1)])
-    );
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        assert_eq!(result["reauthorization"], "approved", "{result}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let after = h.state.transfer(&transfer).unwrap().unwrap();
+        assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
+        assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
 }
 
 async fn external_mint(h: &Harness) {
@@ -2032,11 +1994,7 @@ async fn external_mint(h: &Harness) {
 #[tokio::test]
 async fn external_mint_requires_source_linked_iris_nonce_before_settlement() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound("external-mint").await;
     let prior = h.state.transfer(&transfer).unwrap().unwrap();
     assert_eq!(prior.steps[2].operation_id, None);
     external_mint(&h).await;
@@ -2063,17 +2021,19 @@ async fn external_mint_requires_source_linked_iris_nonce_before_settlement() {
         h.chain.lock().unwrap().broadcasts,
         BTreeMap::from([(1, 2), (42161, 1)])
     );
-    assert!(h.execute(&plan, 2, &inputs[2]).await.is_err());
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id },
+        )
+        .await;
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&42161), Some(&1));
 }
 
 #[tokio::test]
 async fn source_linked_nonce_allows_historical_mint_with_older_fee_and_expiry() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(true).await;
-    let plan = h.authorize(h.plan(&inputs, true)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (_id, transfer) = h.start_compound_mode("historical-fee", true).await;
     {
         let mut state = h.chain.lock().unwrap();
         state.attestation_fee = Some(4000);
@@ -2104,12 +2064,7 @@ async fn source_linked_nonce_allows_historical_mint_with_older_fee_and_expiry() 
 #[tokio::test]
 async fn identical_burns_cannot_reuse_an_older_mint_with_a_different_nonce() {
     let h = Harness::new();
-    let (first_transfer, first_inputs) = h.quote(false).await;
-    let first_plan = h.authorize(h.plan(&first_inputs, false)).await;
-    for (i, input) in first_inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&first_plan, i, input).await.unwrap())
-            .await;
-    }
+    let (_first_id, first_transfer) = h.start_compound("first-identical").await;
     let (first_source, first_hash) = {
         let state = h.chain.lock().unwrap();
         (
@@ -2127,27 +2082,8 @@ async fn identical_burns_cannot_reuse_an_older_mint_with_a_different_nonce() {
             .settlement_proofs
             .is_empty()
     );
-    let (transfer, inputs) = h.quote(false).await;
-    let mut spec = h.plan(&inputs, false);
-    spec.name = "Second identical CCTP burn".into();
-    let plan = h.authorize_named(spec, "authorize-second-burn").await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        let op = h
-            .engine
-            .execute_financial_plan_step(
-                &plan,
-                &format!("stage-{i}"),
-                OperationRequest {
-                    request_id: format!("second-burn-stage-{i}"),
-                    operation: "bridge.transfer".into(),
-                    input: input.clone(),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        h.settle(op).await;
-    }
+    h.chain.lock().unwrap().allowance = U256::ZERO;
+    let (_second_id, transfer) = h.start_compound("second-identical").await;
     {
         let mut state = h.chain.lock().unwrap();
         assert_ne!(state.source_tx.as_ref().unwrap(), &first_source);
@@ -2181,19 +2117,14 @@ async fn identical_burns_cannot_reuse_an_older_mint_with_a_different_nonce() {
 async fn source_gas_balance_may_fall_by_proven_approval_cost_without_reapproval() {
     let h = Harness::new();
     h.chain.lock().unwrap().source_gas_balance = Some(U256::from(10_000_000_000_000_000u64));
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    h.settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
-        .await;
+    let (id, transfer) = h.start_compound("source-gas").await;
     assert_eq!(
         h.chain.lock().unwrap().source_gas_balance,
-        Some(U256::from(9_970_000_000_000_000u64))
+        Some(U256::from(9_940_000_000_000_000u64))
     );
-    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
-        .await;
+    assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1), Some(&2));
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
+    let _ = h.continue_compound(&id).await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
 }
@@ -2201,52 +2132,33 @@ async fn source_gas_balance_may_fall_by_proven_approval_cost_without_reapproval(
 #[tokio::test]
 async fn expired_authority_still_reconciles_already_submitted_mint() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "short-pending-authority".into(),
-        plan: h.plan(&inputs, false),
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = h
-        .engine
-        .preview_financial_plan(request.clone())
-        .await
-        .unwrap();
-    request.expected_review_hash = Some(preview.review_hash);
-    let plan = h
-        .engine
-        .authorize_financial_plan(request)
-        .await
-        .unwrap()
-        .plan_id;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound("expired-pending").await;
     {
         let mut state = h.chain.lock().unwrap();
         state.attestation_ready = true;
         state.hide_destination_receipt = true;
     }
-    let operation = h.execute(&plan, 2, &inputs[2]).await.unwrap();
-    assert!(operation.submission.is_some());
+    let _ = h.continue_compound(&id).await;
+    let before = h.state.transfer(&transfer).unwrap().unwrap();
+    let mint = before.steps[2].operation_id.clone().unwrap();
     h.clock.freeze();
     h.clock.advance(std::time::Duration::from_secs(601));
     let h = h.restart();
-    assert_eq!(
-        h.engine
-            .financial_plan_status(&plan)
-            .await
-            .unwrap()
-            .revision
-            .status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
-    );
-    h.clock.unfreeze();
+    assert_ne!(h.status(&transfer).await["state"], "completed");
     h.chain.lock().unwrap().hide_destination_receipt = false;
-    h.settle(operation).await;
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id },
+        )
+        .await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
+    assert_eq!(
+        h.state.transfer(&transfer).unwrap().unwrap().steps[2]
+            .operation_id
+            .as_ref(),
+        Some(&mint)
+    );
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
@@ -2258,43 +2170,27 @@ async fn expired_authority_still_reconciles_already_submitted_mint() {
 #[ignore = "Real provider 90-second quote expiry; run explicitly for stale-source lifecycle evidence"]
 async fn stale_quote_after_approval_refreshes_same_transfer_under_existing_plan() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    h.settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
+    h.chain.lock().unwrap().lose_source_ordinal = Some(1);
+    let (id, transfer) = h.start_compound("stale-quote").await;
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id: id.clone() },
+        )
         .await;
     let before = h.state.transfer(&transfer).unwrap().unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(91)).await;
-    // Preparation refreshes the original expired quote itself. The settled
-    // approval stays settled and does not require another human authorization.
-    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
-        .await;
+    let _ = h.continue_compound(&id).await;
     let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(refreshed.steps[0], before.steps[0]);
     assert_eq!(
-        refreshed
-            .steps
-            .iter()
-            .map(|step| &step.step_id)
-            .collect::<Vec<_>>(),
-        before
-            .steps
-            .iter()
-            .map(|step| &step.step_id)
-            .collect::<Vec<_>>()
+        refreshed.steps[0].operation_id,
+        before.steps[0].operation_id
     );
-    assert_eq!(
-        refreshed.quote_revisions.len(),
-        before.quote_revisions.len() + 1
-    );
-    assert_eq!(refreshed.approved_bounds, before.approved_bounds);
-    assert_eq!(refreshed.plan_scope, before.plan_scope);
-    assert_eq!(refreshed.metadata["provider"], before.metadata["provider"]);
+    assert!(refreshed.quote_revisions.len() > before.quote_revisions.len());
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
+    let _ = h.continue_compound(&id).await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(
         h.chain.lock().unwrap().broadcasts,
         BTreeMap::from([(1, 2), (42161, 1)])
@@ -2304,32 +2200,30 @@ async fn stale_quote_after_approval_refreshes_same_transfer_under_existing_plan(
 #[tokio::test]
 async fn half_life_quote_keeps_allowance_step_and_refreshes_before_deposit() {
     let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    let quoted = h.state.transfer(&transfer).unwrap().unwrap();
+    h.chain.lock().unwrap().lose_source_ordinal = Some(1);
+    let (id, transfer) = h.start_compound("half-life").await;
+    let _ = h
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id: id.clone() },
+        )
+        .await;
+    let approved = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(
+        approved.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
     h.clock.freeze();
     h.clock.advance(std::time::Duration::from_secs(46));
-    let approval = h
-        .settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
-        .await;
-    assert_eq!(approval.status, Status::Completed);
-    assert_eq!(
-        approval.preview.unwrap().expires_at,
-        (gofin_domain::clock::Clock::now(&*h.clock) + chrono::Duration::seconds(90)).to_rfc3339()
-    );
-    let approved = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(approved.quote_revisions, quoted.quote_revisions);
-    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
-        .await;
+    let _ = h.continue_compound(&id).await;
     let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
     assert_eq!(
-        refreshed.quote_revisions.len(),
-        quoted.quote_revisions.len() + 1
+        refreshed.steps[0].operation_id,
+        approved.steps[0].operation_id
     );
-    assert_eq!(refreshed.approved_bounds, approved.approved_bounds);
+    assert!(refreshed.quote_revisions.len() > approved.quote_revisions.len());
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
+    let _ = h.continue_compound(&id).await;
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -2339,149 +2233,328 @@ async fn half_life_quote_keeps_allowance_step_and_refreshes_before_deposit() {
 }
 
 #[tokio::test]
-async fn non_sorted_fee_caps_keep_exact_plan_scope_through_mint() {
+async fn non_sorted_fee_caps_keep_exact_compound_scope_through_mint() {
     let h = Harness::new();
-    let mut request = h.quote_request(true);
-    request["bounds"]["fee_caps"]
-        .as_array_mut()
-        .unwrap()
-        .swap(0, 1);
-    request["bounds"]["input"] = json!({"minimum":"10000000","maximum":"10000000"});
-    request["bounds"]["maximum_source_debit"] = json!("10000000");
-    request["bounds"]["minimum_net_receipt"] =
-        json!({"asset":usdc_asset(42161).unwrap().asset_id(),"atoms":"9995000"});
-    let quoted = h.read("bridge.quotes", request.clone()).await;
-    let transfer = quoted["transfers"][0]["transfer_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let links: Vec<BridgeStepLink> =
-        serde_json::from_value(quoted["transfers"][0]["steps"].clone()).unwrap();
-    let inputs=links.iter().map(|s|json!({"transferId":transfer,"stepId":s.step_id,"stepKind":s.kind,"bounds":request["bounds"]})).collect::<Vec<_>>();
-    let plan = h.authorize(h.plan(&inputs, true)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = h.start_compound_options("unsorted-caps", true, true).await;
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
+    let result = h.continue_compound(&id).await;
+    assert!(result["error"].is_null(), "{result}");
     assert_eq!(h.status(&transfer).await["state"], "completed");
+    assert_eq!(
+        h.chain.lock().unwrap().destination_balance,
+        U256::from(9_995_000)
+    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn rejected_mint_candidate_releases_plan_claim_atomically_and_preserves_original_error() {
-    let h = Harness::new();
-    let (transfer, inputs) = h.quote(false).await;
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    let prior = h.state.transfer(&transfer).unwrap().unwrap();
-    {
-        let mut state = h.chain.lock().unwrap();
-        state.attestation_ready = true;
-        state.reject_mint_revalidation = true;
-    }
-    let failed = h.execute(&plan, 2, &inputs[2]).await.unwrap();
-    assert_eq!(failed.status, Status::Failed);
-    assert_eq!(failed.error.as_ref().unwrap().code, "RPC_REQUEST_FAILED");
-    assert!(failed.submission.is_none());
-    let saved = h.engine.status(&failed.id, true).await.unwrap();
-    assert_eq!(saved.status, Status::Failed);
-    let parent = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(parent.transit, prior.transit);
-    assert_eq!(
-        parent.steps[2].state,
-        gofin_domain::BridgeStepState::Unsubmitted
-    );
-    assert!(parent.steps[2].operation_id.is_none());
-    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
-    h.chain.lock().unwrap().reject_mint_revalidation = false;
-    let request = OperationRequest {
-        request_id: "explicit-next-mint-candidate".into(),
-        operation: "bridge.transfer".into(),
-        input: inputs[2].clone(),
-        run_id: None,
-    };
-    let recovered = h
-        .engine
-        .execute_financial_plan_step(&plan, "stage-2", request)
-        .await
-        .unwrap();
-    h.settle(recovered).await;
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(1, 2), (42161, 1)])
-    );
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_mint_candidate_preserves_transit_and_reuses_authority() {
+    Box::pin(async {
+        let h = Harness::new();
+        let (id, transfer) = h.start_compound("reject-mint").await;
+        let prior = h.state.transfer(&transfer).unwrap().unwrap();
+        {
+            let mut state = h.chain.lock().unwrap();
+            state.attestation_ready = true;
+            state.reject_mint_revalidation = true;
+        }
+        let status = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        let token = status
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let err = h.continuation_error(&id, token).await;
+        assert_eq!(err.code, "RPC_REQUEST_FAILED");
+        assert_eq!(
+            h.state.transfer(&transfer).unwrap().unwrap().transit,
+            prior.transit
+        );
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        h.chain.lock().unwrap().reject_mint_revalidation = false;
+        let _ = h.continue_compound(&id).await;
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
 }
 
 #[path = "support/cctp_solana_lifecycle.rs"]
 mod solana;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an explicitly built development CLI"]
 async fn cli_base_arbitrum_cctp_positive_lifecycle() {
-    assert!(
-        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
-        "real CLI is required"
-    );
-    let h = Harness::new_with_route(OffsetClock::realtime(), 8453, 42161);
-    let (transfer, inputs) = h.quote(false).await;
-    assert_eq!(inputs.len(), 3);
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    assert_eq!(h.status(&transfer).await["state"], "in_transit");
-    {
-        let mut state = h.chain.lock().unwrap();
-        let raw = state.source_message.as_ref().expect("burn message");
-        let message = decode_message(&hex_bytes(raw)).unwrap();
-        assert_eq!(message.source_domain, domain(8453).unwrap());
-        assert_eq!(message.destination_domain, domain(42161).unwrap());
-        assert_eq!(state.source_balance, U256::from(10_000_000));
-        assert_eq!(state.destination_balance, U256::ZERO);
-        state.attestation_ready = true;
-    }
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    let state = h.chain.lock().unwrap();
-    assert_eq!(state.destination_balance, U256::from(10_000_000));
-    assert_eq!(state.broadcasts, BTreeMap::from([(8453, 2), (42161, 1)]));
+    Box::pin(async {
+        assert!(
+            std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+            "real CLI is required"
+        );
+        let h = Harness::new_with_route(OffsetClock::realtime(), 8453, 42161);
+        let (id, transfer) = Box::pin(h.start_compound("cli-route")).await;
+        assert_eq!(h.status(&transfer).await["state"], "in_transit");
+        {
+            let mut state = h.chain.lock().unwrap();
+            let raw = state.source_message.as_ref().expect("burn message");
+            let message = decode_message(&hex_bytes(raw)).unwrap();
+            assert_eq!(message.source_domain, domain(8453).unwrap());
+            assert_eq!(message.destination_domain, domain(42161).unwrap());
+            assert_eq!(state.source_balance, U256::from(10_000_000));
+            assert_eq!(state.destination_balance, U256::ZERO);
+            state.attestation_ready = true;
+        }
+        let _ = Box::pin(h.continue_compound(&id)).await;
+        assert_eq!(Box::pin(h.status(&transfer)).await["state"], "completed");
+        let state = h.chain.lock().unwrap();
+        assert_eq!(state.destination_balance, U256::from(10_000_000));
+        assert_eq!(state.broadcasts, BTreeMap::from([(8453, 2), (42161, 1)]));
+    })
+    .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an explicitly built development CLI"]
 async fn cli_arbitrum_base_cctp_positive_lifecycle() {
+    Box::pin(async {
+        assert!(
+            std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+            "real CLI is required"
+        );
+        let h = Harness::new_with_route(OffsetClock::realtime(), 42161, 8453);
+        let (id, transfer) = Box::pin(h.start_compound("cli-route")).await;
+        assert_eq!(h.status(&transfer).await["state"], "in_transit");
+        {
+            let mut state = h.chain.lock().unwrap();
+            let raw = state.source_message.as_ref().expect("burn message");
+            let message = decode_message(&hex_bytes(raw)).unwrap();
+            assert_eq!(message.source_domain, domain(42161).unwrap());
+            assert_eq!(message.destination_domain, domain(8453).unwrap());
+            assert_eq!(state.source_balance, U256::from(10_000_000));
+            assert_eq!(state.destination_balance, U256::ZERO);
+            state.attestation_ready = true;
+        }
+        let _ = Box::pin(h.continue_compound(&id)).await;
+        assert_eq!(Box::pin(h.status(&transfer)).await["state"], "completed");
+        let state = h.chain.lock().unwrap();
+        assert_eq!(state.destination_balance, U256::from(10_000_000));
+        assert_eq!(state.broadcasts, BTreeMap::from([(42161, 2), (8453, 1)]));
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_compound_cctp_refreshes_fee_after_allowance_without_reapproval() {
     assert!(
         std::env::var_os("GOFIN_CCTP_CLI").is_some(),
         "real CLI is required"
     );
-    let h = Harness::new_with_route(OffsetClock::realtime(), 42161, 8453);
-    let (transfer, inputs) = h.quote(false).await;
-    assert_eq!(inputs.len(), 3);
-    let plan = h.authorize(h.plan(&inputs, false)).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    assert_eq!(h.status(&transfer).await["state"], "in_transit");
-    {
-        let mut state = h.chain.lock().unwrap();
-        let raw = state.source_message.as_ref().expect("burn message");
-        let message = decode_message(&hex_bytes(raw)).unwrap();
-        assert_eq!(message.source_domain, domain(42161).unwrap());
-        assert_eq!(message.destination_domain, domain(8453).unwrap());
-        assert_eq!(state.source_balance, U256::from(10_000_000));
-        assert_eq!(state.destination_balance, U256::ZERO);
-        state.attestation_ready = true;
-    }
-    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
-        .await;
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    let state = h.chain.lock().unwrap();
-    assert_eq!(state.destination_balance, U256::from(10_000_000));
-    assert_eq!(state.broadcasts, BTreeMap::from([(42161, 2), (8453, 1)]));
+    Box::pin(async {
+        let h=Harness::new();h.chain.lock().unwrap().source_fee_after_approval=true;
+        let mut bounds=h.bounds();bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(10_000_000),maximum:Quantity::from_u64(10_000_000)});bounds.maximum_source_debit=Some(Quantity::from_u64(10_000_000));bounds.minimum_net_receipt=Some(usdc_asset(42161).unwrap().amount(Quantity::from_u64(10_000_000)));bounds.latest_protocol_deadline=None;bounds.fee_caps.retain(|c|c.kind==FeeKind::Gas);for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;}
+        let input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"cctp-foreground".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let original=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-foreground","--json"]),BrokerRequest::Execute{request:request.clone()}).await;
+        if original["error"]["code"] == "BROKER_INTERNAL" { let tid=original["preview"]["binding"]["transfer_id"].as_str().unwrap(); eprintln!("CCTP saved transfer: {:#?}", h.state.transfer(tid).unwrap()); }
+        assert_ne!(original["error"]["code"], "BROKER_INTERNAL", "{original}");
+        let id=original["id"].as_str().unwrap().to_owned();
+        let transfer_id=original["preview"]["binding"]["transfer_id"].as_str().unwrap_or_else(||panic!("parent: {original}")).to_owned();
+        let transfer=h.state.transfer(&transfer_id).unwrap().unwrap();
+        assert_eq!(transfer.steps.iter().filter(|s|s.state==gofin_domain::BridgeStepState::Settled).count(),2,"{original}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
+        let attempts=Store::open(h.temp.path().join("cctp.sqlite")).unwrap().list_stage_attempts(&id).unwrap();
+        assert_eq!(attempts.len(),2);assert_ne!(attempts[0].candidate,attempts[1].candidate);
+        let status=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        assert_eq!(status["outcome"]["transfer"],"in_transit","{status}");assert_eq!(status["outcome"]["phase"],"in_progress");
+        let repeated=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-foreground","--json"]),BrokerRequest::Execute{request}).await;assert_eq!(repeated["id"],id);assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
+        let fees={let state=h.chain.lock().unwrap();state.transactions.iter().filter(|((chain,_),_)|*chain==1).map(|(_, (tx,_))|tx["maxPriorityFeePerGas"].as_str().unwrap().to_owned()).collect::<std::collections::BTreeSet<_>>()};
+        assert_eq!(fees,std::collections::BTreeSet::from(["0x59682f00".to_owned(),"0xb2d05e00".to_owned()]));
+        // Independent destination funds appear without a correlatable CCTP
+        // mint; a separately approved Hyperliquid deposit may spend them.
+        h.chain.lock().unwrap().destination_balance=U256::from(10_000_000);
+        let deposit=json!({"requestId":"destination-unattributed","account":"model-hl","wallet":"model-wallet","amount":"10","maxFeeEth":"0.001","maxAmountUsdc":"10"});
+        let separate=h.call(args(&["execute","hyperliquid.account.deposit","--input",&deposit.to_string(),"--id","destination-unattributed","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"destination-unattributed".into(),operation:"hyperliquid.account.deposit".into(),input:deposit,run_id:None}}).await;
+        assert!(!separate["submission"].is_null(),"{separate}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),2);
+        let still=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        assert_eq!(still["outcome"]["transfer"],"in_transit","{still}");
+        let probe=json!({"request_id":"bridge-source-probe","wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.001"});
+        let independent=h.call(args(&["execute","wallet.transfer","--input",&probe.to_string(),"--id","bridge-source-probe","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"bridge-source-probe".into(),operation:"wallet.transfer".into(),input:probe,run_id:None}}).await;
+        assert!(!independent["submission"].is_null(),"{independent}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),3);
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let scenario=std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_default();let evidence=if scenario=="outcome.a17" {json!({"scenario":scenario,"approval_count":2,"external_submission_count":3,"probe_approval_count":1,"probe_submission_count":1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false})}else{json!({"scenario":"outcome.a18","approval_count":1,"external_submission_count":2,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false})};std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+    }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_cctp_reauthorizes_remaining_gas_without_repeating_allowance() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    Box::pin(async {
+        let h=Harness::new();h.chain.lock().unwrap().source_large_fee_after_approval=true;
+        let mut bounds=h.bounds();bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(10_000_000),maximum:Quantity::from_u64(10_000_000)});bounds.maximum_source_debit=Some(Quantity::from_u64(10_000_000));bounds.minimum_net_receipt=Some(usdc_asset(42161).unwrap().amount(Quantity::from_u64(10_000_000)));bounds.latest_protocol_deadline=None;bounds.fee_caps.retain(|c|c.kind==FeeKind::Gas);for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;if cap.asset==(gofin_bridge::EvmAsset{chain_id:1,token:None,decimals:18}).asset_id() {cap.maximum=Quantity::new("2500000000000000").unwrap();}}
+        let mut input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"cctp-reauth".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let original=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-reauth","--json"]),BrokerRequest::Execute{request}).await;
+        let id=original["id"].as_str().unwrap().to_owned();let transfer_id=original["preview"]["binding"]["transfer_id"].as_str().unwrap().to_owned();
+        let before=h.state.transfer(&transfer_id).unwrap().unwrap();assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&1),"{original}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);
+        let token=original.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap_or_else(||panic!("{original}"));
+        input["bounds"]["fee_caps"][0]["maximum"]=json!("10000000000000000");input["actionDeadline"]=json!(chrono::Utc::now().timestamp() as u64+900);
+        let result=h.call(args(&["operations","reauthorize",&id,"--token",token,"--input",&input.to_string(),"--json"]),BrokerRequest::ReauthorizeOperation{id:id.clone(),token:token.into(),input}).await;
+        assert_eq!(result["reauthorization"],"approved","{result}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),2);assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));let after=h.state.transfer(&transfer_id).unwrap().unwrap();assert_eq!(before.steps[0].operation_id,after.steps[0].operation_id);
+    }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_cctp_mint_continues_original_bridge_after_attestation() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    Box::pin(async {
+        let h=Harness::new();h.chain.lock().unwrap().source_fee_after_approval=true;
+        let mut bounds=h.bounds();bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(10_000_000),maximum:Quantity::from_u64(10_000_000)});bounds.maximum_source_debit=Some(Quantity::from_u64(10_000_000));bounds.minimum_net_receipt=Some(usdc_asset(42161).unwrap().amount(Quantity::from_u64(10_000_000)));bounds.latest_protocol_deadline=None;bounds.fee_caps.retain(|c|c.kind==FeeKind::Gas);for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;}
+        let input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"cctp-foreground".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let original=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-foreground","--json"]),BrokerRequest::Execute{request:request.clone()}).await;
+        if original["error"]["code"] == "BROKER_INTERNAL" { let tid=original["preview"]["binding"]["transfer_id"].as_str().unwrap(); eprintln!("CCTP saved transfer: {:#?}", h.state.transfer(tid).unwrap()); }
+        assert_ne!(original["error"]["code"], "BROKER_INTERNAL", "{original}");
+        let id=original["id"].as_str().unwrap().to_owned();
+        let transfer_id=original["preview"]["binding"]["transfer_id"].as_str().unwrap_or_else(||panic!("parent: {original}")).to_owned();
+        let transfer=h.state.transfer(&transfer_id).unwrap().unwrap();
+        assert_eq!(transfer.steps.iter().filter(|s|s.state==gofin_domain::BridgeStepState::Settled).count(),2,"{original}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
+        let attempts=Store::open(h.temp.path().join("cctp.sqlite")).unwrap().list_stage_attempts(&id).unwrap();
+        assert_eq!(attempts.len(),2);assert_ne!(attempts[0].candidate,attempts[1].candidate);
+        let status=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        assert_eq!(status["outcome"]["transfer"],"in_transit","{status}");assert_eq!(status["outcome"]["phase"],"in_progress");
+        let repeated=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-foreground","--json"]),BrokerRequest::Execute{request}).await;assert_eq!(repeated["id"],id);assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
+        let fees={let state=h.chain.lock().unwrap();state.transactions.iter().filter(|((chain,_),_)|*chain==1).map(|(_, (tx,_))|tx["maxPriorityFeePerGas"].as_str().unwrap().to_owned()).collect::<std::collections::BTreeSet<_>>()};
+        assert_eq!(fees,std::collections::BTreeSet::from(["0x59682f00".to_owned(),"0xb2d05e00".to_owned()]));
+        h.chain.lock().unwrap().attestation_ready=true;
+        let observed=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        let token=observed.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap_or_else(||panic!("missing continuation: {observed}"));
+        let continued=h.call(args(&["operations","continue",&id,"--token",token,"--json"]),BrokerRequest::ContinueOperation{id:id.clone(),token:token.into()}).await;
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1,"{continued}");
+        assert_eq!(h.chain.lock().unwrap().broadcasts.get(&42161),Some(&1),"{continued}");
+        let final_status=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        assert_eq!(final_status["outcome"]["transfer"],"available","{final_status}");
+        assert_eq!(h.state.transfer(&transfer_id).unwrap().unwrap().state,gofin_domain::BridgeTransferState::Completed);
+        assert_eq!(h.chain.lock().unwrap().destination_balance,U256::from(10_000_000));
+        let scans={let mut state=h.chain.lock().unwrap();state.reject_destination_log_scan=true;state.destination_log_scans};
+        let restarted=h.restart();
+        let again=restarted.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        assert_eq!(again["outcome"]["transfer"],"available","{again}");
+        assert_eq!(restarted.chain.lock().unwrap().destination_log_scans,scans);
+        assert_eq!(restarted.approvals.0.load(Ordering::SeqCst),1);
+    }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires guarded owned CCTP forks and an explicitly built development CLI"]
+async fn owned_fork_cli_cctp_fee_refresh_and_remaining_reauthorization() {
+    assert!(std::env::var_os("GOFIN_CCTP_CLI").is_some());
+    Box::pin(async {
+        let configs:Vec<Value>=serde_json::from_str(&std::env::var("GOFIN_CCTP_FORKS").expect("owned fork configuration required")).unwrap();
+        let mut forks=BTreeMap::new();for config in configs {let fork=Arc::new(owned_fork::Fork::new(&config).await.unwrap());forks.insert(fork.chain(),fork);}
+        assert!(forks.contains_key(&1)&&forks.contains_key(&42161));
+        forks[&1].fund_usdc(&usdc_asset(1).unwrap().token.unwrap()).await.unwrap();
+        let other=lower_address(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap().address());
+        forks[&1].mutate("anvil_setBalance",json!([other,"0x56bc75e2d63100000"])).await.unwrap();
+        for large in [false,true] {
+            let chain=Arc::new(Mutex::new(ChainState{owned_forks:Some(forks.clone()),source_fee_after_approval:!large,source_large_fee_after_approval:large,..Default::default()}));
+            let h=Harness::build(tempfile::tempdir().unwrap(),chain.clone(),Arc::new(Approvals::default()),Arc::new(Iris::new(chain)),OffsetClock::realtime());
+            assert_eq!(h.wallet,owned_fork::OWNER);
+            let (id,transfer)=h.start_compound(if large {"fork-reauthorize"} else {"fork-refresh"}).await;
+            let before=h.state.transfer(&transfer).unwrap().unwrap();
+            assert_eq!(before.steps[0].state,gofin_domain::BridgeStepState::Settled);
+            if large {
+                assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&1));
+                let status=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+                assert_eq!(status["outcome"]["next_action"]["code"],"reauthorize","{status}");
+                let token=status.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap();
+                let mut input=status["input"].clone();input["bounds"]["fee_caps"][0]["maximum"]=json!("100000000000000000");input["actionDeadline"]=json!(chrono::Utc::now().timestamp() as u64+900);
+                let result=h.call(args(&["operations","reauthorize",&id,"--token",token,"--input",&input.to_string(),"--json"]),BrokerRequest::ReauthorizeOperation{id:id.clone(),token:token.into(),input}).await;
+                assert_eq!(result["reauthorization"],"approved","{result}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),2);
+                let revised=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;assert!(revised["error"].is_null(),"{revised}");
+            } else {assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);}
+            let after=h.state.transfer(&transfer).unwrap().unwrap();assert_eq!(after.steps[0].operation_id,before.steps[0].operation_id);
+            assert_eq!(after.steps[1].state,gofin_domain::BridgeStepState::Settled,"{after:?}");
+            assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
+            let attempts=Store::open(h.temp.path().join("cctp.sqlite")).unwrap().list_stage_attempts(&id).unwrap();assert_eq!(attempts.len(),2);
+            assert_ne!(attempts[0].candidate.as_ref().unwrap().pointer("/binding/transaction/max_priority_fee_per_gas"),attempts[1].candidate.as_ref().unwrap().pointer("/binding/transaction/max_priority_fee_per_gas"));
+            let probe_id=format!("fork-probe-{large}-same");
+            let input=json!({"request_id":probe_id,"wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.00001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.1"});
+            let request=OperationRequest{request_id:probe_id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None};
+            let result=h.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&probe_id,"--json"]),BrokerRequest::Execute{request}).await;
+            assert!(!result["submission"].is_null(),"{result}");
+            h.chain.lock().unwrap().alternate_fork_signer=true;
+            let h=h.restart();assert_ne!(h.wallet,owned_fork::OWNER);
+            let probe_id=format!("fork-probe-{large}-other");
+            let input=json!({"request_id":probe_id,"wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.00001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.1"});
+            let request=OperationRequest{request_id:probe_id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None};
+            let result=h.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&probe_id,"--json"]),BrokerRequest::Execute{request}).await;
+            assert!(!result["submission"].is_null(),"{result}");
+            assert_eq!(h.approvals.0.load(Ordering::SeqCst),if large {4}else{3});
+            assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(1,4)]));
+        }
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+            std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"outcome.a18","approval_count":3,"external_submission_count":4,"probe_approval_count":4,"probe_submission_count":4,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"fork_scope":"guarded Ethereum and Arbitrum Anvil forks, public synthetic signer, no live writes","stage_submissions":{"allowance":2,"burn":2},"probe_scope":"same source wallet and a different synthetic wallet on the same source chain"})).unwrap()).unwrap();
+        }
+    }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_preapproval_cctp_failure_continues_same_original_once() {
+    assert!(std::env::var_os("GOFIN_CCTP_CLI").is_some());
+    Box::pin(async {
+        let h=Harness::new();h.chain.lock().unwrap().reject_preparation_reads=true;
+        let mut bounds=h.bounds();bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(10_000_000),maximum:Quantity::from_u64(10_000_000)});bounds.maximum_source_debit=Some(Quantity::from_u64(10_000_000));bounds.minimum_net_receipt=Some(usdc_asset(42161).unwrap().amount(Quantity::from_u64(10_000_000)));bounds.fee_caps.retain(|c|c.kind==FeeKind::Gas);for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;}
+        let input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"cctp-preapproval-failure".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let first=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-preapproval-failure","--json"]),BrokerRequest::Execute{request:request.clone()}).await;
+        assert_eq!(first["outcome"]["dispatch"],"not_dispatched","{first}");let id=first["id"].as_str().unwrap().to_owned();let token=first.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap_or_else(||panic!("{first}"));
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),0);assert!(h.chain.lock().unwrap().broadcasts.is_empty());
+        {let mut state=h.chain.lock().unwrap();state.reject_preparation_reads=false;state.attestation_ready=true;}
+        let continued=h.call(args(&["operations","continue",&id,"--token",token,"--json"]),BrokerRequest::ContinueOperation{id:id.clone(),token:token.into()}).await;
+        assert_eq!(continued["id"],id,"{continued}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);
+        let prior=h.chain.lock().unwrap().broadcasts.clone();assert_eq!(prior,BTreeMap::from([(1,2),(42161,1)]));
+        let repeated=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-preapproval-failure","--json"]),BrokerRequest::Execute{request}).await;assert_eq!(repeated["id"],id);
+        let _=h.call(args(&["operations","continue",&id,"--token",token,"--json"]),BrokerRequest::ContinueOperation{id,token:token.into()}).await;
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts,prior);
+    }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_resumed_cctp_disconnect_after_admission_stops_later_stages() {
+    let binary = std::env::var("GOFIN_CCTP_CLI").expect("real CLI required");
+    Box::pin(async {
+        let h=Harness::new();h.chain.lock().unwrap().reject_preparation_reads=true;
+        let mut bounds=h.bounds();bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(10_000_000),maximum:Quantity::from_u64(10_000_000)});bounds.maximum_source_debit=Some(Quantity::from_u64(10_000_000));bounds.minimum_net_receipt=Some(usdc_asset(42161).unwrap().amount(Quantity::from_u64(10_000_000)));bounds.fee_caps.retain(|c|c.kind==FeeKind::Gas);for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;}
+        let input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["cctp"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"cctp-disconnect-resume".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let first=h.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","cctp-disconnect-resume","--json"]),BrokerRequest::Execute{request}).await;
+        let id=first["id"].as_str().unwrap().to_owned();let token=first.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap().to_owned();
+        let release={let mut state=h.chain.lock().unwrap();state.reject_preparation_reads=false;state.stall_source_response=true;state.release_source_response.clone()};
+        let socket=h.client.get().unwrap().socket.clone();
+        let mut child=tokio::process::Command::new(binary).args(["--identity","synthetic-cctp","--build-id","synthetic-cctp-build","operations","continue",&id,"--token",&token,"--json"]).env("GOFIN_DEV_IDENTITY","synthetic-cctp").env("GOFIN_DEV_BUILD_ID","synthetic-cctp-build").env("GOFIN_DEV_SOCKET",socket).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {loop {if h.chain.lock().unwrap().broadcasts.get(&1)==Some(&1){break}tokio::time::sleep(std::time::Duration::from_millis(5)).await;}}).await.unwrap();
+        child.kill().await.unwrap();let _=child.wait().await;tokio::time::sleep(std::time::Duration::from_millis(250)).await;release.store(true,Ordering::SeqCst);tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(1,1)]));
+        let _=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
+        let _=h.call(args(&["operations","continue",&id,"--token",&token,"--json"]),BrokerRequest::ContinueOperation{id,token}).await;
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(1,1)]));
+    }).await
 }

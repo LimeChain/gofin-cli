@@ -38,12 +38,11 @@ struct PreparationPrices {
 impl UsdPriceSource for PreparationPrices {
     async fn quotes(&self, assets: &[gofin_domain::AssetId]) -> Result<Vec<UsdQuote>> {
         if self.estimated.load(Ordering::SeqCst) {
-            // The late policy batch must overlap frozen-gas pricing.
+            // Optional valuation after gas estimation.
             self.final_calls.fetch_add(1, Ordering::SeqCst);
             self.final_prices.wait().await;
         } else {
-            // Quote prices cannot finish unless the independent finite-cap
-            // batch has also started. No elapsed-time threshold is needed.
+            // Optional quote valuation remains independent of native caps.
             self.initial_calls.fetch_add(1, Ordering::SeqCst);
             self.initial.wait().await;
         }
@@ -59,7 +58,7 @@ impl UsdPriceSource for PreparationPrices {
 }
 
 #[tokio::test]
-async fn allowance_preparation_overlaps_independent_prices_and_checks_token_once() {
+async fn allowance_preparation_checks_token_once_with_optional_valuation() {
     for missing_code in [false, true] {
         let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::ZERO);
         let quote = h
@@ -104,8 +103,8 @@ async fn allowance_preparation_overlaps_independent_prices_and_checks_token_once
         );
         let prices = Arc::new(PreparationPrices {
             estimated,
-            initial: tokio::sync::Barrier::new(2),
-            final_prices: tokio::sync::Barrier::new(2),
+            initial: tokio::sync::Barrier::new(1),
+            final_prices: tokio::sync::Barrier::new(1),
             initial_calls: AtomicUsize::new(0),
             final_calls: AtomicUsize::new(0),
         });
@@ -123,7 +122,7 @@ async fn allowance_preparation_overlaps_independent_prices_and_checks_token_once
         )
         .await
         .expect("independent observations must overlap, not deadlock");
-        assert_eq!(prices.initial_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(prices.initial_calls.load(Ordering::SeqCst), 0);
         assert_eq!(*rpc.code_reads.lock().unwrap(), vec![ETH_USDC]);
         if missing_code {
             assert_eq!(result.unwrap_err().code, "CONTRACT_UNAVAILABLE");
@@ -151,7 +150,7 @@ async fn allowance_preparation_overlaps_independent_prices_and_checks_token_once
                     .map(|p| (&p.asset, &p.usd_micros_per_unit, &p.unit_atoms))
                     .collect::<Vec<_>>()
             );
-            assert_eq!(prices.final_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(prices.final_calls.load(Ordering::SeqCst), 1);
         }
         assert_eq!(h.source.broadcasts(), 0);
         assert_eq!(h.approval.0.load(Ordering::SeqCst), 0);
@@ -208,8 +207,7 @@ impl UsdPriceSource for RevalidationPrices {
         Prices.quotes(assets).await
     }
     async fn quote(&self, asset: &gofin_domain::AssetId) -> Result<UsdQuote> {
-        // Frozen-gas pricing must start alongside the quote, selected-cap and
-        // policy batches. The later selected-cap USD ceiling keeps its ordering.
+        // Any individual price read is optional presentation evidence.
         if self.singles.fetch_add(1, Ordering::SeqCst) == 0 {
             self.phases.wait().await;
         }
@@ -276,7 +274,7 @@ async fn allowance_revalidation_deduplicates_exact_assets_and_overlaps_chains_an
             .unwrap(),
         );
         let prices = Arc::new(RevalidationPrices {
-            phases: tokio::sync::Barrier::new(4),
+            phases: tokio::sync::Barrier::new(1),
             singles: AtomicUsize::new(0),
             batches: AtomicUsize::new(0),
         });
@@ -318,8 +316,8 @@ async fn allowance_revalidation_deduplicates_exact_assets_and_overlaps_chains_an
                     valuation.maximum_fee_usd_micros,
                     prior.maximum_fee_usd_micros
                 );
-                assert_eq!(prices.batches.load(Ordering::SeqCst), 3);
-                assert_eq!(prices.singles.load(Ordering::SeqCst), 2);
+                assert_eq!(prices.batches.load(Ordering::SeqCst), 1);
+                assert_eq!(prices.singles.load(Ordering::SeqCst), 0);
                 // Fresh every revalidation, even though source/destination each
                 // occurs again in refund scope. No cross-attempt metadata cache.
                 for (rpc, count) in [(&source, 11), (&destination, 4)] {

@@ -301,13 +301,6 @@ impl KrakenProfile {
             },
         ];
         self.compound_margin_admission(&admission).await?;
-        if current
-            .valuation
-            .as_ref()
-            .is_some_and(|v| !v.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut current);
-        }
         Ok(current)
     }
     pub(crate) async fn reconcile_derivative_unified(

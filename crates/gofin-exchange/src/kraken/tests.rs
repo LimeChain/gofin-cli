@@ -30,6 +30,109 @@ struct Captured {
     body: Vec<u8>,
 }
 
+#[tokio::test]
+async fn stalled_response_does_not_block_next_throttled_signed_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = channel::channel();
+    let server = std::thread::spawn(move || {
+        fn nonce(stream: &std::net::TcpStream) -> u64 {
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            reqwest::Url::parse(&format!(
+                "https://gofin.invalid/?{}",
+                String::from_utf8(body).unwrap()
+            ))
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "nonce")
+            .unwrap()
+            .1
+            .parse()
+            .unwrap()
+        }
+        let (mut first, _) = listener.accept().unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let first_nonce = nonce(&first);
+        let _ = arrived_tx.send(());
+        let (mut second, _) = listener.accept().unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let second_nonce = nonce(&second);
+        assert!(second_nonce > first_nonce);
+        let body = b"{\"error\":[],\"result\":{\"marker\":\"second\"}}";
+        write!(
+            second,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        second.write_all(body).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body = b"{\"error\":[],\"result\":{\"marker\":\"first\"}}";
+        write!(
+            first,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        first.write_all(body).unwrap();
+    });
+    let client = KrakenClient::loopback(Arc::new(Nonces(AtomicU64::new(1))), base).unwrap();
+    let first_client = client.clone();
+    let first = tokio::spawn(async move {
+        first_client
+            .request(
+                KrakenEndpoint::KrakenPrivatePostBalance,
+                Some(credentials()),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+    });
+    arrived_rx.await.unwrap();
+    let second = tokio::time::timeout(
+        Duration::from_secs(4),
+        client.request(
+            KrakenEndpoint::KrakenPrivatePostBalance,
+            Some(credentials()),
+            serde_json::json!({}),
+            None,
+        ),
+    )
+    .await
+    .expect("independent response must not wait for the first response")
+    .unwrap();
+    assert!(
+        matches!(second, KrakenResponse::Json(ref body) if body["result"]["marker"] == "second")
+    );
+    release_tx.send(()).unwrap();
+    assert!(
+        matches!(first.await.unwrap().unwrap(), KrakenResponse::Json(ref body) if body["result"]["marker"] == "first")
+    );
+    server.join().unwrap();
+}
+
 fn captured_nonce(wire: &Captured) -> u64 {
     if wire.headers["content-type"] == "application/json" {
         let body: Value = serde_json::from_slice(&wire.body).unwrap();

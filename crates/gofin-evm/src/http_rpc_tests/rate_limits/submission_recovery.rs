@@ -256,7 +256,7 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
         assert!(receipt.success);
         assert_eq!(receipt.block_number, 10);
         assert_eq!(receipt.confirmations, 2);
-        assert_eq!(receipt.fee, U256::from(210_000_000_000_u64));
+        assert_eq!(receipt.fee, Some(U256::from(210_000_000_000_u64)));
     }
     assert_eq!(std::fs::read(&journal.path).unwrap(), original_bytes);
     assert_eq!(*events.lock().unwrap(), vec!["sign", "persist", "accept"]);

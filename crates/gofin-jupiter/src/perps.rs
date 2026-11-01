@@ -2053,7 +2053,7 @@ impl PerpsAdapter {
             expected: vec![],
             locks: vec![resource, request_lock.clone(), position_lock.clone()],
         };
-        let (valuation, _) = crate::adapter::valuation(
+        let valuation = crate::adapter::valuation(
             self.prices.clone(),
             asset("native", 9),
             0,
@@ -2062,7 +2062,9 @@ impl PerpsAdapter {
             maximum_network_fee_lamports,
             wallet.address(),
         )
-        .await?;
+        .await
+        .ok()
+        .map(|(valuation, _)| valuation);
         let binding = json!({
             "operation":OP_LIMIT_UPDATE,
             "wallet_address":wallet.address(),
@@ -2114,7 +2116,7 @@ impl PerpsAdapter {
             ],
             observed_at: Utc::now().to_rfc3339(),
             expires_at: (Utc::now() + ChronoDuration::seconds(20)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             action_deadline: None,
             operation_version: 1,
@@ -3929,11 +3931,18 @@ impl Adapter for PerpsAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),
@@ -4191,11 +4200,18 @@ async fn reconcile_limit_update(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
-        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-            status: Status::Pending,
-            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-            verified: None,
-        }),
+        ReceiptOutcome::ExpiredWithoutInclusion {
+            signature,
+            message_sha256,
+            reason,
+            proof,
+        } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+            submission,
+            &signature,
+            &message_sha256,
+            &reason,
+            &proof,
+        ),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason}),

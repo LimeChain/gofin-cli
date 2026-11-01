@@ -142,10 +142,69 @@ pub fn observe_request_with_details<S: AsyncRead + AsyncWrite + Unpin, F: Future
     }
 }
 
+/// A disconnected financial caller closes admission, not an already admitted
+/// dispatch. This requires negotiated full-duplex clients; legacy half-close is
+/// never interpreted as evidence of financial failure.
+pub async fn observe_financial_request<S: AsyncRead + AsyncWrite + Unpin, F: Future>(
+    stream: &mut S,
+    enabled: bool,
+    details: bool,
+    work: F,
+) -> F::Output {
+    let invocation = execution_progress::Invocation::new(Duration::from_secs(300));
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let observed = invocation.scope(observe_with_details(
+        &mut writer,
+        enabled,
+        details,
+        Box::pin(work),
+    ));
+    tokio::pin!(observed);
+    let mut unexpected = [0];
+    tokio::select! {
+        result = &mut observed => result,
+        _ = reader.read(&mut unexpected) => {
+            invocation.cancel();
+            // The engine sees cancellation before any later admission. Retain
+            // the in-flight future so its submission can finish journaling.
+            observed.await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn disconnected_compound_invocation_finishes_admitted_work_but_closes_admission() {
+        let (mut server, client) = tokio::io::duplex(1024);
+        let (admitted, admission) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(async move {
+            observe_financial_request(&mut server, false, false, async {
+                execution_progress::ensure_invocation_active().unwrap();
+                admitted.send(()).unwrap();
+                resumed.await.unwrap();
+                // The admitted immutable submission finishes before another
+                // stage considers admission, even though its client is gone.
+                tokio::task::yield_now().await;
+                (
+                    "admitted dispatch finished",
+                    execution_progress::ensure_invocation_active(),
+                )
+            })
+            .await
+        });
+        admission.await.unwrap();
+        drop(client);
+        tokio::task::yield_now().await;
+        resume.send(()).unwrap();
+        let (completed, next) = serving.await.unwrap();
+        assert_eq!(completed, "admitted dispatch finished");
+        assert_eq!(next.unwrap_err().code, "INVOCATION_ENDED");
+    }
 
     #[test]
     fn kamino_reads_negotiate_cancellation_but_financial_actions_do_not() {

@@ -389,6 +389,18 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
 
 #[async_trait]
 impl Adapter for WalletFamilyRouter {
+    fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
+        self.prepared(prepared)
+            .is_ok_and(|adapter| adapter.supports_independent_submission(prepared))
+    }
+    fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
+        record
+            .preview
+            .as_ref()
+            .and_then(|prepared| self.prepared(prepared).ok())
+            .and_then(|adapter| adapter.observation_horizon(record))
+    }
+
     fn diagnostics(&self) -> Value {
         let mut snapshots = Vec::new();
         for snapshot in self.evm.iter().map(|adapter| adapter.diagnostics()).chain(

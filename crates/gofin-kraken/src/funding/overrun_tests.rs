@@ -331,15 +331,11 @@ async fn funding_setup_earn_and_withdrawal_overruns_persist_exact_cost_without_r
         assert!(result.effects.is_none());
         assert_eq!(result.preview.as_ref().unwrap().input, original_input);
         let store = gofin_store::Store::open(&path).unwrap();
-        assert_eq!(
-            store.unresolved_consumption_usd(&result.id).unwrap(),
-            Some("2000000".into())
-        );
-        assert!(store.reservation_count(&result.id).unwrap() > 0);
-        let proof = store
-            .unresolved_consumption_proof(&result.id)
-            .unwrap()
-            .unwrap();
+        let proof = gofin_domain::unresolved_consumption::read(
+            result.last_reconciliation_evidence.as_ref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proof.submission, result.submission.clone().unwrap());
         assert_eq!(proof.costs.len(), 1);
         assert!(
@@ -352,12 +348,12 @@ async fn funding_setup_earn_and_withdrawal_overruns_persist_exact_cost_without_r
         let duplicate = restarted.status(&result.id, true).await.unwrap();
         assert_eq!(duplicate.status, Status::Unknown);
         assert!(duplicate.effects.is_none());
-        let store = gofin_store::Store::open(&path).unwrap();
-        assert_eq!(
-            store.unresolved_consumption_usd(&result.id).unwrap(),
-            Some("2000000".into())
-        );
-        assert!(store.reservation_count(&result.id).unwrap() > 0);
+        let retained = gofin_domain::unresolved_consumption::read(
+            duplicate.last_reconciliation_evidence.as_ref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retained.submission, proof.submission);
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     }
 }
@@ -404,23 +400,17 @@ async fn earn_joint_only_cap_violation_retains_zero_extra_watermark_and_both_pro
     let result = running.execute(request(Family::Joint)).await.unwrap();
     assert_eq!(result.status, Status::Unknown, "{:?}", result.error);
     assert!(result.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("0".into())
-    );
-    let proof = store
-        .unresolved_consumption_proof(&result.id)
-        .unwrap()
-        .unwrap();
+    let proof = gofin_domain::unresolved_consumption::read(
+        result.last_reconciliation_evidence.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         proof.reason,
         gofin_domain::unresolved_consumption::ConsumptionReason::ProvenUnsettledCost
     );
     assert_eq!(proof.costs.len(), 2);
     assert!(proof.costs.iter().all(|effect|matches!(effect,FinancialEffect::Cost{amount,..}if amount.atoms.to_decimal(36)=="0.00075")));
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
-    drop(store);
     drop(running);
     let recovered = engine(&path, venue.clone())
         .status(&result.id, true)
@@ -428,12 +418,13 @@ async fn earn_joint_only_cap_violation_retains_zero_extra_watermark_and_both_pro
         .unwrap();
     assert_eq!(recovered.status, Status::Unknown);
     assert!(recovered.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("0".into())
+    assert!(
+        gofin_domain::unresolved_consumption::read(
+            recovered.last_reconciliation_evidence.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_some()
     );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
 }
 struct RisingQuotes(AtomicUsize);
@@ -454,7 +445,7 @@ impl gofin_pricing::UsdPriceSource for RisingQuotes {
     }
 }
 #[tokio::test]
-async fn funding_quote_refresh_above_frozen_usd_ceiling_aborts_before_native_dispatch() {
+async fn funding_quote_refresh_does_not_block_native_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let venue = Venue::new(Family::Claim);
     let profile = KrakenProfile::new(KrakenProduct::Spot, vec![account()], venue.clone())
@@ -472,10 +463,9 @@ async fn funding_quote_refresh_above_frozen_usd_ceiling_aborts_before_native_dis
     )
     .unwrap();
     let result = engine.execute(request(Family::Claim)).await.unwrap();
-    assert_eq!(result.status, Status::Failed, "{:?}", result.error);
-    assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
-    assert!(result.submission.is_none());
-    assert_eq!(result.error.as_ref().unwrap().code, "VALUE_BOUND_EXCEEDED");
+    assert_eq!(result.status, Status::Unknown, "{:?}", result.error);
+    assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
+    assert!(result.submission.is_some());
 }
 
 #[tokio::test]
@@ -592,99 +582,6 @@ async fn bounded_earn_allocation_and_deallocation_engine_settle_cash_position_an
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     }
 }
-#[tokio::test]
-async fn exact_named_earn_deallocation_plan_keeps_declared_gross_movement_and_net_receipt() {
-    use gofin_domain::financial_plans::*;
-    for goal in ["0.09975", "0.1"] {
-        let dir = tempfile::tempdir().unwrap();
-        let venue = Venue::new(Family::Deallocate);
-        venue.bounded_fees.store(true, Ordering::SeqCst);
-        let path = dir.path().join("SYNTHETIC-plan.sqlite3");
-        let running = engine(&path, venue.clone());
-        let req = request(Family::Deallocate);
-        let prepared = running.preview(&req.operation, &req.input).await.unwrap();
-        let asset = prepared.intent.maximum_costs[0].amount.asset.clone();
-        let spec = FinancialPlanSpec {
-            summary: None,
-            version: 1,
-            name: "Synthetic exact Earn deallocation".into(),
-            steps: vec![FinancialPlanStepSpec {
-                step_id: "deallocate".into(),
-                operation: req.operation.clone(),
-                input: req.input.clone(),
-                permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":[{"resource":account().resource,"asset":asset}]}),
-                completion: FinancialStepCompletion {
-                    principal_spend: None,
-                    minimum_net_receipt: Some(ResourceAmount {
-                        resource: account().resource,
-                        amount: Amount {
-                            asset: asset.clone(),
-                            atoms: Quantity::from_decimal(goal, 36).unwrap(),
-                        },
-                    }),
-                    operation_succeeded: true,
-                },
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: prepared.intent.debits.clone(),
-                maximum_costs: prepared.intent.maximum_costs.clone(),
-            },
-        };
-        let consent = running
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "SYNTHETIC-Earn-plan".into(),
-                plan: spec,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            })
-            .await
-            .unwrap();
-        let result = running
-            .execute_financial_plan_step(&consent.plan_id, "deallocate", req.clone())
-            .await
-            .unwrap();
-        assert_eq!(result.status, Status::Completed, "{:?}", result.error);
-        let original_effects = result.effects.clone();
-        let prepared = result.preview.as_ref().unwrap();
-        assert_eq!(prepared.binding[PLAN_METADATA_KEY]["exact_input"], true);
-        assert!(
-            prepared.valuation.as_ref().unwrap().movement_usd_micros
-                >= Quantity::from_u64(200000000)
-        );
-        let status = running
-            .financial_plan_status(&consent.plan_id)
-            .await
-            .unwrap();
-        assert_eq!(status.usage.consumed_costs.len(), 2);
-        assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            status.steps[0].state,
-            if goal == "0.09975" {
-                FinancialPlanStepProgressState::Completed
-            } else {
-                FinancialPlanStepProgressState::Blocked
-            }
-        );
-        drop(running);
-        let restarted = engine(&path, venue.clone());
-        let recovered = restarted.status(&result.id, true).await.unwrap();
-        assert_eq!(recovered.effects, original_effects);
-        let mut second = req;
-        second.request_id = "SYNTHETIC-distinct-second-noncash-attempt".into();
-        assert!(
-            restarted
-                .execute_financial_plan_step(&consent.plan_id, "deallocate", second)
-                .await
-                .is_err(),
-            "completed or substantively spent exact noncash source cannot execute again under this consent"
-        );
-        assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-    }
-}
-
 #[tokio::test]
 async fn funding_amount_fee_recipient_and_native_quote_token_cannot_retarget_original_request() {
     let dir = tempfile::tempdir().unwrap();

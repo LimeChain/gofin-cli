@@ -102,130 +102,6 @@ fn approval(review: &Value, action: &str) -> Value {
         "review_hash":binding_hash(review).unwrap(),"review":review})).unwrap()})
 }
 
-fn assert_pending(store: &Store, pending: bool) {
-    assert_eq!(
-        resource_has_pending_operations(store, &ResourceId(RESOURCE.into())).unwrap(),
-        pending
-    );
-    assert_eq!(
-        hyperliquid_owner_has_pending_operations(store, OWNER).unwrap(),
-        pending
-    );
-}
-
-#[test]
-fn enrollment_guards_honor_persisted_human_success_and_failure_after_restart() {
-    for outcome in ["succeeded", "failed"] {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("synthetic.sqlite");
-        let mut store = Store::open(&path).unwrap();
-        let mut review = seed(&mut store, "resolved");
-        let original = store.get_record("resolved").unwrap();
-        let reservations = store.reservations("resolved").unwrap();
-        assert_pending(&store, true);
-        review["attestation"]["outcome"] = json!(outcome);
-        store
-            .persist_operation_resolution(
-                "human",
-                &review,
-                &approval(&review, "operation_resolution"),
-                None,
-                "t3",
-            )
-            .unwrap();
-        assert_pending(&store, false);
-        drop(store);
-        let mut store = Store::open(&path).unwrap();
-        assert_pending(&store, false);
-        let original_config = owner_config();
-        let mut removed = original_config.clone();
-        removed.connections.clear();
-        crate::enrollment::ensure_connection_changes_safe(&store, &original_config, &removed)
-            .unwrap();
-        assert_eq!(store.get_record("resolved").unwrap(), original);
-        assert_eq!(store.reservations("resolved").unwrap(), reservations);
-        seed(&mut store, "still-unknown");
-        assert_pending(&store, true);
-    }
-}
-
-#[test]
-fn enrollment_guards_preserve_unresolved_work_after_reservation_release() {
-    let mut store = Store::in_memory().unwrap();
-    let review = seed(&mut store, "unresolved");
-    store
-        .persist_operation_lock_override(
-            "human",
-            &review,
-            &approval(&review, "reservation_override"),
-            "t3",
-        )
-        .unwrap();
-    assert!(store.all_effective_reservations().unwrap().is_empty());
-    assert_pending(&store, true);
-}
-
-#[test]
-fn enrollment_guards_preserve_retained_lifecycle_holds_after_human_resolution() {
-    let mut store = Store::in_memory().unwrap();
-    let mut review = seed(&mut store, "outcome-only");
-    review["remaining_reservations"] = review["released_reservations"].clone();
-    review["released_reservations"] = json!([]);
-    review["resources"] = json!([]);
-    store
-        .persist_operation_resolution(
-            "human",
-            &review,
-            &approval(&review, "operation_resolution"),
-            None,
-            "t3",
-        )
-        .unwrap();
-    assert_pending(&store, true);
-}
-
-#[test]
-fn enrollment_guards_reject_invalid_and_failed_human_resolutions() {
-    let mut store = Store::in_memory().unwrap();
-    let review = seed(&mut store, "invalid");
-    let mut invalid_approval = approval(&review, "operation_resolution");
-    invalid_approval["binding_hash"] = json!("wrong");
-    assert!(
-        store
-            .persist_operation_resolution("human", &review, &invalid_approval, None, "t3")
-            .is_err()
-    );
-    assert_pending(&store, true);
-    // The low-level store writer can seed an invalid review version, but its
-    // authoritative reader rejects it. Enrollment must propagate that failure.
-    let mut malformed = review.clone();
-    malformed["version"] = json!(2);
-    assert!(
-        store
-            .persist_operation_resolution(
-                "human",
-                &malformed,
-                &approval(&malformed, "operation_resolution"),
-                None,
-                "t3",
-            )
-            .is_err()
-    );
-    assert!(store.operation_resolution("invalid").is_err());
-    assert_eq!(
-        resource_has_pending_operations(&store, &ResourceId(RESOURCE.into()))
-            .unwrap_err()
-            .code,
-        "STORE_INVALID_RECORD"
-    );
-    assert_eq!(
-        hyperliquid_owner_has_pending_operations(&store, OWNER)
-            .unwrap_err()
-            .code,
-        "STORE_INVALID_RECORD"
-    );
-}
-
 fn owner_config() -> BrokerConfigV2 {
     let mut stored = config();
     stored.connections.push(evm_wallet("original-owner", OWNER));
@@ -284,11 +160,11 @@ fn enrollment_mapping_guard_allows_unrelated_wallet_lifecycle_with_unknown_owner
         store.reservations("original-unknown").unwrap(),
         original_holds
     );
-    assert_pending(&store, true);
+    assert!(store.get_record("original-unknown").unwrap().is_some());
 }
 
 #[test]
-fn enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes() {
+fn enrollment_changes_remain_available_with_pending_owner() {
     let mut store = Store::in_memory().unwrap();
     seed(&mut store, "original-unknown");
     let original = owner_config();
@@ -308,12 +184,13 @@ fn enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes() {
     changed_scope
         .networks
         .retain(|network| network.chain_id != 1);
-    assert_eq!(
-        crate::enrollment::ensure_connection_changes_safe(&store, &original, &changed_scope)
-            .unwrap_err()
-            .code,
-        "CONNECTION_HAS_PENDING_OPERATION"
-    );
+    changed_scope.deployments.retain(|deployment| {
+        changed_scope
+            .networks
+            .iter()
+            .any(|network| network.id == deployment.network)
+    });
+    crate::enrollment::ensure_connection_changes_safe(&store, &original, &changed_scope).unwrap();
     for index in 0..original.connections.len() {
         let mut changed = original.clone();
         match &mut changed.connections[index] {
@@ -325,16 +202,14 @@ fn enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes() {
         let mut removed = original.clone();
         removed.connections.remove(index);
         for candidate in [changed, removed] {
-            let error =
-                crate::enrollment::ensure_connection_changes_safe(&store, &original, &candidate)
-                    .unwrap_err();
-            assert_eq!(error.code, "CONNECTION_HAS_PENDING_OPERATION");
+            crate::enrollment::ensure_connection_changes_safe(&store, &original, &candidate)
+                .unwrap();
         }
     }
 }
 
 #[test]
-fn enrollment_mapping_guard_retains_resolution_holds_only_on_affected_mappings() {
+fn enrollment_changes_preserve_attested_history_without_holding_configuration() {
     let mut store = Store::in_memory().unwrap();
     let mut review = seed(&mut store, "outcome-only");
     review["remaining_reservations"] = review["released_reservations"].clone();
@@ -353,17 +228,12 @@ fn enrollment_mapping_guard_retains_resolution_holds_only_on_affected_mappings()
     assert_unrelated_wallet_lifecycle(&store, &original);
     let mut removed = original.clone();
     removed.connections.clear();
-    assert_eq!(
-        crate::enrollment::ensure_connection_changes_safe(&store, &original, &removed)
-            .unwrap_err()
-            .code,
-        "CONNECTION_HAS_PENDING_OPERATION"
-    );
-    assert_pending(&store, true);
+    crate::enrollment::ensure_connection_changes_safe(&store, &original, &removed).unwrap();
+    assert!(store.get_record("outcome-only").unwrap().is_some());
 }
 
 #[test]
-fn enrollment_mapping_guard_fails_closed_on_corrupt_touched_operation() {
+fn enrollment_changes_do_not_parse_corrupt_operation_history() {
     let mut store = Store::in_memory().unwrap();
     let mut review = seed(&mut store, "corrupt-review");
     review["version"] = json!(2);
@@ -381,10 +251,5 @@ fn enrollment_mapping_guard_fails_closed_on_corrupt_touched_operation() {
     let original = owner_config();
     let mut removed = original.clone();
     removed.connections.clear();
-    assert_eq!(
-        crate::enrollment::ensure_connection_changes_safe(&store, &original, &removed)
-            .unwrap_err()
-            .code,
-        "STORE_INVALID_RECORD"
-    );
+    crate::enrollment::ensure_connection_changes_safe(&store, &original, &removed).unwrap();
 }

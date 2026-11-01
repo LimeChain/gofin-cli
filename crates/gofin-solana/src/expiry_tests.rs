@@ -796,3 +796,41 @@ async fn observed_inclusion_remains_pending_after_block_cache_eviction() {
     ));
     assert_eq!(rpc.signature_reads().len(), reads);
 }
+
+#[tokio::test]
+async fn non_inclusion_reconciliation_binds_the_original_submission() {
+    let runtime = SolanaRuntime::new(Arc::new(HistoryRpc::new()));
+    let original = submission();
+    let ReceiptOutcome::ExpiredWithoutInclusion {
+        signature,
+        message_sha256,
+        reason,
+        proof,
+    } = runtime.reconcile_submission(&original, None).await.unwrap()
+    else {
+        panic!("complete lifetime must prove non-inclusion")
+    };
+    let result = expired_without_inclusion_reconciliation(
+        &original,
+        &signature,
+        &message_sha256,
+        &reason,
+        &proof,
+    )
+    .unwrap();
+    assert_eq!(result.status, gofin_domain::Status::Failed);
+    assert_eq!(result.evidence["state"], "expired_without_inclusion");
+    assert!(result.verified.is_some());
+    let mut mismatched = original.clone();
+    mismatched.data["wallet_signature"] = json!("different");
+    assert!(
+        expired_without_inclusion_reconciliation(
+            &mismatched,
+            &signature,
+            &message_sha256,
+            &reason,
+            &proof
+        )
+        .is_err()
+    );
+}

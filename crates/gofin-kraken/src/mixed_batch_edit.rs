@@ -531,7 +531,7 @@ impl KrakenProfile {
             "Revise original mixed Kraken {family} member {}; preserve the untouched family, whole fee authority and original fill owner.",
             native_index + 1
         );
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
 }

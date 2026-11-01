@@ -986,13 +986,18 @@ impl KrakenProfile {
         let valuation = if valuation_debits.is_empty() && intent.maximum_costs.is_empty() {
             None
         } else {
-            Some(
-                self.financial_valuation(&valuation_debits, &intent.maximum_costs)
-                    .await?,
-            )
+            self.financial_valuation(&valuation_debits, &intent.maximum_costs)
+                .await
+                .ok()
         };
         if let Some(earn) = binding.get("earn") {
             let b: EarnBinding = decode(earn)?;
+            if b.minimum_usd.is_some() && valuation.is_none() {
+                return Err(err(
+                    "KRAKEN_EARN_MINIMUM_PRICE_UNAVAILABLE",
+                    "This strategy's native USD minimum cannot be verified without a current price.",
+                ));
+            }
             if let Some(minimum) = b.minimum_usd
                 && valuation
                     .as_ref()
@@ -1004,8 +1009,8 @@ impl KrakenProfile {
                 ));
             }
         }
-        let mut prepared=PreparedOperation{operation:e.operation().into(),input:input.clone(),binding,summary,checks:vec![Check{name:"exact_funding_scope".into(),status:CheckStatus::Passed,detail:"Account, product, route, exact quantities, permissions and settlement requirement are frozen.".into()}],warnings,observed_at:now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation,intent,action_deadline: None, operation_version:1};
-        gofin_domain::value_bounds::bind(&mut prepared);
+        let prepared=PreparedOperation{operation:e.operation().into(),input:input.clone(),binding,summary,checks:vec![Check{name:"exact_funding_scope".into(),status:CheckStatus::Passed,detail:"Account, product, route, exact quantities, permissions and settlement requirement are frozen.".into()}],warnings,observed_at:now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation,intent,action_deadline: None, operation_version:1};
+
         Ok(prepared)
     }
     pub(crate) fn preserve_withdrawal_quote_observation(
@@ -2437,7 +2442,8 @@ impl KrakenProfile {
         record: &OperationRecord,
         submission: &Submission,
     ) -> Result<Reconciliation> {
-        self.reconcile_funding_inner(record, submission, None).await
+        self.reconcile_funding_inner(record, submission, None, false)
+            .await
     }
     pub(crate) async fn reconcile_funding_reference(
         &self,
@@ -2452,7 +2458,7 @@ impl KrakenProfile {
                 "Reference recovery requires an original withdrawal binding and a nonempty reference.",
             ));
         }
-        self.reconcile_funding_inner(record, submission, Some(reference))
+        self.reconcile_funding_inner(record, submission, Some(reference), false)
             .await
     }
     async fn reconcile_funding_inner(
@@ -2460,6 +2466,7 @@ impl KrakenProfile {
         record: &OperationRecord,
         submission: &Submission,
         reference: Option<&gofin_domain::operation_recovery::RecoveryReference>,
+        source_only: bool,
     ) -> Result<Reconciliation> {
         let binding = submission.data.get("binding").unwrap_or(&submission.data);
         let enrolled = self.account(text(binding, "account")?)?;
@@ -2522,7 +2529,14 @@ impl KrakenProfile {
         };
         if let Some(b) = binding.get("funding") {
             return self
-                .reconcile_withdrawal_reference(a, decode(b)?, submission, dispatch, reference)
+                .reconcile_withdrawal_reference(
+                    a,
+                    decode(b)?,
+                    submission,
+                    dispatch,
+                    reference,
+                    source_only,
+                )
                 .await;
         }
         if let Some(b) = binding.get("earn") {
@@ -2705,6 +2719,103 @@ impl KrakenProfile {
             "Persisted funding operation has no recognized settlement binding.",
         ))
     }
+    pub(crate) async fn observe_funding_side(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation> {
+        if side == "source" {
+            let observation = self
+                .reconcile_funding_inner(record, submission, None, true)
+                .await?;
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata: json!({"side":"source","scope":"kraken_withdrawal_history"}),
+                reconciliation: Some(observation),
+            });
+        }
+        if side != "destination" {
+            return Err(GoFinError::validation("Choose source or destination."));
+        }
+        let binding = submission.data.get("binding").unwrap_or(&submission.data);
+        let b: WithdrawalBinding =
+            decode(binding.get("funding").ok_or_else(|| {
+                GoFinError::validation("Original withdrawal binding is missing.")
+            })?)?;
+        let dispatch = record
+            .dispatch_evidence
+            .as_ref()
+            .and_then(|v| v.get("response"))
+            .ok_or_else(|| GoFinError::validation("Original withdrawal response is missing."))?;
+        let response = result(dispatch)?;
+        let reference = if b.api_version == "legacy-v0" {
+            text(response, "refid")?
+        } else {
+            text(response, "withdrawal_id")?
+        };
+        let evidence = record
+            .last_reconciliation_evidence
+            .as_ref()
+            .ok_or_else(|| {
+                GoFinError::validation("Observe the original Kraken withdrawal first.")
+            })?;
+        let source = std::iter::once(evidence)
+            .chain(
+                evidence
+                    .get("previous_observations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .rev(),
+            )
+            .find(|entry| {
+                entry["withdrawalId"].as_str() == Some(reference)
+                    && entry
+                        .get("sourceLedgerId")
+                        .and_then(Value::as_str)
+                        .is_some()
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Persisted source proof does not identify this withdrawal.")
+            })?;
+        let row = &source["withdrawal"];
+        let tx_hash = if b.api_version == "legacy-v0" {
+            row["txid"].as_str()
+        } else {
+            row["onchain_transaction"].as_str()
+        }
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            GoFinError::validation("The original venue observation has no transaction identity.")
+        })?;
+        let destination = b.destination.clone().ok_or_else(|| {
+            GoFinError::validation("Original destination receipt scope is missing.")
+        })?;
+        let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
+            GoFinError::validation("Original destination observer is unavailable.")
+        })?;
+        let receipt = verifier
+            .verify(KrakenPayoutRequest {
+                destination,
+                tx_hash: tx_hash.into(),
+                minimum: b.net.to_decimal(b.asset.decimals),
+                maximum: b.net.to_decimal(b.asset.decimals),
+            })
+            .await?;
+        let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount});
+        let mut evidence = source.clone();
+        evidence["destination_observation"] = metadata.clone();
+        evidence["outcome_transfer"] = json!("in_transit");
+        Ok(gofin_domain::TransferSideObservation {
+            metadata,
+            reconciliation: Some(Reconciliation {
+                status: Status::Pending,
+                evidence,
+                verified: None,
+            }),
+        })
+    }
+
     #[cfg(test)]
     async fn reconcile_withdrawal(
         &self,
@@ -2713,7 +2824,7 @@ impl KrakenProfile {
         submission: &Submission,
         dispatch: &Value,
     ) -> Result<Reconciliation> {
-        self.reconcile_withdrawal_reference(a, b, submission, dispatch, None)
+        self.reconcile_withdrawal_reference(a, b, submission, dispatch, None, false)
             .await
     }
     async fn reconcile_withdrawal_reference(
@@ -2723,6 +2834,7 @@ impl KrakenProfile {
         submission: &Submission,
         dispatch: &Value,
         recovery: Option<&gofin_domain::operation_recovery::RecoveryReference>,
+        source_only: bool,
     ) -> Result<Reconciliation> {
         let response = result(dispatch)?;
         let reference = if b.api_version == "legacy-v0" {
@@ -2949,9 +3061,11 @@ impl KrakenProfile {
                 })
                 .collect();
             if debits.len() != 1 || refunds.len() != 1 {
-                return Ok(unknown(
-                    "Failed withdrawal does not have one original debit and one uniquely correlated refund.",
-                ));
+                return Ok(Reconciliation {
+                    status: Status::Failed,
+                    evidence: json!({"withdrawal":row,"withdrawalId":reference,"outcome_transfer":"source_pending","reason":"Kraken reports failure; the uniquely correlated refund is not yet established."}),
+                    verified: None,
+                });
             }
             if signed(text(debits[0].1, "amount")?, b.asset.decimals)?
                 != SignedQuantity::negative(&b.net)
@@ -3076,7 +3190,7 @@ impl KrakenProfile {
                 submission,
                 Status::Failed,
                 effects,
-                json!({"withdrawal":row,"ledger":correlated,"feeLedger":separate_fee,"returnedPrincipal":b.net,"chargedFee":charged}),
+                json!({"withdrawal":row,"ledger":correlated,"feeLedger":separate_fee,"returnedPrincipal":b.net,"chargedFee":charged,"outcome_transfer":"returned_to_source"}),
             );
         }
         if matched.len() != 1 {
@@ -3221,6 +3335,14 @@ impl KrakenProfile {
         let mut evidence = json!({"withdrawalId":reference,"apiVersion":b.api_version,"sourceLedgerId":ledger_id,"withdrawal":row,"sourceLedger":debit,"feeLedger":fee_proof,"verification":{"level":"venue_only","destinationReceipt":"unverified"}});
         if let Some(reference) = recovery {
             evidence["recoveryReference"] = json!(reference);
+        }
+        if source_only {
+            evidence["outcome_transfer"] = json!("in_transit");
+            return Ok(Reconciliation {
+                status: Status::Pending,
+                evidence,
+                verified: None,
+            });
         }
         if b.verification == VerificationRequirement::DestinationReceipt {
             let Some(destination) = b.destination else {

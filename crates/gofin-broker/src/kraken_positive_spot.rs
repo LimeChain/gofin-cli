@@ -25,6 +25,7 @@ fn decimal(n: i128) -> String {
 struct Ledger {
     cash: i128,
     eth: i128,
+    deposit_credited: bool,
     orders: BTreeMap<String, Value>,
     receipt: Option<Value>,
     withdrawal: bool,
@@ -73,6 +74,9 @@ impl KrakenTransport for Wire {
             }
             E::KrakenPrivatePostOpenPositions | E::KrakenPrivatePostCreditLines => json!({}),
             E::KrakenPrivatePostEarnAllocations => json!({"items":[]}),
+            E::KrakenPrivatePostDepositStatus if !self.ledger.lock().unwrap().deposit_credited => {
+                json!([])
+            }
             E::KrakenPrivatePostAddOrder => {
                 let size = p["volume"].as_str().unwrap();
                 let side = p["type"].as_str().unwrap();
@@ -312,7 +316,7 @@ fn positive_kraken_spot_lifecycle_via_public_cli() {
         let runtime=crate::compose_runtime_with_clock(crate::BrokerConfigV2 {version:2,networks:crate::NetworkConfig::reviewed_evm_networks(),deployments:vec![],connections:vec![],policy,approver_uid:unsafe{libc::geteuid()},extensions:BTreeMap::new()},crate::RuntimeDependencies {store:gofin_store::Store::open(temp.path().join("spot.sqlite")).unwrap(),adapters:vec![Arc::new(deposit),exchange],authorizer:approval.clone(),valuator:Arc::new(crate::SharedUsdValuator::with_source(prices)),bridge:None},Arc::new(gofin_domain::clock::SystemClock)).unwrap();
         let client=Client::new(runtime,temp.path()).await;
         async fn execute(client:&Client,op:&str,input:Value)->Value {let id=input["requestId"].as_str().unwrap().to_owned();let preview=client.call(args(&["preview",op,"--input",&input.to_string(),"--json"]),BrokerRequest::Preview {operation:op.into(),input:input.clone()},true).await;#[cfg(target_os="macos")] native_approval::assert_prepared_renders(&serde_json::from_value(preview).unwrap());client.call(args(&["execute",op,"--input",&input.to_string(),"--id",&id,"--json"]),BrokerRequest::Execute {request:OperationRequest {request_id:id,operation:op.into(),input,run_id:None}},true).await}
-        let mut deposit_input=input();deposit_input["amount"]=json!("100");deposit_input["address"]=json!("0x1111111111111111111111111111111111111111");let deposit=execute(&client,"kraken.deposit",deposit_input).await;assert!(deposit["status"]=="pending"||deposit["status"]=="unknown","{deposit}");wire.ledger.lock().unwrap().cash=units("110");let id=deposit["id"].as_str().unwrap();let deposit=client.call(args(&["status",id,"--json"]),BrokerRequest::Status{id:id.into()},true).await;assert_eq!(deposit["status"],"completed","{deposit}");
+        let mut deposit_input=input();deposit_input["amount"]=json!("100");deposit_input["address"]=json!("0x1111111111111111111111111111111111111111");let deposit=execute(&client,"kraken.deposit",deposit_input).await;assert!(deposit["status"]=="pending"||deposit["status"]=="unknown","{deposit}");{let mut ledger=wire.ledger.lock().unwrap();ledger.cash=units("110");ledger.deposit_credited=true;}let id=deposit["id"].as_str().unwrap();let deposit=client.call(args(&["status",id,"--json"]),BrokerRequest::Status{id:id.into()},true).await;assert_eq!(deposit["status"],"completed","{deposit}");
         let mut order_submissions=std::collections::BTreeSet::new();
         for (id,side,kind,size,price,status) in [("buy","buy","limit","0.006","2000","completed"),("part","sell","market","0.003","2000","completed"),("rest","sell","limit","0.002988","2100","pending"),("final","sell","market","0.002988","2000","completed")] {
             let mut order=json!({"requestId":id,"account":"fixture-spot","pair":"ETHUSDC","type":side,"ordertype":kind,"volume":size,"maximumFees":{"XETH":if id=="rest"||id=="final" {"0.000012"}else{"0.00003"},"USDC":"0.05"},"minimumReceive":if side=="buy" {"0.00597"} else {"5.9"}});if kind=="limit" {order["price"]=json!(price);order["timeinforce"]=json!(if id=="rest" {"GTC"}else{"IOC"});}

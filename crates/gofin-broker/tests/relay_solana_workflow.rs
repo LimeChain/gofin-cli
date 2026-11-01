@@ -9,8 +9,7 @@ use gofin_bridge::*;
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
 use gofin_domain::{
     Adapter, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer,
-    BridgeStepKind as DomainStepKind, OperationRequest, Quantity, Result, Status,
-    boundaries::BoundaryAuthorizationRequest, now,
+    BridgeStepKind as DomainStepKind, OperationRequest, Quantity, Result, Status, now,
 };
 use gofin_engine::{Engine, EngineOptions};
 use gofin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection};
@@ -517,7 +516,7 @@ impl BridgeProvider for RelayFixture {
 }
 
 #[tokio::test]
-async fn relay_external_solana_recipient_needs_one_grant_and_independent_payout_proof() {
+async fn relay_external_solana_recipient_needs_one_approval_and_independent_payout_proof() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("journal.sqlite"))
         .unwrap()
@@ -664,38 +663,15 @@ async fn relay_external_solana_recipient_needs_one_grant_and_independent_payout_
     })
     .unwrap();
     compact(&mut input);
-    let mut boundary = serde_json::to_value(&bounds).unwrap();
-    compact(&mut boundary);
-    let grant = engine
-        .authorize_boundary(BoundaryAuthorizationRequest {
-            request_id: "approve-relay-solana".into(),
-            operation: "bridge.transfer".into(),
-            input: input.clone(),
-            bounds: boundary,
-            valid_for_seconds: 600,
-            replaces: None,
-        })
-        .await
-        .unwrap();
     let request = OperationRequest {
         request_id: "relay-solana-deposit".into(),
         operation: "bridge.transfer".into(),
         input: input.clone(),
         run_id: None,
     };
-    let executed = engine
-        .execute_boundary(&grant.id, request.clone())
-        .await
-        .unwrap();
+    let executed = engine.execute(request.clone()).await.unwrap();
     assert_eq!(executed.status, Status::Completed, "{:?}", executed.error);
-    assert_eq!(
-        engine
-            .execute_boundary(&grant.id, request)
-            .await
-            .unwrap()
-            .id,
-        executed.id
-    );
+    assert_eq!(engine.execute(request).await.unwrap().id, executed.id);
     assert_eq!(rpc.sends.load(Ordering::SeqCst), 1);
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
     let saved = state.transfer(&transfer).unwrap().unwrap();

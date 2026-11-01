@@ -150,13 +150,6 @@ async fn paginated_original_order_proof_settles_after_sqlite_restart_without_rep
         let original = engine.execute(request.clone()).await.unwrap();
         assert_eq!(original.status, Status::Unknown);
         assert!(original.dispatch_evidence.is_none());
-        assert!(
-            gofin_store::Store::open(&path)
-                .unwrap()
-                .reservation_count(&original.id)
-                .unwrap()
-                > 0
-        );
         drop(engine);
         wire.history_ready.store(true, Ordering::SeqCst);
         let engine = history_engine(&path, wire.clone());
@@ -178,14 +171,6 @@ async fn paginated_original_order_proof_settles_after_sqlite_restart_without_rep
             if let Ok(record) = observed {
                 assert_eq!(record.status, Status::Unknown, "{mode:?}");
             }
-            assert!(
-                gofin_store::Store::open(&path)
-                    .unwrap()
-                    .reservation_count(&original.id)
-                    .unwrap()
-                    > 0,
-                "{mode:?}"
-            );
             if mode == History::BeyondBound {
                 assert_eq!(wire.offsets.lock().unwrap().len(), 64);
             }

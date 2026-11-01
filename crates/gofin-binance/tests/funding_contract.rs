@@ -5,8 +5,6 @@ use gofin_binance::{
 };
 use serde_json::{Value, json};
 
-#[path = "funding_contract/generic_plans.rs"]
-mod generic_plan_tests;
 #[path = "funding_contract/withdrawal_rejection.rs"]
 mod withdrawal_rejection_tests;
 
@@ -3577,6 +3575,7 @@ async fn withdrawal_preview_enforces_permission_travel_rule_fee_minimum_and_prec
 }
 
 struct WithdrawalLifecycleTransport {
+    status: std::sync::Arc<std::sync::atomic::AtomicU64>,
     account_reads: std::sync::atomic::AtomicUsize,
     events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     timeout_withdrawal: bool,
@@ -3642,7 +3641,7 @@ impl gofin_binance::BinanceTransport for WithdrawalLifecycleTransport {
                 "id":"withdraw-fixture-01", "coin":self.coin, "amount":self.history_amount,
                 "transactionFee":self.transaction_fee, "network":self.network,
                 "address":"0x1111111111111111111111111111111111111111",
-                "txId":format!("0x{}", "a".repeat(64)), "status":6,
+                "txId":format!("0x{}", "a".repeat(64)), "status":self.status.load(std::sync::atomic::Ordering::SeqCst),
                 "completeTime":"2026-09-01 12:30:45",
                 "withdrawOrderId":request.get("withdrawOrderId"),
                 "transferType":0, "walletType":0
@@ -3718,6 +3717,7 @@ async fn reconcile_eth_withdrawal_fixture(
     let adapter = gofin_binance::BinanceAdapter::new(
         withdrawal_destination("ETH", asset.clone()),
         std::sync::Arc::new(WithdrawalLifecycleTransport {
+            status: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(6)),
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: false,
@@ -3804,9 +3804,11 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
     };
     let config = withdrawal_destination("ETH", asset.clone());
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let status = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let adapter = gofin_binance::BinanceAdapter::new(
         config,
         std::sync::Arc::new(WithdrawalLifecycleTransport {
+            status: status.clone(),
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: false,
@@ -3865,6 +3867,46 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
         error: None,
         run_id: None,
     };
+    let awaiting = adapter
+        .observe_transfer_side(&order, "source")
+        .await
+        .unwrap()
+        .reconciliation
+        .unwrap();
+    assert_eq!(awaiting.status, gofin_domain::Status::Pending);
+    assert_eq!(
+        awaiting.evidence["outcome_attention"]["kind"],
+        "action_required"
+    );
+    assert!(
+        awaiting.evidence["outcome_attention"]["where_to_act"]
+            .as_str()
+            .unwrap()
+            .contains("Binance App")
+    );
+    status.store(6, std::sync::atomic::Ordering::SeqCst);
+    let source = adapter
+        .observe_transfer_side(&order, "source")
+        .await
+        .unwrap();
+    let mut independently_observed = order.clone();
+    independently_observed.last_reconciliation_evidence =
+        Some(source.reconciliation.unwrap().evidence);
+    let venue_reads_before = events.lock().unwrap().len();
+    let destination = adapter
+        .observe_transfer_side(&independently_observed, "destination")
+        .await
+        .unwrap();
+    assert_eq!(
+        events.lock().unwrap().len(),
+        venue_reads_before,
+        "destination must not query Binance"
+    );
+    assert_eq!(destination.metadata["status"], "completed");
+    assert_eq!(
+        destination.reconciliation.unwrap().status,
+        gofin_domain::Status::Pending
+    );
     let result = adapter.reconcile(&order).await.unwrap();
     assert_eq!(result.status, gofin_domain::Status::Completed);
     let proof = result.verified.unwrap();
@@ -3931,6 +3973,7 @@ async fn usdc_withdrawal_gross_api_amount_net_history_and_fee_are_accounted_once
     let adapter = gofin_binance::BinanceAdapter::new(
         config,
         std::sync::Arc::new(WithdrawalLifecycleTransport {
+            status: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(6)),
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: false,
@@ -4366,6 +4409,7 @@ async fn withdrawal_timeout_recovers_from_original_withdraw_order_id_without_rep
     let adapter = gofin_binance::BinanceAdapter::new(
         config,
         std::sync::Arc::new(WithdrawalLifecycleTransport {
+            status: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(6)),
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: true,

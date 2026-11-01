@@ -140,7 +140,10 @@ impl Adapter for ConfigurationAdapter {
     ) -> Result<Submission> {
         let submission = Submission {
             kind: "synthetic_config".into(),
-            reference: "synthetic-config-1".into(),
+            reference: format!(
+                "synthetic-config-{}",
+                self.dispatches.load(Ordering::SeqCst) + 1
+            ),
             data: prepared.binding.clone(),
         };
         journal.assert_candidate(prepared)?;
@@ -208,7 +211,7 @@ impl ConfigurationAuthorizer for ConfigurationApprovals {
 }
 
 #[tokio::test]
-async fn configuration_requires_dedicated_human_route_and_keeps_uncertain_seed_and_fee_reserved() {
+async fn configuration_requires_human_route_and_observes_original_uncertain_submission() {
     let adapter = Arc::new(ConfigurationAdapter {
         dispatches: AtomicUsize::new(0),
     });
@@ -292,7 +295,7 @@ async fn configuration_requires_dedicated_human_route_and_keeps_uncertain_seed_a
         assert_eq!(configuration_challenges.len(), 1);
         assert_eq!(
             configuration_challenges[0].binding,
-            authorization_binding(operation.preview.as_ref().unwrap())
+            gofin_domain::native_authorization_binding(operation.preview.as_ref().unwrap())
         );
         assert_eq!(
             operation.approval.as_ref().unwrap().binding_hash,
@@ -300,39 +303,37 @@ async fn configuration_requires_dedicated_human_route_and_keeps_uncertain_seed_a
         );
     }
 
-    let reservations = engine
-        .store
-        .lock()
-        .unwrap()
-        .reservations(&operation.id)
-        .unwrap();
-    assert_eq!(
-        reservations.len(),
-        2,
-        "seed and fee reservation dimensions: {reservations:?}"
-    );
-    let reserved_units = reservations
-        .iter()
-        .map(|row| parse_uint(&row.units).unwrap())
-        .sum::<BigUint>();
-    assert_eq!(reserved_units, BigUint::from(105u32));
-    let recovered = engine.status(&operation.id, true).await.unwrap();
-    assert_eq!(recovered.status, Status::Pending);
-    assert_eq!(recovered.submission, operation.submission);
-    assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(
+    assert!(
         engine
             .store
             .lock()
             .unwrap()
             .reservations(&operation.id)
-            .unwrap(),
-        reservations
+            .unwrap()
+            .is_empty()
     );
+    let recovered = engine.status(&operation.id, true).await.unwrap();
+    assert_eq!(recovered.status, Status::Pending);
+    assert_eq!(recovered.submission, operation.submission);
+    assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 1);
+    let second = engine
+        .execute_configuration(
+            OperationRequest {
+                request_id: "human-config-request-2".into(),
+                operation: OPERATION.into(),
+                input: json!({"name":"another-synthetic-vault"}),
+                run_id: None,
+            },
+            configuration_authorizer.clone(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(second.id, operation.id);
+    assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 2, "{second:?}");
 }
 
 #[tokio::test]
-async fn configuration_seed_and_maximum_fee_are_both_charged_to_policy_before_review() {
+async fn retired_usd_limits_do_not_block_human_configuration() {
     let adapter = Arc::new(ConfigurationAdapter {
         dispatches: AtomicUsize::new(0),
     });
@@ -342,8 +343,8 @@ async fn configuration_seed_and_maximum_fee_are_both_charged_to_policy_before_re
         vec![adapter.clone()],
         Arc::new(FinancialApprovals::default()),
         EngineOptions {
-            max_movement_and_cost_usd_micros: "149999".into(),
-            max_run_allocation_usd_micros: "100000000".into(),
+            max_movement_and_cost_usd_micros: "1".into(),
+            max_run_allocation_usd_micros: "1".into(),
             allow_unpriced_exchange_assets: false,
         },
     )
@@ -351,7 +352,7 @@ async fn configuration_seed_and_maximum_fee_are_both_charged_to_policy_before_re
     let result = engine
         .execute_configuration(
             OperationRequest {
-                request_id: "config-over-cost-cap".into(),
+                request_id: "config-over-retired-limit".into(),
                 operation: OPERATION.into(),
                 input: json!({"name":"synthetic-vault"}),
                 run_id: None,
@@ -360,17 +361,8 @@ async fn configuration_seed_and_maximum_fee_are_both_charged_to_policy_before_re
         )
         .await
         .unwrap();
-    assert_eq!(result.status, Status::Failed);
-    assert_eq!(result.error.as_ref().unwrap().code, "MOVEMENT_LIMIT");
-    assert!(approvals.0.lock().unwrap().is_empty());
-    assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 0);
-    assert!(
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .reservations(&result.id)
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(result.status, Status::Pending);
+    assert!(result.submission.is_some());
+    assert_eq!(approvals.0.lock().unwrap().len(), 1);
+    assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 1);
 }

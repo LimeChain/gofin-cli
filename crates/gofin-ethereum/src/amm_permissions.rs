@@ -587,12 +587,14 @@ async fn request_identity(
         fixed["tick_spacing"] = json!(request.tick_spacing);
         fixed["pool"] = json!(lower_address(pool));
         fixed["factory"] = json!(adapter.ramses()?.factory);
+        fixed["quoter"] = json!(adapter.ramses()?.quoter);
         fixed["pool_deployer"] = json!(adapter.ramses()?.pool_deployer);
         fixed["initial_pool_fee_ppm"] = json!(fee);
     }
     if super::uniswap::profile::additional_dex(operation).is_some() {
         fixed["dex"] = json!(dex);
         fixed["factory"] = json!(v3_profile.factory);
+        fixed["quoter"] = json!(v3_profile.quoter);
         fixed["pool_deployer"] = json!(v3_profile.pool_deployer);
     }
     Ok((request, fixed, token_in, token_out, labels, block))
@@ -696,6 +698,9 @@ fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
         fixed["factory"] = json!(b.factory);
         fixed["pool_deployer"] = json!(b.pool_deployer);
         fixed["pool"] = json!(b.pool);
+    }
+    if let Some(quoter) = &b.quoter {
+        fixed["quoter"] = json!(quoter);
     }
     Ok(fixed)
 }
@@ -1349,6 +1354,14 @@ fn validate_candidate_at(
         return super::uniswap_api::permissions::validate_candidate_at(spec, prepared, at);
     }
     let mut fixed = fixed_from_prepared(prepared)?;
+    // Historical grants predate the explicit quote-source field. Preserve their
+    // original fixed-scope shape; new standalone approvals bind it explicitly.
+    if spec.fixed.get("quoter").is_none() {
+        fixed
+            .as_object_mut()
+            .expect("fixed object")
+            .remove("quoter");
+    }
     if let Some(raw_pools) = spec.fixed.get("approved_pools") {
         if spec.fixed.get("pool").is_some()
             || super::uniswap::profile::additional_dex(&prepared.operation).is_none()
@@ -1798,6 +1811,84 @@ fn validate_swap_execute_candidate_at(
     candidate_spec.parameters = serde_json::to_value(bounds)
         .map_err(|_| GoFinError::validation("Selected DEX bounds could not be encoded."))?;
     validate_candidate_at(&candidate_spec, &concrete, at)
+}
+
+/// Validate a refreshed single-action swap against its original native terms.
+/// Absolute user floors remain hard bounds; slippage is recomputed against the
+/// fresh quote by the shared AMM validator, rather than freezing the old quote.
+pub(crate) fn validate_standalone_swap_candidate(
+    approved: &PreparedOperation,
+    candidate: &PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if approved.operation != candidate.operation
+        || approved.input != candidate.input
+        || approved.operation_version != candidate.operation_version
+        || approved.action_deadline != candidate.action_deadline
+    {
+        return Err(GoFinError::validation(
+            "Fresh swap changes its approved request or deadline.",
+        ));
+    }
+    let original = unwrap_swap_execute(approved)?;
+    let fresh = unwrap_swap_execute(candidate)?;
+    let request = request::parse(&original.operation, &original.input)?;
+    let fixed = fixed_from_prepared(&original)?;
+    let (input_asset, output_asset, units, tier, pool_fee) =
+        if super::uniswap_api::is_api(&original) {
+            let binding = super::uniswap_api::parse_binding(&original)?;
+            (binding.token, binding.output, binding.units, None, None)
+        } else {
+            let binding: Binding = serde_json::from_value(original.binding.clone())
+                .map_err(|_| GoFinError::validation("Approved swap binding is invalid."))?;
+            (
+                binding.token,
+                binding
+                    .output
+                    .ok_or_else(|| GoFinError::validation("Approved output is missing."))?,
+                binding.units,
+                binding.fee_tier,
+                binding.max_pool_fee_ppm,
+            )
+        };
+    let minimum = Quantity::from_decimal(
+        request
+            .min_output
+            .as_deref()
+            .ok_or_else(|| GoFinError::validation("An explicit minimum output is required."))?,
+        output_asset.decimals,
+    )?;
+    if minimum.is_zero() || units.is_zero() {
+        return Err(GoFinError::validation(
+            "Swap input and hard output floor must be positive.",
+        ));
+    }
+    let bounds = SwapBounds {
+        max_input: units.to_decimal(input_asset.decimals),
+        max_fee_eth: request
+            .max_fee_eth
+            .clone()
+            .ok_or_else(|| GoFinError::validation("A native fee cap is required."))?,
+        max_slippage_bps: request.slippage_bps.unwrap_or(100),
+        max_price_impact_bps: request.max_price_impact_bps.unwrap_or(10_000),
+        minimum_rate: RateFloor {
+            output_atoms: minimum.clone(),
+            input_atoms: units,
+        },
+        absolute_minimum_output: Some(minimum.to_decimal(output_asset.decimals)),
+        allowed_fee_tiers: tier.into_iter().collect(),
+        max_pool_fee_ppm: pool_fee,
+        max_deadline_seconds: MAX_DEADLINE_SECONDS,
+    };
+    let spec = BoundarySpec {
+        fixed,
+        parameters: serde_json::to_value(bounds)
+            .map_err(|_| GoFinError::validation("Invalid swap bounds."))?,
+        maximum_debits: vec![],
+        maximum_costs: vec![],
+        summary: String::new(),
+    };
+    validate_candidate_at(&spec, &fresh, at)
 }
 
 #[cfg(test)]

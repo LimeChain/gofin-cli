@@ -51,10 +51,10 @@ fn definition(
             | "hyperliquid.orders.edit_batch"
     ) {
         semantics["execution_price"] = json!(
-            "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved."
+            "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy."
         );
         semantics["reconciliation_limits"] = json!(
-            "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement."
+            "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity."
         );
         semantics["exact_plan_accounting"] = json!({
             "market_type": "perpetual",

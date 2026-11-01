@@ -391,9 +391,9 @@ fn native_spot_schemas_validate_examples_and_reject_ambiguous_sizing() {
 }
 
 #[tokio::test]
-async fn derived_prices_feed_preview_fee_policy_and_allocation_without_parity() {
-    for (usdc, expected, approval_count) in [("0.99", "99000000", 1), ("1.1", "110000000", 0)] {
-        let (engine, rates, auth, transport, prices) = fixture(usdc, None);
+async fn derived_prices_are_optional_context_without_personal_policy_admission() {
+    for (usdc, expected, approval_count) in [("0.99", "99000000", 1), ("1.1", "110000000", 1)] {
+        let (engine, rates, auth, transport, prices) = fixture(usdc, Some("10"));
         let request = request("synthetic-direct-pricing-policy");
         let preview = engine
             .preview(&request.operation, &request.input)
@@ -402,7 +402,7 @@ async fn derived_prices_feed_preview_fee_policy_and_allocation_without_parity() 
         let valuation = preview.valuation.as_ref().unwrap();
         assert_eq!(valuation.movement_usd_micros.as_str(), expected);
         if usdc == "0.99" {
-            assert_eq!(valuation.maximum_fee_usd_micros.as_str(), "410000");
+            assert_eq!(valuation.maximum_fee_usd_micros.as_str(), "402000");
         }
         let quote = gofin_binance::BinancePriceProvider::quote_usd(prices.as_ref(), "APT")
             .await
@@ -427,19 +427,16 @@ async fn derived_prices_feed_preview_fee_policy_and_allocation_without_parity() 
             expected
         );
         let result = engine.execute(request).await.unwrap();
-        assert!(result.submission.is_none());
-        assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
+        assert!(result.submission.is_some(), "{result:?}");
+        assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), approval_count);
-        if approval_count == 0 {
-            assert!(result.error.unwrap().code.contains("MOVEMENT"));
-        }
         assert_eq!(rates.calls.load(Ordering::SeqCst), 1);
     }
 }
 
 #[tokio::test]
-async fn refreshed_spot_prices_obey_the_approved_ceiling_and_duplicate_journal() {
-    for (ask, expected_posts) in [("20", 0), ("9.9999", 1)] {
+async fn refreshed_spot_reporting_prices_preserve_native_bounds_and_duplicate_journal() {
+    for (ask, expected_posts) in [("20", 1), ("9.9999", 1)] {
         let (engine, _, auth, transport, _) = fixture("0.99", Some(ask));
         let request = request("synthetic-direct-pricing-revalidation");
         let result = engine.execute(request.clone()).await.unwrap();
@@ -449,13 +446,8 @@ async fn refreshed_spot_prices_obey_the_approved_ceiling_and_duplicate_journal()
             expected_posts,
             "{result:?}"
         );
-        if expected_posts == 0 {
-            assert!(result.submission.is_none());
-            assert_eq!(result.error.as_ref().unwrap().code, "PREVIEW_CHANGED");
-        } else {
-            assert!(result.submission.is_some());
-            assert_ne!(result.status, gofin_domain::Status::Completed);
-        }
+        assert!(result.submission.is_some());
+        assert_ne!(result.status, gofin_domain::Status::Completed);
         assert_eq!(engine.execute(request).await.unwrap().id, result.id);
         assert_eq!(transport.posts.load(Ordering::SeqCst), expected_posts);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
@@ -463,56 +455,26 @@ async fn refreshed_spot_prices_obey_the_approved_ceiling_and_duplicate_journal()
 }
 
 #[tokio::test]
-async fn unsupported_pair_is_explicit_estimate_and_write_requires_protected_exception() {
+async fn missing_optional_price_is_unavailable_without_an_unpriced_exception() {
     for enabled in [false, true] {
-        let (engine, rates, auth, transport, prices) =
+        let (engine, rates, auth, transport, _) =
             fixture_options("0.99", Some("10"), false, enabled);
-        let request = request("synthetic-unpriced-pair");
+        let request = request("synthetic-unpriced-native-action");
         let preview = engine
             .preview(&request.operation, &request.input)
             .await
             .unwrap();
-        assert!(
-            preview
-                .warnings
-                .iter()
-                .any(|v| v.contains(gofin_domain::unpriced::WARNING))
-        );
-        assert!(preview.summary.contains("Unpriced APT: $0 estimate"));
-        let value = preview.valuation.as_ref().unwrap();
-        assert!(value.prices.iter().any(gofin_domain::unpriced::is_estimate));
-        assert_eq!(value.movement_usd_micros.as_str(), "0");
-        assert!(
-            !value.maximum_fee_usd_micros.is_zero(),
-            "priced fees remain bounded"
-        );
-        let price = prices
-            .asset_price(&AssetId {
-                network: "binance".into(),
-                reference: "APT".into(),
-                decimals: 36,
-            })
-            .await
-            .unwrap();
-        assert!(gofin_domain::unpriced::is_estimate(&price));
+        assert!(preview.valuation.is_none());
+        assert!(!preview.summary.contains("$0 estimate"));
+        assert!(!preview.intent.debits.is_empty());
         let record = engine.execute(request.clone()).await.unwrap();
-        if enabled {
-            assert!(record.submission.is_some());
-            assert_eq!(engine.allocation_unpriced_operations().unwrap(), 1);
-            assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
-        } else {
-            assert_eq!(
-                record.error.unwrap().code,
-                "UNPRICED_EXCHANGE_ASSET_DISABLED"
-            );
-            assert!(record.submission.is_none());
-            assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
-        }
-        assert_eq!(auth.calls.load(Ordering::SeqCst), usize::from(enabled));
+        assert!(record.submission.is_some(), "{:?}", record.error);
+        assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
         assert_eq!(rates.calls.load(Ordering::SeqCst), 1);
         let _ = engine.execute(request).await.unwrap();
-        assert_eq!(auth.calls.load(Ordering::SeqCst), usize::from(enabled));
-        assert_eq!(transport.posts.load(Ordering::SeqCst), usize::from(enabled));
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -589,13 +551,13 @@ async fn five_minute_conversion_window_survives_every_execution_gate_without_res
     let (engine, rates, auth, transport, _) = fixture("0.99", Some("9.9999"));
     rates.age_seconds.store(300, Ordering::SeqCst);
     let request = self::request("synthetic-expired-stablecoin-rate");
-    assert_eq!(
-        engine
-            .preview(&request.operation, &request.input)
-            .await
-            .unwrap_err()
-            .code,
-        "PRICE_CONVERSION_STALE"
+    let preview = engine
+        .preview(&request.operation, &request.input)
+        .await
+        .unwrap();
+    assert!(
+        preview.valuation.is_none(),
+        "stale USD context must be unavailable, not freshened"
     );
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 0);

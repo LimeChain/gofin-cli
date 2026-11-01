@@ -566,6 +566,7 @@ fn unpriced_exchange(prepared: &PreparedOperation) -> bool {
         .is_some_and(|value| value.prices.iter().any(gofin_domain::unpriced::is_estimate))
 }
 
+#[cfg(test)]
 pub(super) fn reject_unpriced_run(prepared: &PreparedOperation) -> Result<()> {
     if unpriced_exchange(prepared) {
         return Err(budget_error(
@@ -623,11 +624,11 @@ impl Engine {
                 continue;
             }
             if counted_with_amendment_owner(record, &operation_index, instant)? {
-                let store = self
+                let _store = self
                     .store
                     .lock()
                     .map_err(|_| internal("store lock poisoned"))?;
-                total += unresolved_consumption::record_charge(&store, record)?;
+                total += record_charge(record)?;
             }
         }
         for (owner, transfer) in owners.iter().zip(transfers.iter()) {
@@ -651,6 +652,7 @@ impl Engine {
         Ok(total.to_string())
     }
 
+    #[cfg(test)]
     pub(super) async fn reserve_ordinary_operation(
         &self,
         record: &mut OperationRecord,
@@ -884,7 +886,7 @@ impl Engine {
                 }
             }
             if counted_with_amendment_owner(other, &records, instant)? {
-                total += unresolved_consumption::record_charge(&store, other)?;
+                total += record_charge(other)?;
             }
         }
         if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
@@ -977,6 +979,7 @@ impl Engine {
         persist.map_err(map_store)
     }
 
+    #[cfg(test)]
     async fn cash_capacities_for_overlaps(
         &self,
         operation_id: &str,
@@ -1252,7 +1255,7 @@ pub(super) fn validate_boundary_candidate_policy(
                 }
             }
             if counted_with_amendment_owner(other, &records, instant)? {
-                total += unresolved_consumption::record_charge(store, other)?;
+                total += record_charge(other)?;
             }
         }
         if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {

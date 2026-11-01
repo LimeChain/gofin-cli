@@ -60,8 +60,6 @@ pub(super) fn validate_prepared(prepared: &PreparedOperation) -> Result<()> {
     let mut ids = BTreeSet::new();
     let mut external = BTreeMap::new();
     let mut costs = BTreeMap::new();
-    let mut minimum_usd = BigUint::zero();
-    let mut initial_usd = BigUint::zero();
     for constraint in &intent.expected {
         let EffectConstraint::ConversionSequence { scope } = constraint else {
             continue;
@@ -95,28 +93,7 @@ pub(super) fn validate_prepared(prepared: &PreparedOperation) -> Result<()> {
                 ));
             }
             produced.insert(leg.output.clone());
-            let valuation = prepared.valuation.as_ref().ok_or_else(|| {
-                invalid("Each conversion stage requires attributable gross USD valuation.")
-            })?;
-            minimum_usd += ordinary_policy::amount_usd(
-                &Amount {
-                    asset: leg.input.clone(),
-                    atoms: leg.maximum_input.clone(),
-                },
-                &valuation.prices,
-            )?;
         }
-        initial_usd += ordinary_policy::amount_usd(
-            &Amount {
-                asset: scope.external_input.clone(),
-                atoms: scope.maximum_external_input.clone(),
-            },
-            &prepared
-                .valuation
-                .as_ref()
-                .ok_or_else(|| invalid("A sequence requires valuation."))?
-                .prices,
-        )?;
         add_big_amount(
             &mut external,
             &scope.resource,
@@ -152,33 +129,7 @@ pub(super) fn validate_prepared(prepared: &PreparedOperation) -> Result<()> {
             .any(|(key, value)| fee_caps.get(key).is_none_or(|maximum| value > maximum))
     {
         return Err(invalid(
-            "The sequence's external principal and fee sources must be backed by the exact approved reservations.",
-        ));
-    }
-    if !ids.is_empty() {
-        let prices = &prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("A sequence requires valuation."))?
-            .prices;
-        let mut all_debits = BigUint::zero();
-        for debit in &intent.debits {
-            all_debits += ordinary_policy::amount_usd(&debit.amount, prices)?;
-        }
-        minimum_usd += if all_debits > initial_usd {
-            all_debits - initial_usd
-        } else {
-            BigUint::zero()
-        };
-    }
-    if !ids.is_empty()
-        && prepared
-            .valuation
-            .as_ref()
-            .is_none_or(|v| v.movement_usd_micros.integer() < minimum_usd)
-    {
-        return Err(invalid(
-            "Gross movement valuation must include the approved input bound of every stage, including internally funded legs.",
+            "The sequence's external principal and fees must fit the approved native bounds.",
         ));
     }
     Ok(())
@@ -892,12 +843,11 @@ mod tests {
         assert_eq!(preview, record.preview);
     }
     #[test]
-    fn stage_gross_valuation_and_source_fee_reserves_cannot_be_omitted() {
+    fn sequence_uses_native_bounds_without_usd_valuation() {
         let mut p = prepared();
         validate_prepared(&p).unwrap();
-        p.valuation.as_mut().unwrap().movement_usd_micros =
-            gofin_domain::Quantity::from_u64(100_000_000);
-        assert!(validate_prepared(&p).is_err());
+        p.valuation = None;
+        assert!(validate_prepared(&p).is_ok());
         p = prepared();
         p.intent.maximum_costs[0].amount.atoms = gofin_domain::Quantity::from_u64(4);
         assert!(validate_prepared(&p).is_err());

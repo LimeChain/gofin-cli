@@ -4,6 +4,9 @@ Use this guide to select evidence for the change being made. It is not a release
 
 ## Positive acceptance scenarios
 
+The required `outcome` group covers A1–A26 of the execution simplification contract. Missing registrations fail the group; they are never marked passed by component tests. Each acceptance scenario uses the real CLI, broker, engine and adapter against a controlled external transport. Record approvals, exact provider submissions per stage, developer interventions, remaining uncertainty and admission probes on the same and another account. The four-action workflow has four logical actions and approvals; provider submission counts follow its actual stages. A13 tests conservative unconfirmed order lookups, not a venue guarantee that absence proves nonexecution. A15 proves Kraken's correlated refund; Binance and Hyperliquid remain unconfirmed when their supported observations cannot prove a refund. The user waived the Coinbase-specific refund and UI-approval cases and requested Coinbase App guidance. A passing qualified aggregate does not erase those evidence limits.
+
+
 The acceptance suite exercises the public CLI, broker and real adapters against
 owned Anvil/Surfpool environments or controlled exchange/bridge transports.
 Use Surfpool for new Solana scenarios. A mock supplies external service behavior;
@@ -54,12 +57,11 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Kamino | KLend supply/borrow/SPL transfer-and-return/repay/withdraw; separate lending-vault and liquidity-vault deposit/withdraw lifecycles. |
 | Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |
 | Papertrade | Fund/register, open long, trigger liquidation in fixture, claim that position's PAPER award, stake and claim positive internal trading-USDC. Separate ordinary long/close lifecycle. |
-| Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
+| Cross-provider workflow | Close a Hyperliquid position, withdraw collateral, bridge and swap as four logical actions and approvals, with exact provider submissions counted per stage. |
 
-PancakeSwap V3 is excluded from the required E2E matrix. Its Arbitrum fork
-roundtrip was removed after the initial fee-tier-500 quote returned
-`QUOTE_UNAVAILABLE`; this leaves its public CLI roundtrip unverified by this
-matrix. Product support, discovery and security checks remain in place.
+PancakeSwap V3 is excluded from the required E2E matrix. Its separate owned
+Arbitrum fork rehearsal covers the permit-signed swap and a Sushi return; that
+fixture is not a required-matrix pass or live settlement evidence.
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
 unsupported institutional funding APIs, and CCTP on Robinhood are not made
@@ -275,8 +277,8 @@ source hashes and command logs in the same ignored evidence directory.
 
 Replace positive unit checks once their public behavior is covered by a passing
 scenario. Retain focused negative tests at security boundaries: authority and
-intent binding, revocation, duplicate spending and replay, reservations and
-uncertain outcomes, unverified settlement evidence, exact financial limits,
+intent binding, revocation, duplicate execution and replay,
+uncertain outcomes, unverified settlement evidence, exact native bounds,
 credential isolation and preservation of protected state during migration.
 Do not retain generic formatting or happy-path adapter unit tests merely to
 maintain a test count, or remove a security rejection because a positive flow
@@ -324,7 +326,7 @@ Start with a regression that reproduces the changed behavior, then run the affec
 | --- | --- | --- |
 | Documentation or skills only | Resolve changed links/anchors, check commands against their definitions, validate changed skills, `git diff --check` | Run embedded scripts with synthetic inputs if their behavior changed; no Rust rebuild for prose changes. |
 | CLI parsing, presentation or discovery | Affected CLI/discovery/presentation tests; `make test-ui` for the combined surface | Relevant PTY, redirected, no-color, JSON, cancellation and expiry paths. Regenerate with `make catalog` when financial definitions change, and verify the resulting diff. |
-| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover standalone approval separately from named plans, along with zero/nonzero budgets, fee and asset variants, and malformed-binding rejection. No biometric prompt is needed for contract tests. |
+| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover native standalone and compound approval, classified terms, fee and asset variants, advisory history and malformed-binding rejection. No biometric prompt is needed for contract tests. |
 | One adapter, pricing or network behavior | Relevant `cargo test --locked -p <crate>` target/filter and affected broker integration tests | Exercise real adapter preparation through the engine and settlement boundary. Use an owned fork if deployed contract behavior matters. |
 | Engine, store, shared types or authorization | Tests in affected crates and representative consuming adapters/broker workflows | Cover financial limits, exact approvals, duplicates, uncertainty, restart and migrations as affected. Use `make test-integration` for the combined broker/store/authorization and lifecycle surface. |
 | Development environment lifecycle | Individual affected Python suite in `scripts/`; `make test-dev-env` for combined ownership/recovery/routing checks | Use temporary state roots and synthetic credentials, including tests of live-mode composition. No real import or funded operation is required. |
@@ -385,8 +387,8 @@ that obtains the binding from the real Rust producer and passes it to the real
 Swift presentation function. Assert the material amounts and limits, not only a
 nonempty string. Retain malformed and mismatched fixtures to verify rejection;
 never replace a failing exact review with a permissive generic fallback.
-Standalone approval and named-plan approval use different presentation paths
-and need separate coverage when affected.
+Standalone and compound native terms need coverage from their real producers,
+including explicit deadlines and action-wide fee caps.
 
 `make test-native-approval` runs the full Swift presentation suite, generates and
 consumes the Rust manual-resolution fixture and every action from the Rust approval
@@ -404,7 +406,7 @@ metadata and checks that revalidation neither refetches nor changes the approved
 name. Missing metadata and mismatched mint/decimals retain the identity fallback.
 
 Producer-to-Swift checks also run in the existing Coinbase, Binance, Kamino and
-bridge broker fixtures, including standalone, plan and reusable-boundary paths,
+bridge broker fixtures, including standalone and compound paths,
 and in the Ethereum Aave borrowing and Papertrade workflow fixtures. These use real
 preparation against synthetic transports, the production canonical review envelope
 and the compiled Swift renderer. Additional synthetic Perps contract tests cover
@@ -423,19 +425,11 @@ Use the worktree-owned [development environment](development-environments.md) fo
 
 `make test-dev-env` covers synthetic lifecycle, actual development runtime, ownership, recovery and routing fixtures without Anvil. `make test-integration` includes that target, so do not run both unchanged back to back. Most individual regression suites can run without a persistent development broker.
 
-`make test-full-plan-rehearsal` runs one ten-step plan through the public CLI,
-broker and real Kraken, Ethereum/Aave, bridge and Hyperliquid adapters, using local
-controlled transports and disposable credentials. It covers a Kraken sale and
-withdrawal, wrapping and finite approval, Aave supply and bounded borrowing,
-one adapter-scoped `bridge.execute` step funded by the prior borrow (with separate
-saved-quote approval and deposit children), destination settlement, then Hyperliquid
-funding, isolated leverage and an order under one approval. Variants reconcile an accepted Kraken
-order after response loss without resubmission, or retain the original unknown
-submission and block downstream work when history remains inconclusive. The test
-checks debt, allowance consumption, gas, destination credit and duplicate handling;
-it also rejects a perpetual order's fictitious principal funding during full-plan
-review, before approval or writes, while retaining valid fee-funded execution.
-This is synthetic workflow evidence, not a fork, live trade or native approval test.
+Named-plan and reusable-boundary creation are retired. Replace their workflow
+coverage with separately approved actions using original-identity status and
+continuation between dependent stages. The required four-action workflow counts
+four logical actions and four approvals; provider submissions are counted per
+stage, including any prerequisite allowance or bridge finalization.
 
 `make test-coinbase` includes public-CLI deposit and sale-funded withdrawal
 recovery scenarios using the actual Coinbase transport against local HTTP.
@@ -497,9 +491,9 @@ human approval evidence.
 
 ## Complete workflow rehearsal
 
-For execution-path changes, verify the affected scenario across the boundaries it crosses: public CLI → broker → engine authority/reservations → real adapter preparation → controlled transport → reconciliation and durable settlement. Use isolated credentials, temporary journals and a fixture authorizer while retaining production financial logic. Fix or extend the relevant harness when coverage is missing; a generic synthetic write or a preview cannot establish adapter workflow correctness.
+For execution-path changes, verify the affected scenario across the boundaries it crosses: public CLI → broker → engine native authority and durable admission → real adapter preparation → controlled transport → reconciliation and durable settlement. Use isolated credentials, temporary journals and a fixture authorizer while retaining production financial logic. Fix or extend the relevant harness when coverage is missing; a generic synthetic write or a preview cannot establish adapter workflow correctness.
 
-Match the intended standalone, boundary or named-plan mode. A future-funded step must execute after verified predecessor credit; a plan preview or successful standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
+Match the intended standalone or compound mode. A dependent compound stage must execute after its declared prerequisite is verified; a preview or unrelated standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
 
 For Meteora, `make test-meteora-rehearsal` covers the synthetic public-CLI swap
 and named-plan authority/recovery fixture. `make test-meteora-validator`
@@ -534,7 +528,7 @@ current liquidity, or native approval.
 | Outcomes | Full/partial/no fill, verified rejection or revert with costs, missing/conflicting proof. |
 | Recovery and authority | Response loss before/after dispatch, duplicates, restart, cancellation races, expiry/revocation and upgrades with pending records. |
 
-Specify expected financial effects independently of the accounting helper being tested. Assert actual fixture balances/positions/permissions, verified effects, journal identities, reservations and remaining authority. An uncertain submission must retain its identity and reservation without another dispatch. A reverted transaction may spend gas without producing the requested effect; verify both facts.
+Specify expected financial effects independently of the accounting helper being tested. Assert actual fixture balances/positions/permissions, verified effects, journal identities, actual stage costs and remaining native authority. An uncertain submission must retain its original identity without another dispatch. A reverted transaction may spend gas without producing the requested effect; verify both facts.
 
 Turn defects found during E2E or human testing into reproducible regressions at the failing component boundary. Re-run affected scenarios after fixes against the matching build; preserve settled steps when resuming live work. Do not weaken assertions, discard pending state or substitute authorization modes to obtain a pass. An unchanged passing suite need not run again without a concrete reason.
 

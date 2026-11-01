@@ -777,6 +777,7 @@ impl HyperliquidProfile {
         let mut pending = false;
         let mut any_fill = false;
         let mut dispatch_rejections = Vec::new();
+        let mut discrepancies = Vec::new();
         // A batch can contain multiple fills against the same derivative market.
         // Their position anchors must form one sequential path, not several
         // competing deltas from the same pre-batch snapshot.
@@ -860,12 +861,34 @@ impl HyperliquidProfile {
                 oid,
                 since,
                 &scope.input.size,
-                scope.fill_price_bounds(),
+                (None, None),
             )?;
+            let (minimum, maximum) = scope.fill_price_bounds();
+            for fill in fills
+                .iter()
+                .filter(|fill| fill["oid"].as_u64() == Some(oid))
+            {
+                let price = q(fill["px"]
+                    .as_str()
+                    .ok_or_else(|| native_error("Matching fill price missing."))?)?;
+                if minimum
+                    .map(q)
+                    .transpose()?
+                    .is_some_and(|bound| price < bound)
+                    || maximum
+                        .map(q)
+                        .transpose()?
+                        .is_some_and(|bound| price > bound)
+                {
+                    discrepancies.push(json!({"term":"price","order":scope.cloid,"actual":fill["px"],"approved":{"minimum":minimum,"maximum":maximum}}));
+                }
+            }
             if total.quote > q(&scope.input.max_notional_usdc)? {
-                return Err(native_error(
-                    "Matching fill notional exceeds the approved maximum; preserve the original order for reconciliation, do not submit another order.",
-                ));
+                discrepancies.push(json!({"term":"notional","order":scope.cloid,"actual":total.quote.to_decimal(36),"approved":scope.input.max_notional_usdc,"asset":"USDC"}));
+            }
+            let approved_loss = scope.input.max_realized_loss_usdc.as_deref().unwrap_or("0");
+            if total.realized_loss > q(approved_loss)? {
+                discrepancies.push(json!({"term":"realized_loss","order":scope.cloid,"actual":total.realized_loss.to_decimal(36),"approved":approved_loss,"asset":"USDC"}));
             }
             let remaining = q(native["sz"]
                 .as_str()
@@ -1063,9 +1086,7 @@ impl HyperliquidProfile {
                 }
             }
             if economic_fees > q(&scope.input.max_fee_usdc)? {
-                return Err(native_error(
-                    "Matching fill fees exceed the economic fee bound.",
-                ));
+                discrepancies.push(json!({"term":"fee","order":scope.cloid,"actual":economic_fees.to_decimal(36),"approved":scope.input.max_fee_usdc,"asset":"USDC"}));
             }
             digests.extend(total.event_digests);
             receipts.push(json!({
@@ -1152,7 +1173,11 @@ impl HyperliquidProfile {
         } else {
             Status::Failed
         };
-        self.verified_result(record,submission,status,effects,json!({"method":"owner-client-id-and-immutable-fill-receipts","orders":receipts,"fills":raw_fills,"dispatch_rejections":dispatch_rejections.clone(),"partial_outcome":if dispatch_rejections.is_empty(){Value::Null}else{json!({"kind":"mixed_batch","rejected_children":dispatch_rejections})}}),digests)
+        let mut evidence = json!({"method":"owner-client-id-and-immutable-fill-receipts","orders":receipts,"fills":raw_fills,"dispatch_rejections":dispatch_rejections.clone(),"partial_outcome":if dispatch_rejections.is_empty(){Value::Null}else{json!({"kind":"mixed_batch","rejected_children":dispatch_rejections})}});
+        if !discrepancies.is_empty() {
+            evidence["outcome_attention"] = json!({"kind":"discrepancy","actual":discrepancies,"approved":"per-order native bounds"});
+        }
+        self.verified_result(record, submission, status, effects, evidence, digests)
     }
     pub(crate) fn verified_result(
         &self,

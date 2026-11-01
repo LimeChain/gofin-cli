@@ -1899,6 +1899,7 @@ pub enum CcxtErrorKind {
     Unsupported,
     InvalidResponse,
     InvalidRequest,
+    OrderNotFound,
 }
 /// Closed Funding error codes; provider messages and unrecognized codes never cross
 /// the transport boundary.
@@ -2605,7 +2606,7 @@ impl CcxtClient {
                         error.exchange_code = raw.as_ref().and_then(|v| v.get("code")).and_then(Value::as_i64);
                         if matches!(status,418|429) { error.kind = CcxtErrorKind::RateLimited; }
                         else if matches!(status,401|403) { error.kind = CcxtErrorKind::PermissionDenied; }
-                        else if status >= 400 { error.kind = CcxtErrorKind::Rejected; }
+                        else if status >= 400 && error.kind != CcxtErrorKind::OrderNotFound { error.kind = CcxtErrorKind::Rejected; }
                     } else if (200..300).contains(&status) {
                         result = raw.filter(valid_response_shape).ok_or(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None,funding_error_code:None});
                     } else { result = Err(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None,funding_error_code:None}); }
@@ -2792,7 +2793,9 @@ impl CcxtClient {
     feature = "bybit"
 ))]
 pub(crate) fn sanitized(error: ccxt::ExchangeError) -> CcxtError {
-    let kind = if error.is("RateLimitExceeded") || error.is("DDoSProtection") {
+    let kind = if error.is("OrderNotFound") {
+        CcxtErrorKind::OrderNotFound
+    } else if error.is("RateLimitExceeded") || error.is("DDoSProtection") {
         CcxtErrorKind::RateLimited
     } else if error.is("PermissionDenied") {
         CcxtErrorKind::PermissionDenied

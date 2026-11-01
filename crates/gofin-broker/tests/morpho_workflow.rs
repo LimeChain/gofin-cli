@@ -94,13 +94,6 @@ impl Clock for TestClock {
     }
 }
 #[derive(Default)]
-struct AdjustableClock(AtomicI64);
-impl Clock for AdjustableClock {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        chrono::Utc::now() + chrono::Duration::seconds(self.0.load(Ordering::SeqCst))
-    }
-}
-#[derive(Default)]
 struct Approval(AtomicUsize);
 #[async_trait]
 impl Authorizer for Approval {
@@ -109,7 +102,7 @@ impl Authorizer for Approval {
         Ok(ApprovalAudit {
             source: None,
             yolo_provenance: None,
-            mechanism: "synthetic Morpho named plan".into(),
+            mechanism: "synthetic Morpho native intent".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
             approved_at: TestClock.now().to_rfc3339(),
@@ -468,7 +461,12 @@ impl EvmRpc for Rpc {
             .filter(|v| v.starts_with("0x"))
             .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
             .unwrap_or(latest);
-        let s = c.states.range(..=selected).next_back().unwrap().1;
+        let s = c
+            .states
+            .range(..=selected)
+            .next_back()
+            .ok_or_else(|| fault("Historical state is not available in this fixture"))?
+            .1;
         Ok(match method {
             "eth_chainId" => json!("0x1"),
             "eth_blockNumber" => json!(format!("{latest:#x}")),
@@ -814,43 +812,6 @@ impl Client {
         ])
         .await
     }
-    async fn authorize(&self, plan: &Value, id: &str) -> String {
-        let review = self
-            .call(vec![
-                "plans".into(),
-                "preview".into(),
-                "--input".into(),
-                plan.to_string(),
-                "--valid-for".into(),
-                "10m".into(),
-            ])
-            .await;
-        let hash = review["review_hash"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{review}"));
-        let authorized = self
-            .call(vec![
-                "plans".into(),
-                "authorize".into(),
-                "--input".into(),
-                plan.to_string(),
-                "--id".into(),
-                id.into(),
-                "--review-hash".into(),
-                hash.into(),
-                "--valid-for".into(),
-                "10m".into(),
-            ])
-            .await;
-        authorized["plan_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{authorized}"))
-            .to_owned()
-    }
-    async fn plan_status(&self, plan: &str) -> Value {
-        self.call(vec!["plans".into(), "status".into(), plan.into()])
-            .await
-    }
     async fn approve_deposit(&self, plan: &str) {
         let approved = self
             .execute(
@@ -872,8 +833,8 @@ impl Client {
         name: &str,
         input: Value,
         id: &str,
-        plan: &str,
-        step: &str,
+        _plan: &str,
+        _step: &str,
         dry: bool,
     ) -> Value {
         let mut args = vec![
@@ -883,10 +844,6 @@ impl Client {
             input.to_string(),
             "--id".into(),
             id.into(),
-            "--plan".into(),
-            plan.into(),
-            "--step".into(),
-            step.into(),
         ];
         if dry {
             args.push("--dry-run".into())
@@ -985,16 +942,15 @@ fn operation_id(result: &Value) -> String {
         .to_owned()
 }
 fn journal_record(path: &Path, id: &str) -> OperationRecord {
-    serde_json::from_value(Store::open(path).unwrap().get_record(id).unwrap().unwrap()).unwrap()
+    serde_json::from_value(
+        Store::open(path)
+            .unwrap()
+            .get_typed_record(id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
 }
-fn assert_reservation_count(status: &Value, count: usize) {
-    assert_eq!(
-        status["usage"]["reservations"].as_array().unwrap().len(),
-        count,
-        "{status}"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires built public CLI: make test-morpho-rehearsal"]
 async fn settled_approval_survives_balance_gas_and_simulation_preflight_failures() {
@@ -1004,7 +960,7 @@ async fn settled_approval_survives_balance_gas_and_simulation_preflight_failures
     let approval = Arc::new(Approval::default());
     let client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
     let plan = deposit_plan();
-    let plan_id = client.authorize(&plan, "preflight-failures").await;
+    let plan_id = String::new();
     client.approve_deposit(&plan_id).await;
     let funded = rpc.state();
     assert_eq!(funded.asset_allowance, U256::from(2_000_000));
@@ -1041,7 +997,7 @@ async fn settled_approval_survives_balance_gas_and_simulation_preflight_failures
         assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 1);
         assert_eq!(rpc.chain.lock().unwrap().signed.len(), 1);
         assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        assert_reservation_count(&client.plan_status(&plan_id).await, 0);
+
         rpc.fail_simulation.store(false, Ordering::SeqCst);
     }
     rpc.change_state(|state| *state = funded.clone());
@@ -1060,25 +1016,22 @@ async fn settled_approval_survives_balance_gas_and_simulation_preflight_failures
         .await;
     assert_eq!(settled["status"], "completed", "{settled}");
     assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     assert_eq!(rpc.state().cash, U256::from(8_000_000));
     assert_eq!(rpc.state().asset_allowance, U256::ZERO);
     assert!(rpc.state().shares > U256::ZERO);
-    assert_reservation_count(&client.plan_status(&plan_id).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires built public CLI: make test-morpho-rehearsal"]
-async fn independent_underlying_credit_does_not_block_settlement_or_become_plan_proceeds() {
+async fn independent_underlying_credit_does_not_block_settlement_or_become_attributed_proceeds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.sqlite");
     let rpc = Arc::new(Rpc::new());
     let approval = Arc::new(Approval::default());
     let client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
     let plan = deposit_plan();
-    let plan_id = client
-        .authorize(&plan, "independent-underlying-credit")
-        .await;
+    let plan_id = String::new();
     client.approve_deposit(&plan_id).await;
     rpc.hide_receipts.store(true, Ordering::SeqCst);
     rpc.credit_dust_after_next_action
@@ -1098,7 +1051,7 @@ async fn independent_underlying_credit_does_not_block_settlement_or_become_plan_
     let original = journal_record(&path, &id);
     assert!(!original.status.terminal());
     assert!(original.effects.is_none());
-    assert_reservation_count(&client.plan_status(&plan_id).await, 1);
+
     assert_eq!(rpc.state().cash, U256::from(8_000_001));
 
     // Removing the global cash equality must not hide an unexpected debit
@@ -1111,7 +1064,7 @@ async fn independent_underlying_credit_does_not_block_settlement_or_become_plan_
         "{rejected}"
     );
     assert!(journal_record(&path, &id).effects.is_none());
-    assert_reservation_count(&client.plan_status(&plan_id).await, 1);
+
     rpc.unexpected_receipt_debit.store(false, Ordering::SeqCst);
 
     let settled = client.call(vec!["status".into(), id.clone()]).await;
@@ -1140,14 +1093,7 @@ async fn independent_underlying_credit_does_not_block_settlement_or_become_plan_
             .iter()
             .any(|effect| matches!(effect, FinancialEffect::UsableCredit { .. }))
     );
-    let plan_status = client.plan_status(&plan_id).await;
-    assert_reservation_count(&plan_status, 0);
-    assert!(
-        plan_status["usage"]["verified_proceeds"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+
     assert_eq!(
         Store::open(&path).unwrap().reservation_count(&id).unwrap(),
         0
@@ -1169,9 +1115,8 @@ async fn independent_underlying_credit_does_not_block_settlement_or_become_plan_
     assert_eq!(journal_record(&path, &id).effects, record.effects);
     assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
     assert_eq!(rpc.chain.lock().unwrap().signed.len(), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     assert_eq!(rpc.state().cash, U256::from(8_000_001));
-    assert_reservation_count(&restarted.plan_status(&plan_id).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1184,7 +1129,7 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
         let approval = Arc::new(Approval::default());
         let client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
         let plan = plan();
-        let plan_id = client.authorize(&plan, "independent-share-transfer").await;
+        let plan_id = String::new();
         client.approve_deposit(&plan_id).await;
         let expected_shares = rpc.state().preview_deposit(U256::from(2_000_000));
         rpc.hide_receipts.store(true, Ordering::SeqCst);
@@ -1204,7 +1149,6 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
         let id = operation_id(&result);
         let original = journal_record(&path, &id);
         assert!(!original.status.terminal());
-        assert_reservation_count(&client.plan_status(&plan_id).await, 1);
 
         rpc.hide_receipts.store(false, Ordering::SeqCst);
         rpc.unexpected_receipt_share_transfer
@@ -1215,7 +1159,7 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
             "{rejected}"
         );
         assert!(journal_record(&path, &id).effects.is_none());
-        assert_reservation_count(&client.plan_status(&plan_id).await, 1);
+
         rpc.unexpected_receipt_share_transfer
             .store(false, Ordering::SeqCst);
 
@@ -1270,14 +1214,7 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
                 .iter()
                 .any(|effect| matches!(effect, FinancialEffect::UsableCredit { .. }))
         );
-        let plan_status = client.plan_status(&plan_id).await;
-        assert_reservation_count(&plan_status, 0);
-        assert!(
-            plan_status["usage"]["verified_proceeds"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+
         assert_eq!(
             Store::open(&path).unwrap().reservation_count(&id).unwrap(),
             0
@@ -1300,8 +1237,7 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
         assert_eq!(journal_record(&path, &id).effects, record.effects);
         assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
         assert_eq!(rpc.chain.lock().unwrap().signed.len(), 2);
-        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        assert_reservation_count(&restarted.plan_status(&plan_id).await, 0);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 2);
 
         // A settled transaction does not silently authorize adopting external
         // share changes into the next financial action or its cost basis.
@@ -1335,7 +1271,6 @@ async fn independent_share_transfers_settle_attributed_backing_without_importing
         );
         assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 3);
         assert_eq!(rpc.state().shares, current.shares);
-        assert_reservation_count(&restarted.plan_status(&plan_id).await, 0);
     }
 }
 
@@ -1348,7 +1283,7 @@ async fn reverted_morpho_action_settles_only_gas_and_never_replays() {
     let approval = Arc::new(Approval::default());
     let client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
     let plan = deposit_plan();
-    let plan_id = client.authorize(&plan, "reverted-action").await;
+    let plan_id = String::new();
     client.approve_deposit(&plan_id).await;
     let before = rpc.state();
     rpc.revert_next_action.store(true, Ordering::SeqCst);
@@ -1398,26 +1333,6 @@ async fn reverted_morpho_action_settles_only_gas_and_never_replays() {
     expected.native -= U256::from(21_000_000);
     assert_eq!(rpc.state(), expected);
     assert_eq!(rpc.state().asset_allowance, U256::from(2_000_000));
-    let plan_status = client.plan_status(&plan_id).await;
-    assert_reservation_count(&plan_status, 0);
-    assert!(
-        plan_status["usage"]["consumed_debits"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{plan_status}"
-    );
-    assert_eq!(
-        plan_status["usage"]["consumed_costs"][0]["amount"]["atoms"], "42000000",
-        "{plan_status}"
-    );
-    assert!(
-        plan_status["usage"]["verified_proceeds"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{plan_status}"
-    );
     let repeated = client
         .execute(
             "morpho.deposit",
@@ -1430,20 +1345,20 @@ async fn reverted_morpho_action_settles_only_gas_and_never_replays() {
         .await;
     assert_eq!(operation_id(&repeated), id, "{repeated}");
     assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     assert_eq!(journal_record(&path, &id).effects, record.effects);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires built public CLI: make test-morpho-rehearsal"]
-async fn missing_then_conflicting_receipt_preserves_identity_reservation_and_blocks_replay() {
+async fn missing_then_conflicting_receipt_preserves_identity_and_blocks_replay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.sqlite");
     let rpc = Arc::new(Rpc::new());
     let approval = Arc::new(Approval::default());
     let client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
     let plan = deposit_plan();
-    let plan_id = client.authorize(&plan, "unresolved-proof").await;
+    let plan_id = String::new();
     client.approve_deposit(&plan_id).await;
     rpc.hide_receipts.store(true, Ordering::SeqCst);
     let input = plan["steps"][1]["input"].clone();
@@ -1465,8 +1380,13 @@ async fn missing_then_conflicting_receipt_preserves_identity_reservation_and_blo
         .expect("Dispatch identity must be durable");
     assert!(!initial.status.terminal());
     assert!(initial.effects.is_none());
-    assert!(Store::open(&path).unwrap().reservation_count(&id).unwrap() > 0);
-    assert_reservation_count(&client.plan_status(&plan_id).await, 1);
+    assert!(
+        Store::open(&path)
+            .unwrap()
+            .get_typed_record(&id)
+            .unwrap()
+            .is_some()
+    );
 
     for conflicting in [false, true] {
         rpc.hide_receipts.store(!conflicting, Ordering::SeqCst);
@@ -1496,7 +1416,13 @@ async fn missing_then_conflicting_receipt_preserves_identity_reservation_and_blo
         assert!(!record.status.terminal(), "{record:?}");
         assert_eq!(record.submission.as_ref(), Some(submission));
         assert!(record.effects.is_none());
-        assert!(Store::open(&path).unwrap().reservation_count(&id).unwrap() > 0);
+        assert!(
+            Store::open(&path)
+                .unwrap()
+                .get_typed_record(&id)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
         assert_eq!(rpc.chain.lock().unwrap().signed.len(), 2);
     }
@@ -1523,55 +1449,16 @@ async fn missing_then_conflicting_receipt_preserves_identity_reservation_and_blo
         Store::open(&path).unwrap().reservation_count(&id).unwrap(),
         0
     );
-    assert_reservation_count(&client.plan_status(&plan_id).await, 0);
+
     assert_eq!(rpc.state().cash, U256::from(8_000_000));
     assert!(rpc.state().shares > U256::ZERO);
     assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires built public CLI: make test-morpho-rehearsal"]
-async fn expired_plan_cannot_spend_the_settled_approval() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
-    let rpc = Arc::new(Rpc::new());
-    let approval = Arc::new(Approval::default());
-    let clock = Arc::new(AdjustableClock::default());
-    let client = Client::new(
-        runtime_with_clock(&path, rpc.clone(), approval.clone(), clock.clone()),
-        dir.path(),
-    )
-    .await;
-    let plan = deposit_plan();
-    let plan_id = client.authorize(&plan, "expiring-deposit").await;
-    client.approve_deposit(&plan_id).await;
-    let before = rpc.state();
-    clock.0.store(3_600, Ordering::SeqCst);
-    let rejected = client
-        .execute(
-            "morpho.deposit",
-            plan["steps"][1]["input"].clone(),
-            "expired-deposit",
-            &plan_id,
-            "deposit",
-            false,
-        )
-        .await;
-    assert_eq!(
-        rejected["error"]["code"], "PLAN_AUTHORIZATION_INACTIVE",
-        "{rejected}"
-    );
-    assert_eq!(rpc.state(), before);
-    assert_eq!(rpc.state().asset_allowance, U256::from(2_000_000));
-    assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(rpc.chain.lock().unwrap().signed.len(), 1);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    assert_reservation_count(&client.plan_status(&plan_id).await, 0);
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires built public CLI: make test-morpho-rehearsal"]
-async fn named_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes_loss() {
+async fn native_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes_loss() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.sqlite");
     let rpc = Arc::new(Rpc::new());
@@ -1592,34 +1479,8 @@ async fn named_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes
         "{inspection}"
     );
     let plan = plan();
-    let review = client
-        .call(vec![
-            "plans".into(),
-            "preview".into(),
-            "--input".into(),
-            plan.to_string(),
-        ])
-        .await;
-    let hash = review["review_hash"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{review}"));
-    let authorization = client
-        .call(vec![
-            "plans".into(),
-            "authorize".into(),
-            "--input".into(),
-            plan.to_string(),
-            "--id".into(),
-            "morpho-roundtrip".into(),
-            "--review-hash".into(),
-            hash.into(),
-        ])
-        .await;
-    let plan_id = authorization["plan_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{authorization}"))
-        .to_owned();
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    let plan_id = String::new();
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
     let steps = plan["steps"].as_array().unwrap();
     for (index, step) in steps.iter().enumerate() {
         let op = step["operation"].as_str().unwrap();
@@ -1627,15 +1488,6 @@ async fn named_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes
         let request = format!("morpho-{id}");
         let input = step["input"].clone();
         if index == 1 {
-            let mut weakened = input.clone();
-            weakened["min_shares"] = json!("1");
-            let rejected = client
-                .execute(op, weakened, "morpho-weakened-floor", &plan_id, id, true)
-                .await;
-            assert_eq!(
-                rejected["error"]["code"], "BOUNDARY_VIOLATION",
-                "{rejected}"
-            );
             rpc.fail_simulation.store(true, Ordering::SeqCst);
             let failed = client
                 .execute(
@@ -1674,15 +1526,7 @@ async fn named_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes
                 .await;
             assert_ne!(pending["status"], "completed", "{pending}");
             assert_eq!(rpc.dispatches.load(Ordering::SeqCst), sends);
-            let reserved = client
-                .call(vec!["plans".into(), "status".into(), plan_id.clone()])
-                .await;
-            assert_eq!(
-                reserved["usage"]["reservations"].as_array().unwrap().len(),
-                1,
-                "{reserved}"
-            );
-            assert_eq!(reserved["usage"]["reservations"][0]["step_id"], "deposit");
+            assert!(journal_record(&path, &operation_id).submission.is_some());
             rpc.hide_receipts.store(false, Ordering::SeqCst);
         }
         let settled = client
@@ -1701,34 +1545,7 @@ async fn named_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realizes
     assert_eq!(state.asset_allowance, U256::ZERO);
     assert!(state.cash < U256::from(10_000_000));
     assert!(state.cash > U256::from(9_700_000));
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    let status = client
-        .call(vec!["plans".into(), "status".into(), plan_id])
-        .await;
-    assert!(status.to_string().contains("completed"), "{status}");
-    assert!(
-        status["usage"]["reservations"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{status}"
-    );
-    assert!(
-        status["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|step| step["state"] == "completed"),
-        "{status}"
-    );
-    assert!(
-        status["usage"]["verified_proceeds"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|proceeds| proceeds["producing_step_id"] == "partial-withdraw"),
-        "{status}"
-    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), steps.len());
     let positions = client
         .read(
             "morpho.positions",

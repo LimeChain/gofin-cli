@@ -612,8 +612,7 @@ pub fn definitions() -> Vec<Definition> {
         }
         if *operation == "swap.execute" {
             schema["properties"]["fee_tier"] = json!({"type":"integer","enum":[100,500,2500,3000,10000]});
-            semantics["plan_only"] = json!(true);
-            semantics["authorization"] = json!("Named-plan authorization only; standalone write and boundary authorization are unsupported.");
+            semantics["authorization"] = json!("Standalone approval binds the nominated DEX, exact input, minimum output, recipient, deadline and native fee cap.");
             semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
             semantics["authority_expiry_fields"] = json!([{"pointer":"/deadline","format":"unix_seconds"}]);
             semantics["plan_permission"] = json!({
@@ -641,7 +640,7 @@ pub fn definitions() -> Vec<Definition> {
             });
             semantics["boundary_authorization"] = json!({
                 "supported": false,
-                "reason": "swap.execute is plan-only. Standalone boundary authorization cannot preserve the reviewed intent and nominated candidate relationship; use a named plan with the reviewed swap bounds."
+                "reason": "Reusable boundary authorization is unavailable; approve each standalone swap attempt."
             });
         }
         if matches!(*operation, "uniswap.quote" | "uniswap.swap" | "ramses.quote" | "ramses.swap" | "sushi.quote" | "sushi.swap" | "pancakeswap.quote" | "pancakeswap.swap") {

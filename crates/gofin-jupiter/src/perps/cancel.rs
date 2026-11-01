@@ -440,7 +440,7 @@ pub(super) async fn prepare(adapter: &PerpsAdapter, input: &Value) -> Result<Pre
         "keeper_signer":instruction.keeper_signer,
         "approved_external_cosigners":approved_external_cosigners,
     });
-    let (valuation, _) = adapter::valuation(
+    let valuation = adapter::valuation(
         adapter.prices.clone(),
         asset("native", 9),
         0,
@@ -449,7 +449,9 @@ pub(super) async fn prepare(adapter: &PerpsAdapter, input: &Value) -> Result<Pre
         maximum_network_fee_lamports,
         wallet.address(),
     )
-    .await?;
+    .await
+    .ok()
+    .map(|(valuation, _)| valuation);
     Ok(PreparedOperation {
         operation: OP_LIMIT_CANCEL.into(),
         input: input.clone(),
@@ -467,7 +469,7 @@ pub(super) async fn prepare(adapter: &PerpsAdapter, input: &Value) -> Result<Pre
         ],
         observed_at: Utc::now().to_rfc3339(),
         expires_at: (Utc::now() + ChronoDuration::seconds(20)).to_rfc3339(),
-        valuation: Some(valuation),
+        valuation,
         intent: FinancialIntent {
             debits: vec![],
             maximum_costs: vec![fee_bound],
@@ -751,11 +753,18 @@ pub(super) async fn reconcile(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
-        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-            status: Status::Pending,
-            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-            verified: None,
-        }),
+        ReceiptOutcome::ExpiredWithoutInclusion {
+            signature,
+            message_sha256,
+            reason,
+            proof,
+        } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+            submission,
+            &signature,
+            &message_sha256,
+            &reason,
+            &proof,
+        ),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason,"request":binding["request"]}),

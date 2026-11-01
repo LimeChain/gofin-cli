@@ -216,7 +216,14 @@ pub fn validate_meta_quote(
     }
     let out_amount = exact_atoms(&response.out_amount)?;
     let threshold = exact_atoms(&response.other_amount_threshold)?;
-    if out_amount < minimum_output || threshold < minimum_output || threshold > out_amount {
+    let relative_floor = ((out_amount as u128
+        * (10_000u128.saturating_sub(intent.maximum_slippage_bps as u128)))
+        / 10_000) as u64;
+    if out_amount < minimum_output
+        || threshold < minimum_output
+        || threshold < relative_floor
+        || threshold > out_amount
+    {
         return Err(GoFinError::new(
             "JUPITER_MINIMUM_OUTPUT_UNMET",
             "prepare",
@@ -511,6 +518,26 @@ mod tests {
     fn validate(value: Value) -> Result<ValidatedQuote> {
         let response = serde_json::from_value(value).map_err(|_| invalid_order())?;
         validate_meta_order(&intent(), WALLET, response).map(|order| order.quote)
+    }
+
+    #[test]
+    fn fresh_quote_enforces_both_native_floor_and_relative_slippage() {
+        let mut fresh = response();
+        fresh["outAmount"] = json!("200");
+        fresh["otherAmountThreshold"] = json!("198");
+        assert!(validate(fresh.clone()).is_ok());
+        fresh["otherAmountThreshold"] = json!("197");
+        assert_eq!(
+            validate(fresh).unwrap_err().code,
+            "JUPITER_MINIMUM_OUTPUT_UNMET"
+        );
+        let mut below_hard_floor = response();
+        below_hard_floor["outAmount"] = json!("89");
+        below_hard_floor["otherAmountThreshold"] = json!("89");
+        assert_eq!(
+            validate(below_hard_floor).unwrap_err().code,
+            "JUPITER_MINIMUM_OUTPUT_UNMET"
+        );
     }
 
     #[test]

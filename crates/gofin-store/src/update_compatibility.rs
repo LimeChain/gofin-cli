@@ -93,6 +93,24 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>().unwrap();
         tables
             .into_iter()
+            .filter(|table| {
+                !matches!(
+                    table.as_str(),
+                    "outcome_observations"
+                        | "outcome_dismissals"
+                        | "logical_actions"
+                        | "action_authorities"
+                        | "stage_attempts"
+                        | "action_continuations"
+                        | "evm_nonce_claims"
+                        | "evm_submission_nonces"
+                        | "evm_definitive_rejections"
+                        | "submission_admissions"
+                        | "reauthorization_claims"
+                        | "verified_position_anchors"
+                        | "preapproval_continuations"
+                )
+            })
             .map(|table| {
                 let mut query = connection
                     .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
@@ -118,7 +136,7 @@ mod tests {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.path().join("journal?not-an-option.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=19; CREATE TABLE pending(id TEXT); INSERT INTO pending VALUES('unresolved-original-identity');").unwrap();
+        connection.execute_batch("DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=19; CREATE TABLE pending(id TEXT); INSERT INTO pending VALUES('unresolved-original-identity');").unwrap();
         drop(connection);
         let before = std::fs::read(&path).unwrap();
         let uid = std::fs::metadata(&path).unwrap().uid();
@@ -142,7 +160,7 @@ mod tests {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.path().join("journal.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE history(id TEXT); PRAGMA user_version=21;").unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE history(id TEXT); DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=21;").unwrap();
         let uid = std::fs::metadata(&path).unwrap().uid();
         assert_eq!(inspect_update_schema(&path, uid).unwrap(), 21);
         let count: i64 = connection
@@ -180,7 +198,7 @@ mod tests {
 
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=20; BEGIN IMMEDIATE; PRAGMA user_version=21; ROLLBACK;",
+            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=20; BEGIN IMMEDIATE; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=21; ROLLBACK;",
         )
         .unwrap();
         assert_eq!(
@@ -210,7 +228,7 @@ mod tests {
         drop(Store::open(&path).unwrap());
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=21;
+            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=21;
              INSERT INTO operations VALUES ('pending','pending-request','pending-fingerprint','synthetic.transfer','pending',NULL,'{\"approval\":{\"mechanism\":\"touch-id\"}}','t0','t0');
              INSERT INTO submissions VALUES ('pending','synthetic','original-submission','{\"nonce\":17}');
              INSERT INTO reservations VALUES ('pending','synthetic:wallet','42','3');
@@ -226,7 +244,7 @@ mod tests {
              INSERT INTO runs VALUES ('run','pending','{\"remaining\":58}','t0');"
         ).unwrap();
         let before = rows(&raw);
-        raw.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=22;")
+        raw.execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=22;")
             .unwrap();
         // Simulate the process stopping before commit: closing rolls back the marker.
         drop(raw);
@@ -299,7 +317,7 @@ mod tests {
         drop(Store::open(&path).unwrap());
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            r#"PRAGMA user_version=24;
+            r#"DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=24;
              INSERT INTO operations VALUES ('pending','pending-request','pending-fingerprint','jupiter.swap','pending',NULL,'{"submission":{"reference":"original"},"preview":{"binding":{"route":"router"}}}','t0','t0');
              INSERT INTO submissions VALUES ('pending','solana.transaction','original','{"message_sha256":"unchanged"}');
              INSERT INTO reservations VALUES ('pending','solana:wallet','42','3');
@@ -310,7 +328,7 @@ mod tests {
              INSERT INTO effect_ledger VALUES ('pending',0,'{"amount":42}');"#
         ).unwrap();
         let before = rows(&raw);
-        raw.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=25;")
+        raw.execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=25;")
             .unwrap();
         drop(raw); // Simulate interruption before the marker transaction commits.
         let raw = Connection::open(&path).unwrap();
@@ -326,13 +344,16 @@ mod tests {
         assert_eq!(
             raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            25
+            crate::SCHEMA_VERSION
         );
         assert_eq!(rows(&raw), before);
         drop(raw);
         let uid = std::fs::metadata(&path).unwrap().uid();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 25);
+        assert_eq!(
+            inspect_update_schema(&path, uid).unwrap(),
+            crate::SCHEMA_VERSION
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         // Reopening an already upgraded store must not change durable rows.
         drop(Store::open(&path).unwrap());

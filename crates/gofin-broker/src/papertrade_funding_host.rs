@@ -2521,7 +2521,10 @@ impl PapertradeFundingServices for NativeHyperEvmFundingServices {
             })?;
         let fee_cap = U256::from_str_radix(fee_cap_text, 10)
             .map_err(|_| GoFinError::validation("Persisted native fee bound is malformed."))?;
-        if receipt.fee > fee_cap
+        if receipt
+            .fee
+            .ok_or_else(|| GoFinError::validation("Receipt fee is unavailable."))?
+            > fee_cap
             || !has_exact_usdc_transfer(
                 &receipt.receipt,
                 &self.owner,
@@ -2541,7 +2544,7 @@ impl PapertradeFundingServices for NativeHyperEvmFundingServices {
                 "transaction_index":receipt_transaction_index(&receipt.receipt),
                 "confirmations":receipt.confirmations,
                 "success":receipt.success,
-                "fee_atoms":receipt.fee.to_string(),
+                "fee_atoms":receipt.fee.ok_or_else(|| GoFinError::validation("Receipt fee is unavailable."))?.to_string(),
                 "receipt":receipt.receipt,
             }),
         })
@@ -3113,14 +3116,7 @@ mod tests {
     use super::*;
     use crate::BrokerCredentialProvider;
     use async_trait::async_trait;
-    use gofin_domain::financial_plans::{
-        FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-        FinancialPlanStepSpec, FinancialStepCompletion,
-    };
-    use gofin_domain::{
-        Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer, CostBound,
-        CostTreatment, Quantity, ResourceAmount, ResourceId,
-    };
+    use gofin_domain::{Amount, ApprovalAudit, AuthorizationChallenge, Authorizer, ResourceId};
     use gofin_protocol::BrokerRequest;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -4913,99 +4909,8 @@ mod tests {
         let socket_dir = tempfile::tempdir().unwrap();
         let client = CoreCliClient::new(runtime, socket_dir.path()).await;
         let source_resource = ResourceId(format!("hyperliquid:mainnet:{OWNER}:spot:primary"));
-        let source_asset = AssetId {
-            network: "hyperliquid:mainnet".into(),
-            reference: "USDC".into(),
-            decimals: 36,
-        };
-        let principal_atoms = Quantity::new(format!("{}{}", amount, "0".repeat(30))).unwrap();
-        let fee_atoms = Quantity::new(format!("{}{}", source_fee, "0".repeat(30))).unwrap();
-        let max_debits = vec![ResourceAmount {
-            resource: source_resource.clone(),
-            amount: Amount {
-                asset: source_asset.clone(),
-                atoms: principal_atoms,
-            },
-        }];
-        let max_costs = vec![CostBound {
-            location: gofin_domain::AccountingLocation::Cash {
-                resource: source_resource.clone(),
-            },
-            amount: Amount {
-                asset: source_asset.clone(),
-                atoms: fee_atoms,
-            },
-            treatment: CostTreatment::AdditionalDebit,
-        }];
-        let plan = FinancialPlanSpec {
-            version: 1,
-            name: "Deposit 19 USDC from Core into Papertrade".into(),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                step_id: "deposit".into(),
-                operation: "papertrade.deposit".into(),
-                input: json!({"route":"core","amount":"19"}),
-                permitted_variations: json!({
-                    "mode":"exact",
-                    "maximum_debits":max_debits,
-                    "maximum_costs":max_costs,
-                    "possible_credits":[{
-                        "resource":gofin_papertrade::PapertradeAccount {
-                            name:"synthetic-papertrade-core".into(),owner:OWNER.into(),signing_enabled:true
-                        }.trading_cash_resource(),
-                        "asset":gofin_papertrade::trading_usdc_asset()
-                    }]
-                }),
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: None,
-                },
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: max_debits,
-                maximum_costs: max_costs,
-            },
-        };
-        let mut authorization = FinancialPlanAuthorizationRequest {
-            request_id: "papertrade-core-cli-plan".into(),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
-        let preview = client
-            .call(BrokerRequest::PreviewPlan {
-                request: authorization.clone(),
-            })
-            .await;
-        assert!(preview.ok, "named-plan preview: {:?}", preview.error);
-        authorization.expected_review_hash = Some(
-            preview.result.as_ref().unwrap()["review_hash"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
-        );
-        let approved = client
-            .call(BrokerRequest::AuthorizePlan {
-                request: authorization,
-            })
-            .await;
-        assert!(
-            approved.ok,
-            "named-plan authorization: {:?}",
-            approved.error
-        );
-        let plan_id = approved.result.unwrap()["plan_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         let preview_step = client
-            .call(BrokerRequest::PreviewPlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "deposit".into(),
+            .call(BrokerRequest::Preview {
                 operation: "papertrade.deposit".into(),
                 input: json!({"route":"core","amount":"19"}),
             })
@@ -5026,13 +4931,7 @@ mod tests {
             input: json!({"route":"core","amount":"19"}),
             run_id: None,
         };
-        let mut settled = client
-            .call(BrokerRequest::ExecutePlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "deposit".into(),
-                request,
-            })
-            .await;
+        let mut settled = client.call(BrokerRequest::Execute { request }).await;
         assert!(settled.ok, "CLI Core deposit: {:?}", settled.error);
         if recovery_rehearsal {
             assert!(
@@ -5190,9 +5089,7 @@ mod tests {
             core_dispatch_succeeds.store(true, std::sync::atomic::Ordering::SeqCst);
             history_visible.store(true, std::sync::atomic::Ordering::SeqCst);
             let retry = client
-                .call(BrokerRequest::ExecutePlanStep {
-                    plan_id: plan_id.clone(),
-                    step_id: "deposit".into(),
+                .call(BrokerRequest::Execute {
                     request: gofin_domain::OperationRequest {
                         request_id: "papertrade-core-cli-deposit-retry".into(),
                         operation: "papertrade.deposit".into(),
@@ -5203,7 +5100,7 @@ mod tests {
                 .await;
             assert!(
                 retry.ok,
-                "fresh same-plan attempt after proven release: {:?}",
+                "fresh approved attempt after proven release: {:?}",
                 retry.error
             );
             assert_eq!(
@@ -5276,9 +5173,7 @@ mod tests {
             1
         );
         let replay = client
-            .call(BrokerRequest::ExecutePlanStep {
-                plan_id,
-                step_id: "deposit".into(),
+            .call(BrokerRequest::Execute {
                 request: gofin_domain::OperationRequest {
                     request_id: "papertrade-core-cli-deposit".into(),
                     operation: "papertrade.deposit".into(),
@@ -5306,13 +5201,13 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a built dev CLI; run make test-papertrade-rehearsal"]
-    async fn core_withdrawal_named_plan_uses_real_runtime_and_canonical_credit_proof() {
+    async fn core_withdrawal_native_action_uses_real_runtime_and_canonical_credit_proof() {
         run_withdrawal_named_plan("core", "core").await;
     }
 
     #[tokio::test]
     #[ignore = "requires a built dev CLI; run make test-papertrade-rehearsal"]
-    async fn hyperevm_withdrawal_named_plan_settles_core_stage_without_dispatching_onward_leg() {
+    async fn hyperevm_withdrawal_native_actions_preserve_core_and_onward_stage_proofs() {
         run_withdrawal_named_plan("hyperevm", "hyperevm").await;
     }
 
@@ -5321,11 +5216,7 @@ mod tests {
             panic!("required Papertrade withdrawal CLI rehearsal needs GOFIN_PAPERTRADE_CLI");
         }
         use gofin_domain::execution_state::ExecutionState;
-        use gofin_domain::financial_plans::{
-            FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-            FinancialPlanStepSpec, FinancialStepCompletion,
-        };
-        use gofin_domain::{Amount, AssetId, Quantity, ResourceAmount, ResourceId};
+        use gofin_domain::{Quantity, ResourceId};
         use gofin_papertrade::PapertradeRuntime;
         use gofin_protocol::BrokerRequest;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -5479,50 +5370,8 @@ mod tests {
         );
         let paper_cash = account.trading_cash_resource();
         let core_resource = ResourceId(format!("hyperliquid:mainnet:{OWNER}:spot:primary"));
-        let cash_asset = gofin_papertrade::trading_usdc_asset();
-        let core_asset = AssetId {
-            network: "hyperliquid:mainnet".into(),
-            reference: "USDC".into(),
-            decimals: 36,
-        };
         let paper_wad = Quantity::new(format!("{}{}", amount, "0".repeat(12))).unwrap();
         let core_wad = Quantity::new(format!("{}{}", amount, "0".repeat(30))).unwrap();
-        let debits = vec![ResourceAmount {
-            resource: paper_cash.clone(),
-            amount: Amount {
-                asset: cash_asset.clone(),
-                atoms: paper_wad.clone(),
-            },
-        }];
-        let plan = FinancialPlanSpec {
-            version: 1,
-            name: format!("Withdraw 19 USDC from Papertrade to {route_id}"),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                step_id: "withdraw".into(),
-                operation: "papertrade.withdraw".into(),
-                input: json!({"route":route,"amount":"19"}),
-                permitted_variations: json!({"mode":"exact","maximum_debits":debits,"maximum_costs":[],"possible_credits":[{"resource":core_resource,"asset":core_asset}]}),
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: None,
-                },
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: debits,
-                maximum_costs: vec![],
-            },
-        };
-        let mut authorization = FinancialPlanAuthorizationRequest {
-            request_id: format!("papertrade-{route_id}-withdrawal-plan"),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
         let store_dir = tempfile::tempdir().unwrap();
         let runtime = crate::compose_runtime_with_clock(
             crate::BrokerConfigV2 {
@@ -5557,36 +5406,8 @@ mod tests {
         runtime.engine.recover_interrupted().unwrap();
         let socket_dir = tempfile::tempdir().unwrap();
         let client = CoreCliClient::new(runtime, socket_dir.path()).await;
-        let preview = client
-            .call(BrokerRequest::PreviewPlan {
-                request: authorization.clone(),
-            })
-            .await;
-        assert!(preview.ok, "withdrawal plan preview: {:?}", preview.error);
-        authorization.expected_review_hash = Some(
-            preview.result.as_ref().unwrap()["review_hash"]
-                .as_str()
-                .unwrap()
-                .into(),
-        );
-        let approved = client
-            .call(BrokerRequest::AuthorizePlan {
-                request: authorization,
-            })
-            .await;
-        assert!(
-            approved.ok,
-            "withdrawal plan authorization: {:?}",
-            approved.error
-        );
-        let plan_id = approved.result.unwrap()["plan_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         let preview_step = client
-            .call(BrokerRequest::PreviewPlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "withdraw".into(),
+            .call(BrokerRequest::Preview {
                 operation: "papertrade.withdraw".into(),
                 input: json!({"route":route,"amount":"19"}),
             })
@@ -5602,9 +5423,7 @@ mod tests {
                 .is_some_and(|value| value.contains("19 USDC"))
         );
         let result = client
-            .call(BrokerRequest::ExecutePlanStep {
-                plan_id,
-                step_id: "withdraw".into(),
+            .call(BrokerRequest::Execute {
                 request: gofin_domain::OperationRequest {
                     request_id: format!("papertrade-{route_id}-withdrawal-run"),
                     operation: "papertrade.withdraw".into(),
@@ -5649,25 +5468,21 @@ mod tests {
         assert!(replay.ok);
         assert_eq!(replay.result.as_ref().unwrap()["status"], "completed");
         if route == "hyperevm" {
-            use gofin_domain::{AccountingLocation, CostBound, CostTreatment};
             let protected_parent = credentials
                 .0
                 .lock()
                 .unwrap()
                 .values()
-                .find_map(|value| serde_json::from_value::<BoundFunding>(value.clone()).ok())
-                .filter(|plan| {
+                .filter_map(|value| serde_json::from_value::<BoundFunding>(value.clone()).ok())
+                .find(|plan| {
                     plan.intent.route == FundingRoute::Hyperevm
                         && plan.intent.direction == FundingDirection::Withdraw
+                        && Some(plan.operation_id.as_str())
+                            == result.result.as_ref().unwrap()["submission"]["reference"].as_str()
                 })
                 .expect("stage-one route plan is protected before continuation");
             let route_id = protected_parent.operation_id.clone();
             let source_resource = ResourceId(format!("hyperliquid:mainnet:{OWNER}:spot:primary"));
-            let source_asset = AssetId {
-                network: "hyperliquid:mainnet".into(),
-                reference: "USDC".into(),
-                decimals: 36,
-            };
             let source_principal = protected_parent
                 .intent
                 .amount_usdc_atoms
@@ -5675,130 +5490,9 @@ mod tests {
                 .expect("HyperEVM withdrawal retains the fixed Core reserve");
             let source_debit =
                 Quantity::new(format!("{}{}", source_principal, "0".repeat(30))).unwrap();
-            let source_fee = Quantity::new(format!(
-                "{}{}",
-                protected_parent.bounds.maximum_source_fee_usdc_atoms,
-                "0".repeat(30)
-            ))
-            .unwrap();
-            let native_fee_atoms = protected_parent
-                .bounds
-                .maximum_native_fee_atoms
-                .as_deref()
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-            let native_fee =
-                Quantity::new(format!("{}{}", native_fee_atoms, "0".repeat(28))).unwrap();
-            let native_asset = AssetId {
-                network: "hyperliquid:mainnet".into(),
-                reference: "HYPE".into(),
-                decimals: 36,
-            };
             let destination = ResourceId(protected_parent.destination_identity.clone());
-            let destination_asset = AssetId {
-                network: "ethereum:999".into(),
-                reference: gofin_bridge::cctp::hyperevm::NATIVE_USDC.to_ascii_lowercase(),
-                decimals: 6,
-            };
-            let continuation_plan = FinancialPlanSpec {
-                version: 1,
-                name: "Continue Papertrade withdrawal to HyperEVM".into(),
-                summary: None,
-                steps: vec![FinancialPlanStepSpec {
-                    step_id: "continue".into(),
-                    operation: "papertrade.funding_continue".into(),
-                    input: json!({"route_id":route_id}),
-                    permitted_variations: json!({
-                        "mode":"exact",
-                        "maximum_debits":[{"resource":source_resource,"amount":{"asset":source_asset,"atoms":source_debit}}],
-                        "maximum_costs":[
-                            {"location":{"kind":"cash","resource":source_resource},"amount":{"asset":source_asset,"atoms":source_fee},"treatment":"additional_debit"},
-                            {"location":{"kind":"cash","resource":source_resource},"amount":{"asset":native_asset,"atoms":native_fee},"treatment":"additional_debit"}
-                        ],
-                        "possible_credits":[{"resource":destination,"asset":destination_asset}]
-                    }),
-                    completion: FinancialStepCompletion {
-                        operation_succeeded: true,
-                        principal_spend: None,
-                        minimum_net_receipt: None,
-                    },
-                    funding_dependencies: vec![],
-                    action_deadline_seconds: None,
-                }],
-                aggregate_bounds: FinancialPlanBounds {
-                    maximum_debits: vec![ResourceAmount {
-                        resource: source_resource.clone(),
-                        amount: Amount {
-                            asset: source_asset.clone(),
-                            atoms: source_debit.clone(),
-                        },
-                    }],
-                    maximum_costs: vec![
-                        CostBound {
-                            location: AccountingLocation::Cash {
-                                resource: source_resource.clone(),
-                            },
-                            amount: Amount {
-                                asset: source_asset,
-                                atoms: source_fee,
-                            },
-                            treatment: CostTreatment::AdditionalDebit,
-                        },
-                        CostBound {
-                            location: AccountingLocation::Cash {
-                                resource: source_resource.clone(),
-                            },
-                            amount: Amount {
-                                asset: native_asset,
-                                atoms: native_fee,
-                            },
-                            treatment: CostTreatment::AdditionalDebit,
-                        },
-                    ],
-                },
-            };
-            let mut continuation_authorization = FinancialPlanAuthorizationRequest {
-                request_id: "papertrade-hyperevm-withdrawal-continuation-plan".into(),
-                plan: continuation_plan,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            };
-            let preview = client
-                .call(BrokerRequest::PreviewPlan {
-                    request: continuation_authorization.clone(),
-                })
-                .await;
-            assert!(
-                preview.ok,
-                "continuation plan preview: {:?} / {:?}",
-                preview.error, preview.result
-            );
-            continuation_authorization.expected_review_hash = Some(
-                preview.result.as_ref().unwrap()["review_hash"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-            );
-            let authorized = client
-                .call(BrokerRequest::AuthorizePlan {
-                    request: continuation_authorization,
-                })
-                .await;
-            assert!(
-                authorized.ok,
-                "continuation plan authorization: {:?}",
-                authorized.error
-            );
-            let continuation_plan_id = authorized.result.unwrap()["plan_id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
             let step_preview = client
-                .call(BrokerRequest::PreviewPlanStep {
-                    plan_id: continuation_plan_id.clone(),
-                    step_id: "continue".into(),
+                .call(BrokerRequest::Preview {
                     operation: "papertrade.funding_continue".into(),
                     input: json!({"route_id":route_id}),
                 })
@@ -5809,9 +5503,7 @@ mod tests {
                 step_preview.error, step_preview.result
             );
             let continuation = client
-                .call(BrokerRequest::ExecutePlanStep {
-                    plan_id: continuation_plan_id,
-                    step_id: "continue".into(),
+                .call(BrokerRequest::Execute {
                     request: gofin_domain::OperationRequest {
                         request_id: "papertrade-hyperevm-withdrawal-continuation-run".into(),
                         operation: "papertrade.funding_continue".into(),
@@ -5978,71 +5670,13 @@ mod tests {
             let encode = |value: &Value| serde_json::to_string(value).unwrap();
             let mut args = vec!["--json".to_owned()];
             match request {
-                BrokerRequest::PreviewPlan { request } => {
+                BrokerRequest::Preview { operation, input } => {
                     args.extend([
-                        "plans".into(),
                         "preview".into(),
-                        "--input".into(),
-                        encode(&json!(request.plan)),
-                    ]);
-                    if let Some(seconds) = request.valid_for_seconds {
-                        args.extend(["--valid-for".into(), format!("{seconds}s")]);
-                    }
-                }
-                BrokerRequest::AuthorizePlan { request } => {
-                    args.extend([
-                        "plans".into(),
-                        "authorize".into(),
-                        "--input".into(),
-                        encode(&json!(request.plan)),
-                        "--id".into(),
-                        request.request_id,
-                    ]);
-                    if let Some(seconds) = request.valid_for_seconds {
-                        args.extend(["--valid-for".into(), format!("{seconds}s")]);
-                    }
-                    if let Some(hash) = request.expected_review_hash {
-                        args.extend(["--review-hash".into(), hash]);
-                    }
-                }
-                BrokerRequest::PreviewPlanStep {
-                    plan_id,
-                    step_id,
-                    operation,
-                    input,
-                } => {
-                    args.extend([
-                        "execute".into(),
                         operation,
                         "--input".into(),
                         encode(&input),
-                        "--plan".into(),
-                        plan_id,
-                        "--step".into(),
-                        step_id,
-                        "--dry-run".into(),
                     ]);
-                }
-                BrokerRequest::ExecutePlanStep {
-                    plan_id,
-                    step_id,
-                    request,
-                } => {
-                    args.extend([
-                        "execute".into(),
-                        request.operation,
-                        "--input".into(),
-                        encode(&request.input),
-                        "--id".into(),
-                        request.request_id,
-                        "--plan".into(),
-                        plan_id,
-                        "--step".into(),
-                        step_id,
-                    ]);
-                }
-                BrokerRequest::PlanStatus { plan_id } => {
-                    args.extend(["plans".into(), "status".into(), plan_id])
                 }
                 BrokerRequest::Status { id } => args.extend(["status".into(), id]),
                 BrokerRequest::Execute { request } => {

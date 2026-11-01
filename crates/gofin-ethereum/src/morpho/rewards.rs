@@ -721,7 +721,7 @@ impl EthereumAdapter {
             )
             .await?;
         let transaction = prepared.transaction;
-        let valuation = self.merkl_claim_valuation(&transaction, &claims).await?;
+        let valuation = self.merkl_claim_valuation(&transaction, &claims).await.ok();
         let resource = resource(r.chain_id, owner);
         let intent = FinancialIntent {
             debits: vec![],
@@ -767,7 +767,7 @@ impl EthereumAdapter {
             boundary_authorization: None,
             financial_plan: None,
         };
-        Ok(PreparedOperation { action_deadline: None, operation: CLAIM_OPERATION.into(), input: input.clone(), binding: serde_json::to_value(binding).expect("claim binding serializes"), summary, checks: vec![Check { name: "reviewed deployment, active proof root, cumulative claim and effective recipient".into(), status: CheckStatus::Passed, detail: format!("Pinned on-chain checks at block {block}; the locally encoded claim has no approvals, operators or callbacks.") }], warnings: vec![AGGREGATE_NOTICE.into(), PAYOUT_NOTICE.into()], observed_at: now(), expires_at: (self.clock.now() + chrono::Duration::seconds(120)).to_rfc3339(), valuation: Some(valuation), intent, operation_version: 1 })
+        Ok(PreparedOperation { action_deadline: None, operation: CLAIM_OPERATION.into(), input: input.clone(), binding: serde_json::to_value(binding).expect("claim binding serializes"), summary, checks: vec![Check { name: "reviewed deployment, active proof root, cumulative claim and effective recipient".into(), status: CheckStatus::Passed, detail: format!("Pinned on-chain checks at block {block}; the locally encoded claim has no approvals, operators or callbacks.") }], warnings: vec![AGGREGATE_NOTICE.into(), PAYOUT_NOTICE.into()], observed_at: now(), expires_at: (self.clock.now() + chrono::Duration::seconds(120)).to_rfc3339(), valuation, intent, operation_version: 1 })
     }
 
     fn verify_claim_binding(&self, prepared: &PreparedOperation) -> Result<ClaimBinding> {
@@ -952,19 +952,31 @@ impl EthereumAdapter {
             .receipt(submission, &b.transaction, self.config.confirmations)
             .await?
         else {
+            if let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.runtime
+                    .finalized_nonce_replacement(submission, &b.transaction),
+            )
+            .await
+            {
+                return Ok(proof);
+            }
             return Ok(pending_claim(submission, "awaiting-canonical-receipt"));
         };
         if self.config.requires_rpc_finalized() && !self.merkl_finalized(&receipt).await? {
             return Ok(pending_claim(submission, "awaiting-rpc-finalized"));
         }
-        let mut effects = vec![FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: b.resource.clone(),
-            },
-            amount: amount(&self.native_asset(), receipt.fee),
-            category: "ethereum_gas".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        }];
+        let mut effects = Vec::new();
+        if let Some(fee) = receipt.fee {
+            effects.push(FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: b.resource.clone(),
+                },
+                amount: amount(&self.native_asset(), fee),
+                category: "ethereum_gas".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            });
+        }
         let mut actual_payouts = BTreeMap::new();
         if receipt.success {
             self.verify_merkl_deployment(receipt.block_number).await?;
@@ -1008,7 +1020,7 @@ impl EthereumAdapter {
         if !self.inclusion_still_canonical(&receipt).await? {
             return Ok(pending_claim(submission, "inclusion-changed"));
         }
-        let evidence = json!({"original_hash":submission.reference,"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"success":receipt.success,"fee_wei":quantity(receipt.fee),"distributor":DISTRIBUTOR,"root":b.root,"claims":b.claims,"actual_payouts":actual_payouts,"payout_semantics":b.payout_semantics,"claim_scope":"wallet_token_aggregate","canonical_transaction_effects_verified":true,"finality":self.config.finality_label()});
+        let evidence = json!({"original_hash":submission.reference,"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"success":receipt.success,"outcome_replay_safe":!receipt.success,"outcome_reporting":if receipt.fee.is_none() {"partial"} else {"complete"},"fee_wei":receipt.fee.map(quantity),"distributor":DISTRIBUTOR,"root":b.root,"claims":b.claims,"actual_payouts":actual_payouts,"payout_semantics":b.payout_semantics,"claim_scope":"wallet_token_aggregate","canonical_transaction_effects_verified":true,"finality":self.config.finality_label()});
         let mut verified = VerifiedEffects {
             evidence_version: 1,
             submission: submission.clone(),
@@ -2075,7 +2087,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merkl_concurrent_claim_engine_clears_reservations_without_replaying_after_restart() {
+    async fn merkl_concurrent_claim_preserves_identity_without_replaying_after_restart() {
         use gofin_engine::{Engine, EngineOptions};
         use gofin_store::Store;
         for payout in [0, 42] {
@@ -2109,7 +2121,6 @@ mod tests {
                 !first.status.terminal(),
                 "receipt has not arrived: {first:?}"
             );
-            assert!(store.lock().unwrap().reservation_count(&first.id).unwrap() > 0);
             let preview = first.preview.as_ref().unwrap();
             assert!(preview.summary.contains("no guaranteed minimum"));
             assert_eq!(preview.binding["version"], 2);

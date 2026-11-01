@@ -35,10 +35,10 @@ from undermining the agent credential-denial test. It grants no authorization
 and does not stop GoFin or alter per-write Touch ID. It cannot revoke an already
 root shell or override passwordless sudo policy; check the actual agent's access.
 
-Setup, connection add/update/remove, policy set and venue configuration use fresh sudo. Those commands
+Setup, connection add/update/remove, dismissal and venue configuration use fresh sudo. Those commands
 explain why they need administrator access before the OS prompt. Reads, previews,
 status, service lifecycle and financial commands use the protected background
-service without sudo; with Yolo off, standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once. Yolo on/off also use fresh sudo in the verified human Terminal; Yolo status requires no sudo.
+service without sudo; with Yolo off, financial actions require Touch ID for their native economic intent; a compound action can reuse that approval for its declared stages through the reviewed deadline. Yolo on/off also use fresh sudo in the verified human Terminal; Yolo status requires no sudo.
 The pre-prompt explanation is flushed before handing control to macOS. If it
 cannot be displayed, GoFin refuses to start administrator authentication.
 
@@ -250,7 +250,7 @@ Store credentials through a broker-controlled backend and return a stable opaque
 
 Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
 
-On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection. Pending work blocks changes to its account or signer mappings, including derived aliases; it does not block creating or removing an unrelated wallet. A validated human resolution clears this restriction only after all effective holds for that operation are gone.
+On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection. Historical operations do not block protected connection changes. Execution independently revalidates the selected identity before admission; persisted submission identities remain available for observation.
 
 Protected confirmation output must handle partial writes and temporary terminal backpressure without truncating the review. Output waits remain cancellable and bound to the original approval expiry; incomplete output cannot produce approval. Terminal modes are restored on output failure as well as cancellation.
 
@@ -298,46 +298,21 @@ Structural schemas describe safe arguments and responses. Secret requirements ar
 
 ## Machine execution contract
 
-Financial boundary commands are discoverable before enrollment through
-`gofin authorizations --help`, `gofin schema authorizations.authorize --json` and the
-operation's `semantics.boundary_authorization`. The first supported family is
-Binance spot LIMIT IOC/FOK placement. The requester supplies typed financial
-boundaries and optional duration (`--valid-for`, default 10m); fresh Touch ID
-creates or replaces consent. JSON contains no terminal review, animation or
-confirmation prompt; the agent presents the scope and permitted variations
-before invoking the grant command. The OS biometric prompt remains required.
+Discover financial actions through `gofin capabilities --json`, then the current
+`explain` and `schema` for the selected operation. Approval binds native amounts,
+identities, destinations, fee caps and deadlines independently of the concrete
+quote or signed payload. Reviews distinguish enforced terms, estimates and checks
+performed after execution. A permitted quote refresh cannot widen approved bounds.
 
-Execute/dry-run candidates reference `--authorization`; only execution consumes
-verified authority, and a dry-run does not reserve or submit. Status reports
-spent/remaining quantities and costs, achieved effects, attempts and expiry.
-Constraint failures include optional structured `error.details`; old errors
-omit that field. The agent may monitor `exchange.order-book`, using exact market
-identities and supported market types. Ordinary durable status is not a claim
-about freshly evaluated market conditions.
+One operation ID represents one logical action. Repeating its original execute
+request observes that action. Compound actions may advance through approved
+stages during the active invocation; a long wait returns structured next-action
+data with the original ID and a broker-issued continuation token. Continue only
+with those arguments. Successful stages are never repeated, and submitted failed
+stages are never automatically retried. Status performs observation only.
 
-Cancelling authorization requires no biometric approval and stops future
-dispatch, not already submitted venue orders. `--replaces-attempt` supersedes an
-unsubmitted candidate; changed grant boundaries use `authorizations authorize
---replaces` with fresh Touch ID. Replacement caps are cumulative totals for the
-same intent, preserving prior effects/costs. Expiry never resets consumption.
-Other operations retain standalone exact approval or can be included as exact
-steps in a named plan. Plans sequence registered financial operations and reads,
-including newly added operations, with exact input and cumulative caps. Plan
-review labels live checks deferred to execution. Financial grants and plans
-cannot authorize enrollment or protected policy changes.
-
-Plan funding dependencies default to producer-funded principal plus additional
-fees. Explicit `funding_scope: "principal_only"` assigns only principal to the
-producer; separately available cash must still cover approved fees as well as
-the principal debit. This supports returning all verified native-ETH swap
-proceeds while paying gas from an existing ETH balance. The optional field is
-included in the reviewed plan, and omission retains legacy bindings.
-
-Every plan input field stays fixed except a string JSON pointer explicitly
-declared by the trusted operation definition as broker-generated per attempt.
-GoFin assigns such a field separately for each attempt; the original input
-template remains part of the approval binding. Human review marks these fields
-as GoFin-assigned and does not present a template value as the venue request ID.
+Historical grants and plans retain their records and bindings. Their former
+creation and execution interfaces no longer issue new financial authority.
 
 **Implemented locally 6 October 2026.** `--json` selects the agent-facing
 execution contract. It controls interaction, output, errors, and compatibility,
@@ -354,8 +329,8 @@ not just serialization after an interactive command has finished.
 - Opt-in `--json --stream` emits NDJSON progress and one terminal result/error
   event. The existing `--json` single-value contract stays unchanged. Progress
   carries public request/operation context and actual broker stages (plus local
-  `connecting`); it is best effort and never controls execution. Slow or closed
-  output cannot cancel/replay a financial action. A terminal result may still
+  `connecting`); it is best effort and never controls execution. Disconnect stops admission of further compound stages; already admitted
+  immutable submissions may finish dispatch and remain observable. A terminal result may still
   report pending financial work; reconcile the original identity. Discover the
   event schemas in `machine_contract.streaming`.
 - Verified open escrow and keeper requests remain pending financial work. Human
@@ -373,8 +348,8 @@ not just serialization after an interactive command has finished.
   enrollment return a structured requirement for human action with a safe
   command to run separately. Non-interactive equivalence does not mean accepting
   credentials through arguments, JSON, environment variables, or agent stdin.
-- Financial commands require fresh Touch ID for exact writes or creation/revision
-  of supported boundary grants and named plans. Discovery must explicitly
+- Financial commands require Touch ID for native intent approval, which can
+  cover all declared compound stages through an explicit reviewed deadline. Discovery must explicitly
   describe any required human approval outside the agent's terminal, how the
   caller observes waiting/cancellation/expiry, and bounded wait behavior. Machine
   mode itself grants no approval. Explicitly enabled protected Yolo authority
@@ -426,8 +401,7 @@ settings when the command exits; GoFin's guardian restores its protected termina
 and both devices' ownership and permissions.
 The default-negative prompt is `Apply this configuration? [y/N]` with a `d: details` hint.
 No native biometric prompt appears for setup, credentials, policy or venue
-configuration. Their Sudo approval cannot authorize a financial action, boundary
-grant or named plan. The native biometric prompt remains **GoFin** for financial
+configuration. Their Sudo approval cannot authorize a financial action. The native biometric prompt remains **GoFin** for financial
 approvals.
 Financial approvals use a version-2, broker-generated `review` object. Its stable
 `action` selects a native text template; `service` and optional `market` identify
@@ -447,7 +421,8 @@ counts toward the display budget; the undisplayed identifier does not.
 
 `other_details` is optional plain text appended verbatim, never a dictionary of
 provider-specific fields. It is limited to 200 extended grapheme clusters.
-The complete financial message is limited to 240 extended grapheme clusters,
+Legacy financial messages remain limited to 240 extended grapheme clusters.
+Reviews with classified native `terms` allow 1,024 extended grapheme clusters,
 matching Swift `String.count`; combining accents and joined emoji are tested
 across Rust and Swift. The suffix allowance does not guarantee that the whole
 message fits. Overlong financial reviews return `APPROVAL_REVIEW_TOO_LARGE`
@@ -496,18 +471,12 @@ review renders a swap with a minimum receipt and a literal fee suffix:
 This object is broker-to-helper presentation, not a client-supplied execution
 request or permission to bypass the ordinary operation schema. A swap states its minimum
 receipt; a bridge shows both account domains; an exchange deposit approves the
-outgoing transfer without claiming the exchange has credited it. Reusable grants
-use `authorize-boundaries` to distinguish finite authority from executing an
-individual action.
-
-Named plans retain their caller-authored name and optional `summary`. The broker
-combines those into the review `description`, with broker-owned step count and
-consent duration. Names retain their 80-character limit; name and summary together
-retain their existing 140 Unicode-scalar limit. The complete rendered plan review
-must also fit the native message budget. Required broker disclosures, including
-Coinbase's venue-calculated fee policy, remain appended. The narrative is bound
-to the complete structured plan and cannot widen its independently enforced
-financial authority.
+outgoing transfer without claiming the exchange has credited it. The optional `terms` array labels each material term as enforced, estimated or
+checked after execution. Optional broker-owned `advisories` identify up to three
+similar uncertain actions and their native amounts. Advisories never grant
+financial authority or block approval; malformed advisory history is omitted.
+The complete review including advisories is bounded at 4,096 grapheme clusters.
+Material approval terms are validated before advisory text is considered.
 
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
@@ -583,30 +552,19 @@ input schema still uses the canonical `provider` field, and machine mode returns
 a human handoff without prompting. Human errors show `✗` plus their explanation;
 error codes and stages remain in `--verbose` and unchanged JSON errors.
 
-## Financial policy management
+## Historical policy settings
 
-`gofin policy show` is agent-readable and reports personal limits, included costs,
-and installation-wide rolling 24-hour allocation usage; `--json` returns exact
-decimal strings.
-`gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000` is
-human-interactive, using the same fixed privileged broker and verified human
-Terminal as connection enrollment, without loading credentials. Both amounts
-are required; `0` means no personal limit for that field and is displayed as
-“No limit” in human output/approval. New `gofin setup` prompts for both amounts in
-the protected human Terminal (Enter defaults each to $100), before exact
-configuration confirmation. Credential input remains hidden; policy input is visible.
-Discover safe fields through `gofin explain policy.set --json` and
-`gofin schema policy.set --json` before onboarding or service setup.
+`gofin policy show` reports preserved settings as retired, with
+`personal_limits_enforced: false`. Setup no longer asks for personal USD limits,
+and `policy set` cannot activate them. Financial authority is enforced through
+native action terms, including fee caps and explicit compound deadlines.
+Historical records remain readable; unresolved operations do not create a
+personal allocation gate for unrelated work.
 
-Fresh sudo permits protected configuration access; the subsequent
-90-second protected terminal-review challenge approves only the displayed limits.
-Cancellation, decline or expiry saves nothing and requires an explicit retry.
-Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
-even with a TTY. Policy changes refuse nonterminal operations, preserving
-reservations and exact approved authority. Historical unrestored run records do
-not block policy changes or ordinary execution. Approved changes retain per-write
-Touch ID. Live-development verification follows [$gofin-e2e](../skills/gofin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
-See [limit and reload behavior](usage.md#financial-limits).
+Human dismissal of an unconfirmed operation is a nonfinancial label. It uses
+`operations dismiss ID` through the verified human terminal and fresh sudo path;
+machine mode returns the human handoff. Dismissal removes a record from the open
+list without changing submission facts, finality or replay safety.
 
 ## Protected Yolo terminal contract
 
@@ -632,15 +590,12 @@ for admission, disable and recovery semantics.
 
 ## Approval responsiveness
 
-Agents review the plan and selected account state before conversational consent,
-then invoke authorization with the unchanged review hash promptly. Full portfolio
-snapshots remain optional inspection. `snapshot --input` and `read gofin.snapshot`
-accept intersecting resource, network and exact-asset selectors and report
-`complete`, `coverage` and `pending`. Partial observations cannot establish the
-required evidence for a write. GoFin prepares and refreshes only the next selected
-step while enforcing installation-wide policy and reservations. Selected token
-or market metadata may be read during permission review; future-funded balances,
-fees, deployment checks and simulations remain deferred to execution.
+Agents inspect current operation discovery and relevant account state before
+execution. Preparation precedes native approval; refreshed quotes and signing
+fields must remain inside the original terms. Full portfolio snapshots remain
+optional. Status and bounded wait observe the existing identity without approval
+or dispatch. Compound execution advances only while its invocation is active;
+explicit continuation resumes unfinished work under still-valid authority.
 
 See [the latency and human verification recipe](testing/responsiveness.md).
 

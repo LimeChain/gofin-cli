@@ -750,10 +750,11 @@ async fn uniswapx_provider_filled_status_does_not_replace_order_and_transfer_pro
     settle(&state, "DUTCH_V2");
     state.receipt.lock().unwrap()["logs"][1]["data"] =
         json!(hex_bytes(&U256::from(980_000).to_be_bytes::<32>()));
-    assert_eq!(
-        adapter.reconcile(&record).await.unwrap_err().code,
-        "SWAP_SETTLEMENT_MISMATCH"
-    );
+    let adverse = adapter.reconcile(&record).await.unwrap();
+    assert_eq!(adverse.status, Status::Completed);
+    assert_eq!(adverse.evidence["outcome_attention"]["kind"], "discrepancy");
+    assert_eq!(adverse.evidence["output_atoms"], "980000");
+    assert!(adverse.verified.is_some());
     assert_eq!(state.order_posts.load(Ordering::SeqCst), 1);
 }
 

@@ -987,22 +987,13 @@ impl KrakenEvmDepositAdapter {
             } else {
                 json!({"wallet":input.wallet,"network":"evm","chain_id":input.chain_id,"request_id":input.request_id,"max_fee_eth":input.max_fee_eth,"token":source_asset.reference,"amount":input.amount,"recipient":recipient})
             };
-            let mut inner = if let Some(original) = original {
+            let inner = if let Some(original) = original {
                 source_adapter.revalidate(original).await?
             } else {
                 source_adapter
                     .prepare("wallet.transfer", &inner_input)
                     .await?
             };
-            if original.is_none() && !solana_source {
-                // The nested transfer is part of this new composite candidate,
-                // not separately approved authority. Reserve finite pricing drift
-                // before the outer intent reaches policy/approval checks.
-                if let Some((summary, _)) = inner.summary.rsplit_once(" USD ceilings:") {
-                    inner.summary = summary.to_owned();
-                }
-                gofin_domain::value_bounds::bind_with_price_buffer(&mut inner)?;
-            }
             let source = inner.intent.debits.first().ok_or_else(|| {
                 error(
                     "KRAKEN_DEPOSIT_INNER_INVALID",
@@ -1142,7 +1133,7 @@ impl KrakenEvmDepositAdapter {
                 warnings.push("Kraken did not return an account-specific deposit maximum for this route; only the exact approved principal and GoFin fee/gas bounds limit this transfer.".into());
                 "Existing claimed address, exact network/contract, minimum and fee were checked; Kraken reported no applicable account maximum."
             };
-            let mut prepared = PreparedOperation {
+            let prepared = PreparedOperation {
                 operation: "kraken.deposit".into(),
                 input: raw_input.clone(),
                 binding: serde_json::to_value(binding)
@@ -1174,21 +1165,17 @@ impl KrakenEvmDepositAdapter {
                 operation_version: 1,
                 action_deadline: None,
             };
-            if original.is_none() {
-                if solana_source {
-                    gofin_domain::value_bounds::bind(&mut prepared);
-                } else {
-                    gofin_domain::value_bounds::bind_with_price_buffer(&mut prepared)?;
-                }
-            }
-            // Revalidation compares actual fresh USD values with the original
-            // outer ceilings in carry(); it must not reserve a second buffer.
             Ok(prepared)
         })
     }
 }
 #[async_trait]
 impl Adapter for KrakenEvmDepositAdapter {
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // Advisory polling usefulness only; expiry does not prove nonexecution or authorize replay.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         operation == "kraken.deposit"
             && Self::input(input).is_ok_and(|input| input.network.is_none() && input.chain_id != 0)
@@ -1371,7 +1358,165 @@ impl Adapter for KrakenEvmDepositAdapter {
             )
             .await
     }
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation> {
+        if !matches!(side, "source" | "destination") {
+            return Err(GoFinError::validation("Choose source or destination."));
+        }
+        let submission = record.submission.as_ref().ok_or_else(|| {
+            GoFinError::validation("Original submission identity is unavailable.")
+        })?;
+        if side == "source" {
+            let preview = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| GoFinError::validation("Original deposit preview is missing."))?;
+            let b = decode_binding(&preview.binding)
+                .map_err(|_| GoFinError::validation("Original deposit binding is malformed."))?;
+            let adapter: &dyn Adapter = if b.source_kind == "solana" {
+                b.inner_input
+                    .get("wallet")
+                    .and_then(Value::as_str)
+                    .and_then(|name| self.solana.get(name))
+                    .map(|wallet| wallet.as_ref() as &dyn Adapter)
+            } else {
+                self.ethereum
+                    .get(&b.chain_id)
+                    .map(|wallet| wallet.as_ref() as &dyn Adapter)
+            }
+            .ok_or_else(|| GoFinError::validation("Original source chain is unavailable."))?;
+            let inner = OperationRecord {
+                operation: "wallet.transfer".into(),
+                input: b.inner_input.clone(),
+                preview: Some(b.inner.clone()),
+                ..record.clone()
+            };
+            let mut observation = adapter.reconcile(&inner).await?;
+            if observation.status == Status::Completed {
+                if observation
+                    .verified
+                    .as_ref()
+                    .is_none_or(|proof| proof.submission != *submission)
+                {
+                    return Err(GoFinError::validation(
+                        "Source proof identity does not match the original submission.",
+                    ));
+                }
+                observation.status = Status::Pending;
+                observation.evidence["outcome_transfer"] = json!("in_transit");
+            }
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata: json!({"side":"source","scope":"source_chain","submission_reference":submission.reference}),
+                reconciliation: Some(observation),
+            });
+        }
+        let preview = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("Original deposit preview is missing."))?;
+        let b = decode_binding(&preview.binding)
+            .map_err(|_| GoFinError::validation("Original deposit binding is malformed."))?;
+        if !self.kraken.connections().iter().any(|a| {
+            a.name == b.account
+                && a.resource == b.account_resource
+                && b.physical_identity
+                    .as_deref()
+                    .is_some_and(|id| a.details["physical_identity"] == id)
+        }) {
+            return Err(GoFinError::validation(
+                "Original Kraken account identity changed.",
+            ));
+        }
+        let venue_txid = if b.source_kind == "solana" {
+            submission.data["wallet_signature"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .unwrap_or(&submission.reference)
+        } else {
+            &submission.reference
+        };
+        let mut query = json!({"asset":b.venue_asset.reference,"limit":500});
+        if let Some(unit) = b
+            .venue_asset
+            .network
+            .strip_prefix("kraken:tokenized_asset:")
+        {
+            query["aclass"] = json!("tokenized_asset");
+            query["rebase_multiplier"] = json!(unit);
+        }
+        let status = self
+            .read(E::KrakenPrivatePostDepositStatus, &b.account, query)
+            .await?;
+        let raw_status = raw(&status)?;
+        let rows = raw_status
+            .as_array()
+            .or_else(|| raw_status["deposit"].as_array())
+            .ok_or_else(|| {
+                error(
+                    "KRAKEN_DEPOSIT_HISTORY_INVALID",
+                    "Deposit history is not a bounded list.",
+                )
+            })?;
+        let matched = rows
+            .iter()
+            .filter(|row| {
+                row["txid"].as_str().is_some_and(|tx| {
+                    if b.source_kind == "solana" {
+                        tx == venue_txid
+                    } else {
+                        tx.eq_ignore_ascii_case(venue_txid)
+                    }
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let metadata = json!({"side":"destination","scope":"kraken_deposit_history","submission_reference":submission.reference,"matching_rows":matched});
+        let source = record
+            .effects
+            .as_ref()
+            .filter(|proof| {
+                proof.submission == *submission
+                    && verified_effect_digest(proof).ok().as_deref()
+                        == Some(proof.proof_digest.as_str())
+            })
+            .cloned();
+        let Some(source) = source else {
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata,
+                reconciliation: None,
+            });
+        };
+        let observation = self
+            .reconcile_with_source(
+                record,
+                Some(Reconciliation {
+                    status: Status::Completed,
+                    evidence: source.evidence.clone(),
+                    verified: Some(source),
+                }),
+                Some(status),
+            )
+            .await?;
+        Ok(gofin_domain::TransferSideObservation {
+            metadata,
+            reconciliation: Some(observation),
+        })
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        self.reconcile_with_source(record, None, None).await
+    }
+}
+
+impl KrakenEvmDepositAdapter {
+    async fn reconcile_with_source(
+        &self,
+        record: &OperationRecord,
+        source: Option<Reconciliation>,
+        cached_status: Option<Value>,
+    ) -> Result<Reconciliation> {
         let Some(preview) = &record.preview else {
             return Ok(unknown("Original deposit preview is missing.", json!({})));
         };
@@ -1408,27 +1553,6 @@ impl Adapter for KrakenEvmDepositAdapter {
         } else {
             &submission.reference
         };
-        let source_adapter: &dyn Adapter = if b.source_kind == "solana" {
-            let Some(wallet) = b
-                .inner_input
-                .get("wallet")
-                .and_then(Value::as_str)
-                .and_then(|name| self.solana.get(name))
-            else {
-                return Ok(unknown(
-                    "Original Solana source wallet is no longer configured.",
-                    json!({}),
-                ));
-            };
-            wallet.as_ref()
-        } else if let Some(ethereum) = self.ethereum.get(&b.chain_id) {
-            ethereum.as_ref()
-        } else {
-            return Ok(unknown(
-                "Original source chain is no longer configured.",
-                json!({}),
-            ));
-        };
         if !self.kraken.connections().iter().any(|a| {
             a.name == b.account
                 && a.resource == b.account_resource
@@ -1447,17 +1571,42 @@ impl Adapter for KrakenEvmDepositAdapter {
             preview: Some(b.inner.clone()),
             ..record.clone()
         };
-        let chain = match source_adapter.reconcile(&inner_record).await {
-            Ok(chain) => chain,
-            Err(source_error) => {
+        let chain = if let Some(source) = source {
+            source
+        } else {
+            let source_adapter: &dyn Adapter = if b.source_kind == "solana" {
+                let Some(wallet) = b
+                    .inner_input
+                    .get("wallet")
+                    .and_then(Value::as_str)
+                    .and_then(|name| self.solana.get(name))
+                else {
+                    return Ok(unknown(
+                        "Original Solana source wallet is no longer configured.",
+                        json!({}),
+                    ));
+                };
+                wallet.as_ref()
+            } else if let Some(ethereum) = self.ethereum.get(&b.chain_id) {
+                ethereum.as_ref()
+            } else {
                 return Ok(unknown(
-                    "Original source transaction reconciliation returned an error; keep the original identity and do not replay.",
-                    json!({
-                        "stage":source_error.stage,
-                        "code":source_error.code,
-                        "message":source_error.message
-                    }),
+                    "Original source chain is no longer configured.",
+                    json!({}),
                 ));
+            };
+            match source_adapter.reconcile(&inner_record).await {
+                Ok(chain) => chain,
+                Err(source_error) => {
+                    return Ok(unknown(
+                        "Original source transaction reconciliation returned an error; keep the original identity and do not replay.",
+                        json!({
+                            "stage":source_error.stage,
+                            "code":source_error.code,
+                            "message":source_error.message
+                        }),
+                    ));
+                }
             }
         };
         if chain.status != Status::Completed {
@@ -1478,8 +1627,10 @@ impl Adapter for KrakenEvmDepositAdapter {
         // Current Funding deposit history omits onchain tx IDs. The persisted
         // binding explicitly selects legacy status correlation for its original
         // credit proof; current API discovery does not alter this recovery rule.
-        let status = self
-            .read(E::KrakenPrivatePostDepositStatus, &b.account, {
+        let status = if let Some(status) = cached_status {
+            status
+        } else {
+            self.read(E::KrakenPrivatePostDepositStatus, &b.account, {
                 let mut query = json!({"asset":b.venue_asset.reference,"limit":500});
                 if let Some(unit) = b
                     .venue_asset
@@ -1491,7 +1642,8 @@ impl Adapter for KrakenEvmDepositAdapter {
                 }
                 query
             })
-            .await?;
+            .await?
+        };
         let rows = raw(&status)?
             .as_array()
             .or_else(|| raw(&status).ok().and_then(|r| r["deposit"].as_array()))
@@ -1685,13 +1837,6 @@ impl Adapter for KrakenEvmDepositAdapter {
                 .checked_add(&native_quantity(text(fees[0].1, "fee")?, 36)?)?;
             fee_proof = exact_ledger_evidence(fees[0].0, fees[0].1);
         }
-        let free_after = self.free(&b.account, &b.venue_asset).await?;
-        if free_after < b.free_before.checked_add(&actual_net)? {
-            return Ok(unknown(
-                "The correlated deposit is not yet corroborated by usable account cash.",
-                json!({"before":b.free_before,"after":free_after}),
-            ));
-        }
         let source =
             b.inner.intent.debits.first().ok_or_else(|| {
                 error("KRAKEN_DEPOSIT_INNER_INVALID", "Source intent is missing.")
@@ -1772,79 +1917,11 @@ impl Adapter for KrakenEvmDepositAdapter {
                 },
             });
         }
-        if actual_fee > b.fee {
-            // A receipt with excessive native fees does not authorize custody
-            // credit. Preserve only independently proved costs and identities.
-            let costs: Vec<_> = effects
-                .iter()
-                .filter(|effect| {
-                    matches!(effect,
-                        FinancialEffect::Cost { amount, .. } if !amount.atoms.is_zero()
-                    )
-                })
-                .cloned()
-                .collect();
-            let mut events = Vec::new();
-            for effect in &costs {
-                if let FinancialEffect::Cost {
-                    category,
-                    location,
-                    amount,
-                    treatment,
-                } = effect
-                    && category != "kraken_deposit_fee"
-                {
-                    events.push(json!({"eventId":format!("fin:deposit-source-cost:{}:{}",submission.reference,binding_hash(&json!({"category":category,"location":location,"asset":amount.asset,"treatment":treatment}))?),"submission":submission,"cost":effect}));
-                }
-            }
-            events.push(json!({"eventId":format!("kraken:deposit-ledger:{}:{}",b.account_resource.0,entries[0].0),"entry":venue_ledger_evidence}));
-            if separate_fee {
-                events.push(json!({"eventId":format!("kraken:deposit-fee-ledger:{}:{}",b.account_resource.0,text(&fee_proof,"identity")?),"entry":fee_proof}));
-            }
-            let evidence = json!({"source":chain.evidence,"venueDeposit":exact_deposit_evidence(row),"venueLedger":[venue_ledger_evidence],"feeLedger":fee_proof,"freeBefore":b.free_before,"freeAfter":free_after,"routeDigest":deposit_route_digest(&b)? ,"proofEvents":events});
-            let fee_location = AccountingLocation::Cash {
-                resource: b.account_resource.clone(),
-            };
-            let treatment = if separate_fee {
-                CostTreatment::AdditionalDebit
-            } else {
-                CostTreatment::DeductedFromCredit
-            };
-            if !preview.intent.maximum_costs.iter().any(|cap| {
-                cap.location == fee_location
-                    && cap.amount.asset == *fee_asset
-                    && cap.treatment == treatment
-            }) || !preview
-                .valuation
-                .as_ref()
-                .is_some_and(|value| value.prices.iter().any(|price| price.asset == *fee_asset))
-            {
-                return Ok(unknown(
-                    "The original deposit record lacks an approved fee identity or its original price. Keep its source identity and reservations; legacy excess-cost accounting is incomplete.",
-                    evidence,
-                ));
-            }
-            let consumed = gofin_domain::unresolved_consumption::UnresolvedCostConsumption::new(
-                submission.clone(),
-                costs,
-                evidence.clone(),
-                now(),
-            )?;
-            let mut result = unknown(
-                "Correlated deposit costs exceed the approved fee scope; preserve the original source identity and reservations.",
-                evidence,
-            );
-            gofin_domain::unresolved_consumption::attach(&mut result, &consumed)?;
-            return Ok(result);
-        }
-        if actual_fee != b.fee || actual_net != b.net {
-            return Ok(unknown(
-                "Deposit fee or net credit differs from the original exact scope.",
-                json!({"deposit":row,"feeLedger":fee_proof}),
-            ));
-        }
         proof.effects = effects;
-        proof.evidence = json!({"method":"canonical-evm-and-kraken-credit-v1","source":chain.evidence,"venueDeposit":exact_deposit_evidence(row),"venueLedger":[venue_ledger_evidence],"feeLedger":fee_proof,"freeBefore":b.free_before,"freeAfter":free_after,"routeDigest":deposit_route_digest(&b)? ,"creditApi":b.credit_api,"discoveryApi":b.discovery_api});
+        proof.evidence = json!({"method":"canonical-evm-and-kraken-credit-v1","source":chain.evidence,"venueDeposit":exact_deposit_evidence(row),"venueLedger":[venue_ledger_evidence],"feeLedger":fee_proof,"freeBefore":b.free_before,"routeDigest":deposit_route_digest(&b)? ,"creditApi":b.credit_api,"discoveryApi":b.discovery_api});
+        if actual_fee != b.fee || actual_net != b.net {
+            proof.evidence["outcome_attention"] = json!({"kind":"discrepancy","actual":{"fee":actual_fee,"net_credit":actual_net},"approved":{"fee":b.fee,"net_credit":b.net}});
+        }
         proof.observed_at = now();
         proof.proof_digest = verified_effect_digest(&proof)?;
         Ok(Reconciliation {
@@ -2675,6 +2752,30 @@ pub(crate) mod tests {
         }
     }
     #[tokio::test]
+    async fn destination_side_uses_persisted_source_proof_without_source_rpc() {
+        let (adapter, venue) = adapter();
+        let mut record = source_record(&adapter, &venue).await;
+        venue.rpc.receipt.store(true, Ordering::SeqCst);
+        let source = adapter
+            .observe_transfer_side(&record, "source")
+            .await
+            .unwrap();
+        record.effects = source.reconciliation.unwrap().verified;
+        assert!(record.effects.is_some());
+        venue.credit.store(true, Ordering::SeqCst);
+        venue.rpc.calls.lock().unwrap().clear();
+        let destination = adapter
+            .observe_transfer_side(&record, "destination")
+            .await
+            .unwrap();
+        assert!(venue.rpc.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            destination.reconciliation.unwrap().status,
+            Status::Completed
+        );
+    }
+
+    #[tokio::test]
     async fn canonical_source_and_exact_usable_ledger_credit_settle_original_deposit() {
         let (adapter, venue) = adapter();
         let record = source_record(&adapter, &venue).await;
@@ -2715,10 +2816,6 @@ pub(crate) mod tests {
         let fees=proof.effects.iter().filter(|e|matches!(e,FinancialEffect::Cost{category,treatment:CostTreatment::DeductedFromCredit,amount,..}if category=="kraken_deposit_fee"&&amount.atoms.to_decimal(36)=="0.0001")).count();
         assert_eq!(fees, 1);
         assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Transfer{credit,..}if credit.atoms.to_decimal(36)=="0.01")));
-        assert_eq!(
-            proof.evidence["freeAfter"],
-            Quantity::from_decimal("0.5099", 36).unwrap().to_string()
-        );
     }
     #[tokio::test]
     async fn tokenized_wallet_deposit_freezes_base_contract_unit_and_correlated_credit() {

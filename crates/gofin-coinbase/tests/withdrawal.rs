@@ -661,6 +661,7 @@ async fn all_routes_reject_wrong_contract_without_dispatch() {
 }
 
 struct RecoveryApi {
+    calls: std::sync::atomic::AtomicUsize,
     reads: ReadApi,
     idem: std::sync::Mutex<String>,
     network: std::sync::Mutex<String>,
@@ -675,6 +676,7 @@ impl CoinbaseApi for RecoveryApi {
         request: CoinbaseRequest,
         guard: Option<DispatchGuard>,
     ) -> Result<CoinbaseResponse, CoinbaseError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert!(guard.is_none(), "recovery must never dispatch");
         let body = match endpoint {
             CoinbaseRoute::Transactions { account_id, .. } => {
@@ -756,6 +758,7 @@ fn recovery_profile(
         WALLET
     };
     let api = Arc::new(RecoveryApi {
+        calls: std::sync::atomic::AtomicUsize::new(0),
         reads: ReadApi {
             available_usdc: Arc::new(std::sync::Mutex::new("5".into())),
             currency,
@@ -796,6 +799,31 @@ async fn unknown_submission(
     serde_json::from_value(json!({
         "id":"original-operation","request_id":"withdrawal-test","fingerprint":"synthetic","fingerprint_version":1,"operation":"coinbase.withdraw","input":input,"status":"unknown","created_at":gofin_domain::now(),"updated_at":gofin_domain::now(),"preview":prepared,"approval":null,"submission":planned.submission,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null
     })).unwrap()
+}
+
+#[tokio::test]
+async fn destination_side_uses_original_venue_observation_without_coinbase_calls() {
+    let route = &COINBASE_NETWORKS[0];
+    let (profile, api) = recovery_profile(destination_for(route), "USDC", tx_hash(route));
+    let input = input_for(route);
+    let mut record = unknown_submission(&profile, &api, &input).await;
+    let submission = record.submission.clone().unwrap();
+    let source = profile
+        .observe_transfer_side(&record, &submission, "source")
+        .await
+        .unwrap();
+    record.last_reconciliation_evidence = Some(source.reconciliation.unwrap().evidence);
+    let before = api.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let destination = profile
+        .observe_transfer_side(&record, &submission, "destination")
+        .await
+        .unwrap();
+    assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), before);
+    assert_eq!(destination.metadata["status"], "completed");
+    assert_eq!(
+        destination.reconciliation.unwrap().status,
+        gofin_domain::Status::Pending
+    );
 }
 
 #[tokio::test]

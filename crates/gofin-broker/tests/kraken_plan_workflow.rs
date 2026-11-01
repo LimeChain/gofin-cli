@@ -1,4 +1,4 @@
-//! Real Kraken adapter / broker named-plan rehearsal with independent synthetic venue evidence.
+//! Real Kraken adapter / broker native-action rehearsal with independent synthetic venue evidence.
 //! GOFIN_KRAKEN_PLAN_CLI=<gofin-dev> additionally runs every public command through the CLI socket.
 //! The wallet-funded deposit leg is covered separately by kraken_deposit's composite fixtures.
 use async_trait::async_trait;
@@ -6,7 +6,7 @@ use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
     compose_runtime_with_clock,
 };
-use gofin_domain::{clock::Clock, financial_plans::*, *};
+use gofin_domain::{clock::Clock, *};
 use gofin_exchange::{ExchangeAdapter, kraken::DispatchGuard};
 use gofin_kraken::funding::{
     KrakenDestination, KrakenPayoutRequest, KrakenPayoutResult, KrakenRecipientVerifier,
@@ -40,10 +40,10 @@ struct Approval(AtomicUsize);
 #[async_trait]
 impl Authorizer for Approval {
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        assert!(c.binding["plan"]["steps"].is_array());
+        assert!(c.binding.to_string().contains("kraken."));
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
-            mechanism: "synthetic Kraken plan only".into(),
+            mechanism: "synthetic Kraken native approval".into(),
             source: None,
             yolo_provenance: None,
             binding_hash: c.binding_hash.clone(),
@@ -70,9 +70,8 @@ impl gofin_pricing::UsdPriceSource for Prices {
         })
     }
 }
-// Change real protected USD quotes only after the buy has settled. The first
-// withdrawal preparation sees $2000/ETH; its validation sees exactly one cent
-// more movement. An optional next quote exceeds the protected $25 policy.
+// Change optional reporting prices after the buy settles. Native amounts and
+// fee caps remain unchanged, including when reporting crosses the retired policy.
 struct DriftPrices {
     armed: AtomicBool,
     calls: AtomicUsize,
@@ -194,7 +193,10 @@ impl KrakenTransport for Venue {
                 json!([{"method":"Ether (Base)","network":"Base","minimum":"0.0001"}])
             }
             E::KrakenPrivatePostWithdraw => {
-                assert!(self.bought.load(Ordering::SeqCst));
+                assert!(
+                    self.bought.load(Ordering::SeqCst)
+                        || self.preparation_funds.load(Ordering::SeqCst)
+                );
                 assert_eq!(p["amount"], "0.0059");
                 assert!(!self.withdrawn.swap(true, Ordering::SeqCst));
                 json!({"refid":"SYNTHETIC-WITHDRAWAL"})
@@ -322,53 +324,21 @@ fn runtime(
     .unwrap()
 }
 include!("support/kraken_plan_client.rs");
-fn exact_step(
-    id: &str,
-    p: &PreparedOperation,
-    input: Value,
-    credits: Value,
-    deps: Vec<FinancialPlanFundingDependency>,
-) -> FinancialPlanStepSpec {
-    FinancialPlanStepSpec {
-        step_id: id.into(),
-        operation: p.operation.clone(),
-        input,
-        permitted_variations: json!({"mode":"exact","maximum_debits":p.intent.debits,"maximum_costs":p.intent.maximum_costs,"possible_credits":credits}),
-        funding_dependencies: deps,
-        action_deadline_seconds: None,
-        completion: FinancialStepCompletion {
-            operation_succeeded: true,
-            principal_spend: None,
-            minimum_net_receipt: None,
-        },
-    }
+include!("support/kraken_refund_outcome.rs");
+
+#[test]
+fn kraken_limit_buy_funds_base_withdrawal_two_approvals_pending_receipt_and_restart() {
+    run_rehearsal(None);
 }
 #[test]
-fn kraken_limit_buy_funds_base_withdrawal_one_approval_pending_receipt_and_restart_replay() {
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .thread_stack_size(8 * 1024 * 1024)
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(rehearse(None))
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+fn kraken_reporting_price_drift_preserves_native_authority() {
+    run_rehearsal(Some(false));
 }
 #[test]
-fn kraken_one_cent_usd_drift_refreshes_unsubmitted_candidate_without_reapproval() {
-    run_recovery_rehearsal(false);
+fn kraken_retired_policy_cannot_block_native_approved_withdrawal() {
+    run_rehearsal(Some(true));
 }
-#[test]
-fn kraken_refreshed_candidate_cannot_cross_protected_policy_or_erase_consumption() {
-    run_recovery_rehearsal(true);
-}
-fn run_recovery_rehearsal(breach_policy: bool) {
+fn run_rehearsal(drift: Option<bool>) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
@@ -378,7 +348,7 @@ fn run_recovery_rehearsal(breach_policy: bool) {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(rehearse(Some(breach_policy)));
+                .block_on(rehearse(drift));
         })
         .unwrap()
         .join()
@@ -399,72 +369,6 @@ async fn rehearse(recovery: Option<bool>) {
     } else {
         Arc::new(Prices)
     };
-    let a = adapter(venue.clone(), prices.clone());
-    let buy = json!({"requestId":"SYNTHETIC-BUY","account":"synthetic-spot","pair":"ETHUSDC","type":"buy","ordertype":"limit","volume":"0.006","price":"2000","maximumFees":{"XETH":"0.00003","USDC":"0.05"},"minimumReceive":"0.00597","timeinforce":"IOC"});
-    let withdraw = json!({"requestId":"SYNTHETIC-WITHDRAW","account":"synthetic-spot","asset":"XETH","key":"synthetic-base","amount":"0.0059","max_fee":"0.0001","destination":DESTINATION});
-    let b = a.prepare("kraken.add-order", &buy).await.unwrap();
-    venue.preparation_funds.store(true, Ordering::SeqCst);
-    let w = a
-        .prepare(E::KrakenPrivatePostWithdraw.operation(), &withdraw)
-        .await
-        .unwrap();
-    venue.preparation_funds.store(false, Ordering::SeqCst);
-    let eth = AssetId {
-        network: "kraken".into(),
-        reference: "XETH".into(),
-        decimals: 36,
-    };
-    let native = AssetId {
-        network: "ethereum:8453".into(),
-        reference: "native".into(),
-        decimals: 18,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Synthetic Kraken buy then Base withdrawal".into(),
-        summary: Some(
-            "Buy 0.006 ETH with USDC and withdraw 0.0059 ETH including 0.0001 fee to Base.".into(),
-        ),
-        steps: vec![
-            exact_step(
-                "buy",
-                &b,
-                buy.clone(),
-                json!([{"resource":ACCOUNT,"asset":eth}]),
-                vec![],
-            ),
-            exact_step(
-                "withdraw",
-                &w,
-                withdraw.clone(),
-                json!([{"resource":DESTINATION,"asset":native}]),
-                vec![FinancialPlanFundingDependency {
-                    producing_step_id: "buy".into(),
-                    resource: ResourceId(ACCOUNT.into()),
-                    asset: eth,
-                    funding_scope: None,
-                    maximum_fraction_bps: None,
-                }],
-            ),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: b
-                .intent
-                .debits
-                .iter()
-                .chain(&w.intent.debits)
-                .cloned()
-                .collect(),
-            maximum_costs: b
-                .intent
-                .maximum_costs
-                .iter()
-                .chain(&w.intent.maximum_costs)
-                .cloned()
-                .collect(),
-        },
-    };
-    venue.calls.lock().unwrap().clear();
     let client = Client::new(
         runtime(
             &path,
@@ -476,30 +380,24 @@ async fn rehearse(recovery: Option<bool>) {
         temp.path(),
     )
     .await;
-    let request = FinancialPlanAuthorizationRequest {
-        request_id: "SYNTHETIC-PLAN".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(1800),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    // The shared whole-plan preflight catches the actual zero-base-fee approval defect.
-    let mut bad = request.clone();
-    bad.plan.steps[0].input["maximumFees"]["XETH"] = json!("0");
+    let buy = json!({"requestId":"SYNTHETIC-BUY","account":"synthetic-spot","pair":"ETHUSDC","type":"buy","ordertype":"limit","volume":"0.006","price":"2000","maximumFees":{"XETH":"0.00003","USDC":"0.05"},"minimumReceive":"0.00597","timeinforce":"IOC"});
+    let withdraw = json!({"requestId":"SYNTHETIC-WITHDRAW","account":"synthetic-spot","asset":"XETH","key":"synthetic-base","amount":"0.0059","max_fee":"0.0001","destination":DESTINATION});
+    // Missing native fee consent is rejected before any financial approval.
+    let mut invalid = buy.clone();
+    invalid["maximumFees"]["XETH"] = json!("0");
     let failure = client
         .call(
             args(&[
-                "plans",
-                "authorize",
+                "preview",
+                "kraken.add-order",
                 "--input",
-                &serde_json::to_string(&bad.plan).unwrap(),
-                "--id",
-                "SYNTHETIC-BAD",
-                "--valid-for",
-                "30m",
+                &invalid.to_string(),
                 "--json",
             ]),
-            BrokerRequest::AuthorizePlan { request: bad },
+            BrokerRequest::Preview {
+                operation: "kraken.add-order".into(),
+                input: invalid,
+            },
             false,
         )
         .await;
@@ -509,97 +407,9 @@ async fn rehearse(recovery: Option<bool>) {
     );
     assert_eq!(approval.0.load(Ordering::SeqCst), 0);
     assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: request.clone(),
-            },
-            true,
-        )
-        .await;
-    let mut request = request;
-    request.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let authorized = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "SYNTHETIC-PLAN",
-                "--review-hash",
-                request.expected_review_hash.as_ref().unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request },
-            true,
-        )
-        .await;
-    assert_eq!(
-        venue.eth(),
-        "0",
-        "future-funded withdrawal cannot require ETH before buy"
-    );
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    assert!(
-        venue
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(e, _)| *e != E::KrakenPrivatePostBalanceEx),
-        "preapproval must not admit execution against future balances"
-    );
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
-    let early = OperationRequest {
-        request_id: "SYNTHETIC-too-early".into(),
-        operation: E::KrakenPrivatePostWithdraw.operation().into(),
-        input: withdraw.clone(),
-        run_id: None,
-    };
-    let rejected = client
-        .call(
-            args(&[
-                "execute",
-                &early.operation,
-                "--input",
-                &withdraw.to_string(),
-                "--id",
-                &early.request_id,
-                "--plan",
-                &plan_id,
-                "--step",
-                "withdraw",
-                "--json",
-            ]),
-            BrokerRequest::ExecutePlanStep {
-                plan_id: plan_id.clone(),
-                step_id: "withdraw".into(),
-                request: early,
-            },
-            false,
-        )
-        .await;
-    assert!(
-        rejected.to_string().contains("PLAN_STEP_NOT_ELIGIBLE"),
-        "{rejected}"
-    );
-    assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(venue.eth(), "0");
     let mut results = vec![];
-    let mut consumed_before_withdrawal = None;
-    for (step_id, op, input) in [
+    for (id, operation, input) in [
         ("buy", "kraken.add-order", buy),
         (
             "withdraw",
@@ -607,183 +417,68 @@ async fn rehearse(recovery: Option<bool>) {
             withdraw,
         ),
     ] {
+        if id == "withdraw" && recovery.is_some() {
+            drift.armed.store(true, Ordering::SeqCst);
+        }
         let request = OperationRequest {
-            request_id: format!("SYNTHETIC-{step_id}-attempt"),
-            operation: op.into(),
+            request_id: format!("SYNTHETIC-{id}-attempt"),
+            operation: operation.into(),
             input: input.clone(),
             run_id: None,
         };
         let argv = args(&[
             "execute",
-            op,
+            operation,
             "--input",
             &input.to_string(),
             "--id",
             &request.request_id,
-            "--plan",
-            &plan_id,
-            "--step",
-            step_id,
             "--json",
         ]);
-        let call = BrokerRequest::ExecutePlanStep {
-            plan_id: plan_id.clone(),
-            step_id: step_id.into(),
-            request,
-        };
-        if step_id == "withdraw" && recovery.is_some() {
-            let plan: FinancialPlanAuthorizationRecord = serde_json::from_value(
-                Store::open(&path)
-                    .unwrap()
-                    .financial_plan(&plan_id)
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap();
-            consumed_before_withdrawal = Some(plan.usage.clone());
-            drift.armed.store(true, Ordering::SeqCst);
-        }
+        let call = BrokerRequest::Execute { request };
         let result = client.call(argv.clone(), call.clone(), true).await;
-        if step_id == "withdraw" && recovery.is_some() {
-            let store = Store::open(&path).unwrap();
-            let plan: FinancialPlanAuthorizationRecord =
-                serde_json::from_value(store.financial_plan(&plan_id).unwrap().unwrap()).unwrap();
-            let attempts: Vec<_> = plan
-                .attempts
-                .iter()
-                .filter(|attempt| attempt.step_id == "withdraw")
-                .collect();
-            assert_eq!(attempts.len(), 2, "{plan:?}");
-            assert!(
-                attempts
-                    .iter()
-                    .all(|attempt| attempt.logical_request_id.as_deref()
-                        == Some("SYNTHETIC-withdraw-attempt"))
-            );
-            let failed: OperationRecord =
-                serde_json::from_value(store.get_record(&attempts[0].attempt_id).unwrap().unwrap())
-                    .unwrap();
-            assert_eq!(failed.status, Status::Failed);
-            assert!(
-                failed.submission.is_none()
-                    && failed.dispatch_evidence.is_none()
-                    && failed.effects.is_none()
-            );
-            let failure = failed.error.as_ref().unwrap();
-            assert_eq!(failure.code, "VALUE_BOUND_EXCEEDED");
-            let details = failure.details.as_ref().unwrap();
-            assert_eq!(details["reason"], "usd_ceiling_exceeded");
-            assert_eq!(details["field"], "movement_usd_micros");
-            assert_eq!(details["maximum_usd_micros"], "11800000");
-            assert_eq!(details["observed_usd_micros"], "11810000");
-            assert_ne!(failed.id, result["id"]);
-            assert_eq!(store.reservation_count(&failed.id).unwrap(), 0);
-            if recovery == Some(true) {
-                assert_eq!(result["status"], "failed", "{result}");
-                assert_eq!(result["error"]["code"], "MOVEMENT_LIMIT", "{result}");
-                assert!(
-                    result["submission"].is_null()
-                        && result["dispatch_evidence"].is_null()
-                        && result["effects"].is_null()
-                );
-                assert_eq!(plan.usage, *consumed_before_withdrawal.as_ref().unwrap());
-                assert!(plan.usage.reservations.is_empty());
-                assert_eq!(
-                    venue.writes.load(Ordering::SeqCst),
-                    1,
-                    "only the earlier buy dispatched"
-                );
-                assert!(!venue.withdrawn.load(Ordering::SeqCst));
-                assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-                drop(client);
-                let client = Client::new(
-                    runtime(&path, venue.clone(), approval.clone(), prices.clone(), true),
-                    temp.path(),
-                )
-                .await;
-                let replay = client.call(argv, call, true).await;
-                assert_eq!(replay["id"], result["id"]);
-                assert_eq!(replay["error"], result["error"]);
-                assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-                assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-                return;
-            }
-            assert!(
-                drift.calls.load(Ordering::SeqCst) >= 4,
-                "fresh preparation and validation must both occur"
-            );
-        }
         assert_eq!(
             result["status"],
-            if step_id == "buy" {
-                "completed"
-            } else {
-                "pending"
-            },
+            if id == "buy" { "completed" } else { "pending" },
             "{result}"
         );
-        assert!(!result["submission"].is_null());
-        if step_id == "withdraw" {
+        assert!(result["submission"].is_object());
+        if id == "withdraw" {
             assert!(
                 result["effects"].is_null(),
-                "source acknowledgement must not claim an unobserved receipt"
+                "Source acceptance cannot establish destination receipt"
             );
-            assert!(result["error"].is_null());
+            assert_eq!(result["outcome"]["phase"], "in_progress");
         } else {
-            let settled: OperationRecord = serde_json::from_value(result.clone()).unwrap();
-            let effects = settled.effects.unwrap().effects;
-            assert!(effects.iter().any(|e| matches!(e, FinancialEffect::Conversion {spent, received, ..} if spent.atoms.to_decimal(36) == "12" && received.atoms.to_decimal(36) == "0.006")));
-            assert!(effects.iter().any(|e| matches!(e, FinancialEffect::Cost {amount, treatment:CostTreatment::AdditionalDebit, ..} if amount.asset.reference == "USDC" && amount.atoms.to_decimal(36) == "0.048")));
+            assert_eq!(result["outcome"]["result"], "executed");
+            let proof: VerifiedEffects = serde_json::from_value(result["effects"].clone()).unwrap();
+            assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Conversion {spent,received,..} if spent.atoms.to_decimal(36)=="12" && received.atoms.to_decimal(36)=="0.006")));
+            assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost {amount,treatment:CostTreatment::AdditionalDebit,..} if amount.asset.reference=="USDC" && amount.atoms.to_decimal(36)=="0.048")));
         }
         let duplicate = client.call(argv.clone(), call.clone(), true).await;
         assert_eq!(duplicate["id"], result["id"]);
         results.push((argv, call, result));
     }
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     drop(client);
     let client = Client::new(
         runtime(
             &path,
             venue.clone(),
             approval.clone(),
-            prices.clone(),
+            prices,
             recovery == Some(true),
         ),
         temp.path(),
     )
     .await;
-    for (argv, call, result) in &results {
+    for (argv, call, original) in &results {
         let duplicate = client.call(argv.clone(), call.clone(), true).await;
-        assert_eq!(duplicate["id"], result["id"]);
-        assert_eq!(duplicate["submission"], result["submission"]);
+        assert_eq!(duplicate["id"], original["id"]);
+        assert_eq!(duplicate["submission"], original["submission"]);
     }
-    assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
     venue.receipt.store(true, Ordering::SeqCst);
-    let status = client
-        .call(
-            args(&["plans", "status", &plan_id, "--json"]),
-            BrokerRequest::PlanStatus {
-                plan_id: plan_id.clone(),
-            },
-            true,
-        )
-        .await;
-    assert!(
-        status["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["state"] == "completed"),
-        "{status}"
-    );
-    assert!(
-        status["usage"]["reservations"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{status}"
-    );
     let id = results[1].2["id"].as_str().unwrap();
     let settled = client
         .call(
@@ -792,24 +487,12 @@ async fn rehearse(recovery: Option<bool>) {
             true,
         )
         .await;
-    let record: OperationRecord = serde_json::from_value(settled).unwrap();
-    assert_eq!(record.status, Status::Completed);
-    let effects = record.effects.unwrap().effects;
-    assert!(effects.iter().any(|e| matches!(e, FinancialEffect::CashDebit {resource, amount} if resource.0 == ACCOUNT && amount.atoms.to_decimal(36) == "0.0059")));
-    assert!(effects.iter().any(|e| matches!(e, FinancialEffect::UsableCredit {to, amount} if to.0 == DESTINATION && amount.atoms.to_decimal(18) == "0.0058")));
-    assert!(effects.iter().any(|e| matches!(e, FinancialEffect::Cost {amount, treatment: CostTreatment::IncludedInDebit, ..} if amount.atoms.to_decimal(36) == "0.0001")));
-    client
-        .call(
-            args(&["plans", "cancel", &plan_id, "--json"]),
-            BrokerRequest::RevokePlan { plan_id },
-            true,
-        )
-        .await;
-    for (argv, call, result) in &results {
-        let duplicate = client.call(argv.clone(), call.clone(), true).await;
-        assert_eq!(duplicate["id"], result["id"]);
-        assert_eq!(duplicate["submission"], result["submission"]);
-    }
+    assert_eq!(settled["outcome"]["phase"], "done", "{settled}");
+    assert_eq!(settled["outcome"]["replay_safe"], false);
+    let proof: VerifiedEffects = serde_json::from_value(settled["effects"].clone()).unwrap();
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::CashDebit {resource,amount} if resource.0==ACCOUNT && amount.atoms.to_decimal(36)=="0.0059")));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::UsableCredit {to,amount} if to.0==DESTINATION && amount.atoms.to_decimal(18)=="0.0058")));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost {amount,treatment:CostTreatment::IncludedInDebit,..} if amount.atoms.to_decimal(36)=="0.0001")));
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
 }

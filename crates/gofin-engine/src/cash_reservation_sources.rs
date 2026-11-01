@@ -21,12 +21,15 @@ pub(super) struct CashReservationSources {
 }
 
 pub(super) struct CashProvenanceSelection {
+    #[cfg(test)]
     pub remaining: Vec<ProvenanceLot>,
     pub principal: Vec<ProvenanceLot>,
     pub additional_costs: Vec<ProvenanceLot>,
+    #[cfg(test)]
     pub sources: CashReservationSources,
 }
 
+#[cfg(test)]
 pub(super) struct CashProvenanceSettlement {
     pub remaining: Vec<ProvenanceLot>,
     pub principal: Vec<ProvenanceLot>,
@@ -78,9 +81,11 @@ pub(super) fn select(run: &RunLedger, intent: &FinancialIntent) -> Result<CashPr
     }
     remove_empty(&mut remaining)?;
     Ok(CashProvenanceSelection {
+        #[cfg(test)]
         remaining,
         principal,
         additional_costs,
+        #[cfg(test)]
         sources: CashReservationSources {
             before: run.provenance.clone(),
             principal_indices,
@@ -90,6 +95,7 @@ pub(super) fn select(run: &RunLedger, intent: &FinancialIntent) -> Result<CashPr
 }
 
 /// Reconstruct original ordering minus the exact principal and fee slices used.
+#[cfg(test)]
 pub(super) fn settle(
     reservation: &RunReservation,
     current: &[ProvenanceLot],
@@ -225,6 +231,7 @@ fn validate<'a>(
     Ok(sources)
 }
 
+#[cfg(test)]
 fn record_consumed(
     consumed: &mut [BigUint],
     slices: &[ProvenanceLot],

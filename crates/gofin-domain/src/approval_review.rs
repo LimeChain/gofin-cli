@@ -87,6 +87,31 @@ pub struct ApprovalLeg {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalTermEnforcement {
+    Enforced,
+    Estimate,
+    AfterExecution,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalTerm {
+    pub label: String,
+    pub value: String,
+    pub enforcement: ApprovalTermEnforcement,
+}
+
+/// Advisory only: open operations never block approval.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalAdvisory {
+    pub operation_id: String,
+    pub operation: String,
+    pub amounts: Vec<crate::ResourceAmount>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalReview {
     pub version: u32,
@@ -106,6 +131,10 @@ pub struct ApprovalReview {
     pub step_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_for_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<ApprovalTerm>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<ApprovalAdvisory>,
 }
 
 fn valid_text(text: &str, allow_empty: bool) -> bool {
@@ -122,6 +151,16 @@ fn too_large() -> GoFinError {
 
 impl ApprovalReview {
     pub fn validate(&self) -> Result<()> {
+        if self.terms.iter().any(|term| {
+            !valid_text(&term.label, false)
+                || !valid_text(&term.value, false)
+                || term.label.graphemes(true).count() > 100
+                || term.value.graphemes(true).count() > 200
+        }) {
+            return Err(GoFinError::validation(
+                "Approval term labels and values must be concise plain text.",
+            ));
+        }
         if self.version != 2 || self.service.trim().is_empty() {
             return Err(GoFinError::validation(
                 "Invalid approval review version or service.",
@@ -605,6 +644,8 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         description: None,
         step_count: None,
         valid_for_seconds: None,
+        terms: Vec::new(),
+        advisories: Vec::new(),
     };
     if review.service == "wallet" {
         wallet::enrich(prepared, &mut review)?;
@@ -649,6 +690,78 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
                 prepared_asset_label(prepared, &asset.identifier)
             };
         }
+    }
+    // These classifications are deliberately conservative: the result and
+    // provider fee may only be established from execution evidence.
+    if let Some(leg) = &review.input
+        && let Some(amount) = &leg.amount
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Input amount".into(),
+            value: amount.clone(),
+            enforcement: ApprovalTermEnforcement::Enforced,
+        });
+    }
+    if let Some(leg) = &review.output
+        && let Some(amount) = &leg.amount
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Minimum output".into(),
+            value: amount.clone(),
+            // The locally constructed Uniswap router calldata contains
+            // amountOutMinimum; provider-trusted variants need separate review.
+            enforcement: if prepared.operation == "uniswap.swap" && prepared.operation_version == 1
+            {
+                ApprovalTermEnforcement::Enforced
+            } else {
+                ApprovalTermEnforcement::AfterExecution
+            },
+        });
+    }
+    if prepared
+        .binding
+        .pointer("/transaction/rollup_fee")
+        .is_some_and(|value| !value.is_null())
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Rollup data fee".into(),
+            value: "Estimated before submission; actual L1 data and operator fees are determined after execution and cannot be capped by the signed gas price.".into(),
+            enforcement: ApprovalTermEnforcement::AfterExecution,
+        });
+    }
+    if prepared.operation == "hyperliquid.orders.twap" {
+        review.terms.push(ApprovalTerm {
+            label: "TWAP execution price and fees".into(),
+            value: "Actual execution price and fees are determined from completed slices; the signed order does not enforce a total realized price or fee ceiling.".into(),
+            enforcement: ApprovalTermEnforcement::AfterExecution,
+        });
+    }
+    for cost in &prepared.intent.maximum_costs {
+        if cost.treatment != crate::CostTreatment::VenueCalculatedAdditionalDebit {
+            review.terms.push(ApprovalTerm {
+                label: "Fee amount".into(),
+                value: format!(
+                    "{} {}",
+                    cost.amount.atoms.to_decimal(cost.amount.asset.decimals),
+                    display_asset(&cost.amount.asset)
+                ),
+                // Historical cost envelopes are accounting limits, not proof
+                // of a provider-enforced fee cap.
+                enforcement: ApprovalTermEnforcement::AfterExecution,
+            });
+        }
+    }
+    if prepared
+        .intent
+        .maximum_costs
+        .iter()
+        .any(|cost| cost.treatment == crate::CostTreatment::VenueCalculatedAdditionalDebit)
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Venue fee".into(),
+            value: "Not capped; determined by venue".into(),
+            enforcement: ApprovalTermEnforcement::AfterExecution,
+        });
     }
     review.validate()?;
     Ok(review)
@@ -704,6 +817,19 @@ mod tests {
             operation_version: 1,
             action_deadline: None,
         }
+    }
+    #[test]
+    fn rollup_data_fee_is_disclosed_as_after_execution() {
+        let mut p = prepared();
+        p.binding["transaction"] = json!({"rollup_fee":{"maximum_l1_data_fee":"1"}});
+        let review = approval_review(&p).unwrap();
+        let term = review
+            .terms
+            .iter()
+            .find(|term| term.label == "Rollup data fee")
+            .unwrap();
+        assert_eq!(term.enforcement, ApprovalTermEnforcement::AfterExecution);
+        assert!(term.value.contains("cannot be capped"));
     }
     #[test]
     fn financial_catalog_writes_have_explicit_actions() {

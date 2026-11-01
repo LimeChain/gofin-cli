@@ -469,10 +469,11 @@ mod tests {
                     .conn
                     .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
                     .unwrap();
+                store.conn.execute_batch("DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; ").unwrap();
                 store.conn.pragma_update(None, "user_version", 17).unwrap();
                 store
                     .conn
-                    .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=18;")
+                    .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=18;")
                     .unwrap();
             }
             let store = Store::open(&path).unwrap();
@@ -507,11 +508,12 @@ mod tests {
                 .conn
                 .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
                 .unwrap();
+            store.conn.execute_batch("DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; ").unwrap();
             store.conn.pragma_update(None, "user_version", 16).unwrap();
             // Model interruption before committing the version marker.
             store
                 .conn
-                .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=17;")
+                .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; PRAGMA user_version=17;")
                 .unwrap();
         }
         let reopened = Store::open(&path).unwrap();

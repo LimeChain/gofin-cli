@@ -156,7 +156,7 @@ fn fixture() -> (
             vec![gofin_ethereum::WalletConnection {
                 name: "test".into(),
                 address: "0x1111111111111111111111111111111111111111".into(),
-                signing_enabled: false,
+                signing_enabled: true,
             }],
             runtime.clone(),
         )
@@ -334,22 +334,40 @@ async fn stale_source_preparation_refresh_preserves_identity_bounds_and_journal(
     let before = state.transfer(id).unwrap().unwrap();
     let saved = adapter.saved_quote(&before).unwrap();
     provider.clock.0.fetch_add(29, Ordering::SeqCst);
-    assert!(!adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
+    assert!(
+        !adapter
+            .refresh_stale_source_quote(&before, &saved, &before.steps[0])
+            .await
+            .unwrap()
+    );
     provider.clock.0.fetch_add(1, Ordering::SeqCst);
-    assert!(adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
+    assert!(
+        adapter
+            .refresh_stale_source_quote(&before, &saved, &before.steps[0])
+            .await
+            .unwrap()
+    );
     let refreshed = state.transfer(id).unwrap().unwrap();
     assert_eq!(refreshed.id, before.id);
     assert_eq!(refreshed.steps, before.steps);
     assert_eq!(refreshed.metadata, before.metadata);
     assert_eq!(refreshed.approved_bounds, before.approved_bounds);
     assert_eq!(refreshed.plan_scope, before.plan_scope);
-    assert_eq!(refreshed.quote_revisions.len(), before.quote_revisions.len() + 1);
+    assert_eq!(
+        refreshed.quote_revisions.len(),
+        before.quote_revisions.len() + 1
+    );
     assert_eq!(state.transfers().unwrap().len(), 1);
     let fresh = adapter.saved_quote(&refreshed).unwrap();
     assert_eq!(fresh.bounds, saved.bounds);
     assert_eq!(fresh.quote.provider, saved.quote.provider);
     assert_eq!(fresh.quote.route_id, saved.quote.route_id);
-    assert!(!adapter.refresh_stale_source_quote(&refreshed, &fresh, &refreshed.steps[0]).await.unwrap());
+    assert!(
+        !adapter
+            .refresh_stale_source_quote(&refreshed, &fresh, &refreshed.steps[0])
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -361,8 +379,39 @@ async fn automatic_refresh_rejects_expired_provider_quote_without_replacing_orig
     let saved = adapter.saved_quote(&before).unwrap();
     provider.clock.0.fetch_add(61, Ordering::SeqCst);
     provider.expired.store(true, Ordering::SeqCst);
-    let error = adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap_err();
+    let error = adapter
+        .refresh_stale_source_quote(&before, &saved, &before.steps[0])
+        .await
+        .unwrap_err();
     assert_eq!(error.code, "BRIDGE_QUOTE_EXPIRED");
     assert_eq!(state.transfer(id).unwrap().unwrap(), before);
     assert_eq!(state.transfers().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn standalone_parent_pins_transfer_and_native_terms_before_approval() {
+    let (adapter, _, _, state, quote, _directory) = fixture();
+    let deadline = u64::try_from(adapter.clock.now().timestamp()).unwrap() + 300;
+    let mut intent = quote["intent"].clone();
+    intent["amount"] = json!({"minimum":"1000000","maximum":"1000000"});
+    let bounds = json!({"input":{"minimum":"1000000","maximum":"1000000"},"maximum_source_debit":"1000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"9"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}],"latest_protocol_deadline":deadline});
+    let input = json!({"intent":intent,"allowedProviders":["relay"],"actionDeadline":deadline,"bounds":bounds});
+    let prepared = adapter.prepare("bridge.execute", &input).await.unwrap();
+    assert!(adapter.is_compound_action(&prepared));
+    assert_eq!(
+        prepared
+            .action_deadline
+            .as_ref()
+            .unwrap()
+            .deadline_unix_seconds,
+        deadline
+    );
+    assert!(prepared.valuation.is_none());
+    let id = prepared.binding["transfer_id"].as_str().unwrap();
+    let transfer = state.transfer(id).unwrap().unwrap();
+    assert_eq!(transfer.steps.len(), 1);
+    assert_eq!(transfer.steps[0].state, BridgeStepState::Unsubmitted);
+    let mut invalid = input.clone();
+    invalid["actionDeadline"] = json!(1);
+    assert!(adapter.prepare("bridge.execute", &invalid).await.is_err());
 }

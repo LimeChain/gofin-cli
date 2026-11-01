@@ -75,6 +75,38 @@ pub struct SolanaWalletAdapter {
 }
 
 impl SolanaWalletAdapter {
+    async fn optional_native_valuation(
+        &self,
+        native: &AssetId,
+        amount: &gofin_domain::Quantity,
+        fee: &gofin_domain::Quantity,
+        funding: u64,
+    ) -> Option<gofin_domain::Valuation> {
+        async {
+            let quote = self._prices.quote(native).await?;
+            ensure_fresh_quote(&quote)?;
+            let price = price_micros_per_unit(&quote.usd_per_unit)?;
+            let unit = gofin_domain::Quantity::new("1000000000")?;
+            Ok::<_, gofin_domain::GoFinError>(gofin_domain::Valuation {
+                movement_usd_micros: amount.mul_div_ceil(&price, &unit)?,
+                maximum_fee_usd_micros: fee.mul_div_ceil(&price, &unit)?,
+                additional_allocation_usd_micros: gofin_domain::Quantity::from_u64(funding)
+                    .mul_div_ceil(&price, &unit)?,
+                observed_at: quote.observed_at.clone(),
+                source: quote.source.clone(),
+                prices: vec![gofin_domain::AssetPrice {
+                    asset: native.clone(),
+                    usd_micros_per_unit: price,
+                    unit_atoms: unit,
+                    observed_at: quote.observed_at,
+                    source: quote.source,
+                }],
+            })
+        }
+        .await
+        .ok()
+    }
+
     pub fn new(
         name: impl Into<String>,
         address: impl AsRef<str>,
@@ -147,7 +179,6 @@ impl SolanaWalletAdapter {
                 "The nested Solana candidate must be a transfer for this enrolled wallet on mainnet-beta.",
             ));
         }
-        gofin_domain::value_bounds::validate_at(child, chrono::Utc::now())?;
         if child
             .checks
             .iter()
@@ -542,7 +573,10 @@ impl SolanaWalletAdapter {
             ],
             data: instruction_data,
         };
-        let normalized = normalize_instruction(instruction);
+        let instructions = vec![
+            request_identity_memo(request_id)?,
+            normalize_instruction(instruction),
+        ];
         let latest = self
             .runtime
             .rpc()
@@ -560,7 +594,7 @@ impl SolanaWalletAdapter {
         let frozen = self
             .runtime
             .freeze_instructions(
-                std::slice::from_ref(&normalized),
+                &instructions,
                 &[],
                 blockhash,
                 signer,
@@ -599,15 +633,9 @@ impl SolanaWalletAdapter {
             reference: "native".into(),
             decimals: 9,
         };
-        let quote = self._prices.quote(&native).await?;
-        ensure_fresh_quote(&quote)?;
-        let unit_atoms = gofin_domain::Quantity::new("1000000000")?;
-        let price = gofin_domain::Quantity::from_decimal(&quote.usd_per_unit, 18)?.mul_div_floor(
-            &gofin_domain::Quantity::from_u64(1),
-            &gofin_domain::Quantity::new("1000000000000")?,
-        )?;
-        let amount_usd = amount.mul_div_ceil(&price, &unit_atoms)?;
-        let max_fee_usd = max_fee.mul_div_ceil(&price, &unit_atoms)?;
+        let valuation = self
+            .optional_native_valuation(&native, &amount, &max_fee, 0)
+            .await;
         let resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
         let recipient_resource = ResourceId(format!("solana:mainnet-beta:{recipient}"));
         let intent = FinancialIntent {
@@ -638,24 +666,10 @@ impl SolanaWalletAdapter {
             }],
             locks: vec![resource],
         };
-        let valuation = gofin_domain::Valuation {
-            movement_usd_micros: amount_usd.clone(),
-            maximum_fee_usd_micros: max_fee_usd.clone(),
-            additional_allocation_usd_micros: gofin_domain::Quantity::from_u64(0),
-            observed_at: quote.observed_at.clone(),
-            source: quote.source.clone(),
-            prices: vec![gofin_domain::AssetPrice {
-                asset: native,
-                usd_micros_per_unit: price,
-                unit_atoms,
-                observed_at: quote.observed_at,
-                source: quote.source,
-            }],
-        };
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "wallet.transfer".into(),
             input: input.clone(),
-            binding: json!({"message_sha256":frozen.message_sha256(),"instructions":[normalized],"blockhash":frozen.recent_blockhash(),"last_valid_block_height":frozen.last_valid_block_height(),"max_fee_lamports":max_fee_lamports,"amount_lamports":lamports,"recipient":recipient,"request_id":request_id}),
+            binding: json!({"message_sha256":frozen.message_sha256(),"instructions":instructions,"blockhash":frozen.recent_blockhash(),"last_valid_block_height":frozen.last_valid_block_height(),"max_fee_lamports":max_fee_lamports,"amount_lamports":lamports,"recipient":recipient,"request_id":request_id}),
             summary: format!("Transfer {} SOL to {}", amount.to_decimal(9), recipient),
             checks: vec![
                 Check {
@@ -674,12 +688,11 @@ impl SolanaWalletAdapter {
             warnings: vec![],
             observed_at: gofin_domain::now(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             action_deadline: None,
             operation_version: 1,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -903,14 +916,9 @@ impl SolanaWalletAdapter {
             reference: mint.into(),
             decimals: 9,
         };
-        let quote = self._prices.quote(&native).await?;
-        ensure_fresh_quote(&quote)?;
-        let price = price_micros_per_unit(&quote.usd_per_unit)?;
-        let unit = gofin_domain::Quantity::new("1000000000")?;
-        let movement = amount.mul_div_ceil(&price, &unit)?;
-        let funding_usd = gofin_domain::Quantity::from_u64(account_funding_lamports)
-            .mul_div_ceil(&price, &unit)?;
-        let fee_usd = max_fee.mul_div_ceil(&price, &unit)?;
+        let valuation = self
+            .optional_native_valuation(&native, &amount, &max_fee, account_funding_lamports)
+            .await;
         let resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
         let mut debits = vec![ResourceAmount {
             resource: resource.clone(),
@@ -964,7 +972,7 @@ impl SolanaWalletAdapter {
                 maximum_change: gofin_domain::Quantity::from_u64(account_funding_lamports),
             });
         }
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "wallet.wrap".into(),
             input: input.clone(),
             binding: json!({"message_sha256":frozen.message_sha256(),"instructions":instructions,"blockhash":blockhash,"last_valid_block_height":last_valid,"max_fee_lamports":max_fee_lamports,"amount_lamports":lamports,"token_account":account,"destination_account_created":destination_created,"account_funding_lamports":account_funding_lamports,"request_id":request_id}),
@@ -992,20 +1000,7 @@ impl SolanaWalletAdapter {
             warnings: vec![],
             observed_at: gofin_domain::now(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
-            valuation: Some(gofin_domain::Valuation {
-                movement_usd_micros: movement.clone(),
-                maximum_fee_usd_micros: fee_usd.clone(),
-                additional_allocation_usd_micros: funding_usd,
-                observed_at: quote.observed_at.clone(),
-                source: quote.source.clone(),
-                prices: vec![gofin_domain::AssetPrice {
-                    asset: native.clone(),
-                    usd_micros_per_unit: price,
-                    unit_atoms: unit,
-                    observed_at: quote.observed_at,
-                    source: quote.source,
-                }],
-            }),
+            valuation,
             intent: FinancialIntent {
                 debits,
                 maximum_costs: vec![CostBound {
@@ -1024,7 +1019,6 @@ impl SolanaWalletAdapter {
             action_deadline: None,
             operation_version: 1,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -1286,14 +1280,11 @@ impl SolanaWalletAdapter {
             reference: "native".into(),
             decimals: 9,
         };
-        let quote = self._prices.quote(&native).await?;
-        ensure_fresh_quote(&quote)?;
-        let price = price_micros_per_unit(&quote.usd_per_unit)?;
-        let unit = gofin_domain::Quantity::new("1000000000")?;
-        let movement = amount.mul_div_ceil(&price, &unit)?;
-        let fee_usd = max_fee.mul_div_ceil(&price, &unit)?;
+        let valuation = self
+            .optional_native_valuation(&native, &amount, &max_fee, 0)
+            .await;
         let resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "wallet.unwrap".into(),
             input: input.clone(),
             binding: json!({"message_sha256":frozen.message_sha256(),"instructions":instructions,"blockhash":blockhash,"last_valid_block_height":last_valid,"max_fee_lamports":max_fee_lamports,"amount_lamports":lamports,"source_token_account":source_account,"temporary_account":temporary,"temporary_seed":seed,"temporary_rent_lamports":rent,"request_id":request_id}),
@@ -1305,14 +1296,7 @@ impl SolanaWalletAdapter {
             warnings: vec![],
             observed_at: gofin_domain::now(),
             expires_at: (chrono::Utc::now()+chrono::Duration::seconds(60)).to_rfc3339(),
-            valuation: Some(gofin_domain::Valuation {
-                movement_usd_micros: movement.clone(),
-                maximum_fee_usd_micros: fee_usd.clone(),
-                additional_allocation_usd_micros: gofin_domain::Quantity::from_u64(0),
-                observed_at: quote.observed_at.clone(),
-                source: quote.source.clone(),
-                prices: vec![gofin_domain::AssetPrice { asset: native.clone(), usd_micros_per_unit: price, unit_atoms: unit, observed_at: quote.observed_at, source: quote.source }],
-            }),
+            valuation,
             intent: FinancialIntent {
                 debits: vec![ResourceAmount { resource: resource.clone(), amount: Amount { asset: wrapped.clone(), atoms: amount.clone() } }],
                 maximum_costs: vec![CostBound { location: AccountingLocation::Cash { resource: resource.clone() }, amount: Amount { asset: native.clone(), atoms: max_fee }, treatment: CostTreatment::AdditionalDebit }],
@@ -1322,7 +1306,6 @@ impl SolanaWalletAdapter {
             action_deadline: None,
             operation_version: 1,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -1606,12 +1589,9 @@ impl SolanaWalletAdapter {
             );
             instructions.push(normalize_old_instruction(old_create)?);
         }
-        if destination_info
-            .as_ref()
-            .is_some_and(|info| info.memo_required)
-        {
-            instructions.push(memo_instruction(request_id)?);
-        }
+        // Bind the logical request even when the destination does not require a memo.
+        // This makes otherwise identical transfers with one blockhash distinct.
+        instructions.push(request_identity_memo(request_id)?);
         instructions.push(transfer_instruction);
         let max_fee = gofin_domain::Quantity::from_decimal(
             input
@@ -1684,27 +1664,54 @@ impl SolanaWalletAdapter {
             reference: "native".into(),
             decimals: 9,
         };
-        let token_quote = self._prices.quote(&asset).await?;
-        ensure_fresh_quote(&token_quote)?;
-        let sol_quote = if asset == sol {
-            token_quote.clone()
-        } else {
-            let quote = self._prices.quote(&sol).await?;
-            ensure_fresh_quote(&quote)?;
-            quote
-        };
-        let token_price = price_micros_per_unit(&token_quote.usd_per_unit)?;
-        let sol_price = price_micros_per_unit(&sol_quote.usd_per_unit)?;
-        let token_unit =
-            gofin_domain::Quantity::new(format!("1{}", "0".repeat(asset.decimals as usize)))?;
-        let sol_unit = gofin_domain::Quantity::new("1000000000")?;
-        let mut movement = amount.mul_div_ceil(&token_price, &token_unit)?;
-        if account_funding_lamports > 0 {
-            let rent_usd = gofin_domain::Quantity::from_u64(account_funding_lamports)
-                .mul_div_ceil(&sol_price, &sol_unit)?;
-            movement = movement.checked_add(&rent_usd)?;
+        let valuation = async {
+            let token_quote = self._prices.quote(&asset).await?;
+            ensure_fresh_quote(&token_quote)?;
+            let sol_quote = if asset == sol {
+                token_quote.clone()
+            } else {
+                let quote = self._prices.quote(&sol).await?;
+                ensure_fresh_quote(&quote)?;
+                quote
+            };
+            let token_price = price_micros_per_unit(&token_quote.usd_per_unit)?;
+            let sol_price = price_micros_per_unit(&sol_quote.usd_per_unit)?;
+            let token_unit =
+                gofin_domain::Quantity::new(format!("1{}", "0".repeat(asset.decimals as usize)))?;
+            let sol_unit = gofin_domain::Quantity::new("1000000000")?;
+            let mut movement = amount.mul_div_ceil(&token_price, &token_unit)?;
+            if account_funding_lamports > 0 {
+                let rent_usd = gofin_domain::Quantity::from_u64(account_funding_lamports)
+                    .mul_div_ceil(&sol_price, &sol_unit)?;
+                movement = movement.checked_add(&rent_usd)?;
+            }
+            let fee_usd = max_fee.mul_div_ceil(&sol_price, &sol_unit)?;
+            Ok::<gofin_domain::Valuation, gofin_domain::GoFinError>(gofin_domain::Valuation {
+                movement_usd_micros: movement.clone(),
+                maximum_fee_usd_micros: fee_usd.clone(),
+                additional_allocation_usd_micros: gofin_domain::Quantity::from_u64(0),
+                observed_at: token_quote.observed_at.clone(),
+                source: token_quote.source.clone(),
+                prices: vec![
+                    gofin_domain::AssetPrice {
+                        asset: asset.clone(),
+                        usd_micros_per_unit: token_price,
+                        unit_atoms: token_unit,
+                        observed_at: token_quote.observed_at,
+                        source: token_quote.source,
+                    },
+                    gofin_domain::AssetPrice {
+                        asset: sol.clone(),
+                        usd_micros_per_unit: sol_price,
+                        unit_atoms: sol_unit,
+                        observed_at: sol_quote.observed_at,
+                        source: sol_quote.source,
+                    },
+                ],
+            })
         }
-        let fee_usd = max_fee.mul_div_ceil(&sol_price, &sol_unit)?;
+        .await
+        .ok();
         let source_resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
         let destination_resource = ResourceId(format!("solana:mainnet-beta:{recipient}"));
         let mut expected = vec![EffectConstraint::Transfer {
@@ -1756,30 +1763,7 @@ impl SolanaWalletAdapter {
             expected,
             locks: vec![source_resource],
         };
-        let valuation = gofin_domain::Valuation {
-            movement_usd_micros: movement.clone(),
-            maximum_fee_usd_micros: fee_usd.clone(),
-            additional_allocation_usd_micros: gofin_domain::Quantity::from_u64(0),
-            observed_at: token_quote.observed_at.clone(),
-            source: token_quote.source.clone(),
-            prices: vec![
-                gofin_domain::AssetPrice {
-                    asset: asset.clone(),
-                    usd_micros_per_unit: token_price,
-                    unit_atoms: token_unit,
-                    observed_at: token_quote.observed_at,
-                    source: token_quote.source,
-                },
-                gofin_domain::AssetPrice {
-                    asset: sol.clone(),
-                    usd_micros_per_unit: sol_price,
-                    unit_atoms: sol_unit,
-                    observed_at: sol_quote.observed_at,
-                    source: sol_quote.source,
-                },
-            ],
-        };
-        let mut prepared = PreparedOperation {
+        let prepared = PreparedOperation {
             operation: "wallet.transfer".into(),
             input: input.clone(),
             binding: json!({"message_sha256":frozen.message_sha256(),"instructions":frozen.instructions(),"blockhash":frozen.recent_blockhash(),"last_valid_block_height":last_valid,"max_fee_lamports":max_fee_lamports,"amount_atoms":gross,"expected_credit_atoms":net,"token_fee_atoms":fee,"mint":mint,"decimals":descriptor.decimals,"token_program":mint_program,"source_token_account":source,"destination_token_account":destination,"destination_account_created":create_destination,"account_funding_lamports":account_funding_lamports,"source_owner":self.address,"recipient":recipient,"request_id":request_id}),
@@ -1828,12 +1812,11 @@ impl SolanaWalletAdapter {
             warnings: descriptor.transfer_limitation.clone().into_iter().collect(),
             observed_at: gofin_domain::now(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             action_deadline: None,
             operation_version: 1,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -2942,6 +2925,44 @@ fn prepared_authorization_identity(
 
 #[async_trait]
 impl Adapter for SolanaWalletAdapter {
+    fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
+        if prepared.operation != "wallet.transfer" {
+            return false;
+        }
+        let Some(id) = prepared
+            .input
+            .get("requestId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+        else {
+            return false;
+        };
+        if prepared.binding["request_id"] != id {
+            return false;
+        }
+        let Ok(memo) = request_identity_memo(id) else {
+            return false;
+        };
+        prepared.binding["instructions"]
+            .as_array()
+            .is_some_and(|instructions| {
+                instructions
+                    .iter()
+                    .filter(|item| {
+                        serde_json::from_value::<NormalizedInstruction>((*item).clone())
+                            .ok()
+                            .as_ref()
+                            == Some(&memo)
+                    })
+                    .count()
+                    == 1
+            })
+    }
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // Advisory polling usefulness only; expiry does not prove nonexecution or authorize replay.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+
     fn diagnostics(&self) -> Value {
         self.runtime.rpc().diagnostics()
     }
@@ -3240,6 +3261,34 @@ impl Adapter for SolanaWalletAdapter {
                 evidence,
                 verified: Some(verified),
             });
+        }
+        if let crate::ReceiptOutcome::ExpiredWithoutInclusion {
+            signature,
+            message_sha256,
+            reason,
+            proof,
+        } = &outcome
+        {
+            let approved_hash = record
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.binding.get("message_sha256"))
+                .and_then(Value::as_str);
+            if approved_hash != Some(message_sha256.as_str()) {
+                return Err(failure(
+                    "SOLANA_BINDING_MISMATCH",
+                    "reconciliation",
+                    "The expired transaction does not match the reviewed immutable message.",
+                    "Keep the submission unresolved and inspect its original journal record.",
+                ));
+            }
+            return crate::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            );
         }
         let crate::ReceiptOutcome::Finalized {
             signature,
@@ -3737,7 +3786,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             output_schema:if token {json!({"type":"object","required":["network","cluster","mint","observed_commitment","descriptor"],"properties":{"network":{"const":NETWORK},"cluster":{"const":CLUSTER},"mint":{"type":"string","maxLength":44},"observed_commitment":{"const":"finalized"},"descriptor":{"type":"object","required":["program_id","supply_atoms","decimals","extensions","transfer_supported_by_runtime"],"properties":{"program_id":{"enum":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID]},"supply_atoms":{"type":"string","pattern":"^[0-9]+$"},"decimals":{"type":"integer","minimum":0,"maximum":255},"mint_authority":{"type":["string","null"]},"freeze_authority":{"type":["string","null"]},"extensions":{"type":"array","items":{"type":"string"}},"transfer_supported_by_runtime":{"type":"boolean"},"transfer_limitation":{"type":["string","null"]},"transfer_fee":{"type":["object","null"],"properties":{"epoch":{"type":"integer","minimum":0},"basis_points":{"type":"integer","minimum":0,"maximum":10000},"maximum_fee_atoms":{"type":"string","pattern":"^[0-9]+$"}}},"transfer_hook_program":{"type":["string","null"]},"paused":{"type":["boolean","null"]}}}}})} else if receipt {json!({"type":"object","required":["state"],"properties":{"state":{"enum":["pending","finalized","not_dispatched"]},"confirmed":{"type":"boolean"},"reason_code":{"type":"string"},"reason":{"type":"string"},"signature":{"type":"string","maxLength":88},"slot":{"type":"integer","minimum":0},"fee_lamports":{"type":"integer","minimum":0},"failed":{"type":"boolean"},"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"proof":{"type":"object","properties":{"account_keys":{"type":"array","items":{"type":"string"}},"message_instructions":{"type":"array","items":{"type":"object","required":["program_id","accounts","data_base64"]}},"pre_balances_lamports":{"type":"array","items":{"type":"integer","minimum":0}},"post_balances_lamports":{"type":"array","items":{"type":"integer","minimum":0}},"pre_token_balances":{"type":"array"},"post_token_balances":{"type":"array"},"inner_instructions":{"type":"array"},"log_messages":{"type":"array","items":{"type":"string"}}}}}})} else if transfer {json!({"type":"object","required":["operation","binding","intent"],"properties":{"operation":{"const":"wallet.transfer"},"binding":{"type":"object","required":["message_sha256"],"properties":{"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"amount_atoms":{"type":"integer","minimum":0},"amount_lamports":{"type":"integer","minimum":0},"mint":{"type":"string"},"decimals":{"type":"integer","minimum":0,"maximum":255},"max_fee_lamports":{"type":"integer","minimum":0},"destination_account_created":{"type":"boolean"},"account_funding_lamports":{"type":"integer","minimum":0}}},"intent":{"type":"object","required":["debits","expected","maximum_costs"]}}})} else {json!({"type":"object","required":["network","cluster","wallet","observed_commitment","native","token_accounts","coverage"],"properties":{"network":{"const":NETWORK},"cluster":{"const":CLUSTER},"wallet":{"type":"string","maxLength":44},"observed_commitment":{"const":"finalized"},"native":{"type":"object","required":["asset","amount_atoms"],"properties":{"asset":{"type":"object","required":["network","reference","decimals"]},"amount_atoms":{"type":"string","pattern":"^[0-9]+$"}}},"token_accounts":{"type":"array","items":{"type":"object","required":["address","asset","amount_atoms","state","token_owner","program_id","delegate","delegated_amount_atoms","close_authority","extensions"],"properties":{"address":{"type":"string","maxLength":44},"asset":{"type":"object","required":["network","reference","decimals"]},"amount_atoms":{"type":"string","pattern":"^[0-9]+$"},"state":{"enum":["initialized","frozen"]},"token_owner":{"type":"string","maxLength":44},"program_id":{"enum":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID]},"delegate":{"type":["string","null"]},"delegated_amount_atoms":{"type":"string","pattern":"^[0-9]+$"},"close_authority":{"type":["string","null"]},"withheld_transfer_fee_atoms":{"type":["string","null"]},"memo_required":{"type":"boolean"},"allow_non_confidential_credits":{"type":["boolean","null"]},"extensions":{"type":"array","items":{"type":"string"}}}}},"coverage":{"type":"object","required":["kind","programs","address_associated_only","portfolio_complete","scope_note"],"properties":{"kind":{"const":"wallet_owned_spl_accounts"},"programs":{"type":"array","items":{"type":"string"}},"address_associated_only":{"const":false},"complete_for_program_account_queries":{"type":"boolean"},"portfolio_complete":{"const":false},"scope_note":{"type":"string"}}}}})},
             error_schema:json!({"type":"object","required":["code","stage","message","next_action"],"properties":{"code":{"type":"string"},"stage":{"type":"string"},"message":{"type":"string"},"next_action":{"type":"string"}}}),
             examples:if token {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","mint":"So11111111111111111111111111111111111111112"})]} else if receipt {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","signature":"5Z...","message_sha256":"0000000000000000000000000000000000000000000000000000000000000000"})]} else if transfer {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","recipient":"11111111111111111111111111111111","amount":"0.01","max_fee_sol":"0.00001","requestId":"stable-attempt-id"})]} else {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta"})]},
-            coverage:if token {"One binary-verified mint account at finalized commitment, including extension metadata and transfer limitations.".into()} else if receipt {"Finalized transaction status plus cryptographically verified message/signatures and balance/token effect evidence.".into()} else if transfer {"Native SOL and SPL Token/Token-2022 transfers. Exact amounts, stable request identity, explicit network fee cap, simulation, extension-aware fee/memo/hook handling and finalized balance-delta verification.".into()} else {"Wallet-owned native SOL and token accounts selected by both SPL Token program owners, including non-associated token accounts. External application positions are separate.".into()},
+            coverage:if token {"One binary-verified mint account at finalized commitment, including extension metadata and transfer limitations.".into()} else if receipt {"Finalized transaction status plus cryptographically verified message/signatures and balance/token effect evidence.".into()} else if transfer {"Native SOL and SPL Token/Token-2022 transfers. Exact amounts, stable request identity bound by a domain-separated hash in a public memo, explicit network fee cap, simulation, extension-aware fee/memo/hook handling and finalized balance-delta verification.".into()} else {"Wallet-owned native SOL and token accounts selected by both SPL Token program owners, including non-associated token accounts. External application positions are separate.".into()},
             completion:if transfer {"A successful RPC response is not completion; settle only after the original signature is finalized and exact SOL debits, recipient credit and network fee are verified.".into()} else {"Read-only finalized mainnet-beta observation. Amounts are exact atom strings.".into()},
             semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","financial_movement":transfer,"account_discovery":"All owned accounts for both supported token programs; not ATA-only.","portfolio_scope":"Wallet-owned tokens only; application positions are reported by their application observer.","implemented_transfer_assets":["native SOL","SPL Token","Token-2022"],"bounded_authorization":if transfer {json!({"supported":true,"scope":"fixed wallet, mainnet-beta cluster, recipient, mint and selected token accounts","bounds":{"max_amount":"exact decimal in the selected asset's units","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"optional separate account funding cap"},"candidate_request_id":"may vary per attempt","plan_permission_balance_independent":true,"plan_authorization_duration":"finite parent plan duration; candidate freshness and blockhash expiry remain independent"})} else {Value::Null}}),
         }
@@ -3848,6 +3897,14 @@ fn normalize_old_instruction(
     }))
 }
 
+// The public memo identifies the logical request without revealing its chosen text.
+fn request_identity_memo(request_id: &str) -> Result<NormalizedInstruction> {
+    let mut hash = Sha256::new();
+    hash.update(b"gofin:solana:wallet-transfer:v1\0");
+    hash.update(request_id.as_bytes());
+    memo_instruction(&format!("gofin:{}", hex::encode(hash.finalize())))
+}
+
 fn memo_instruction(memo: &str) -> Result<NormalizedInstruction> {
     let program_id = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
         .parse()
@@ -3931,6 +3988,14 @@ mod tests {
                 observed_at: gofin_domain::now(),
                 source: "synthetic-test-quote".into(),
             })
+        }
+    }
+
+    struct UnavailablePrices;
+    #[async_trait]
+    impl UsdPriceSource for UnavailablePrices {
+        async fn quote(&self, _: &AssetId) -> Result<UsdQuote> {
+            Err(GoFinError::validation("Synthetic price outage"))
         }
     }
 
@@ -4569,6 +4634,60 @@ mod tests {
         );
         data.resize(166 + 4 + std::mem::size_of::<ConfidentialTransferMint>(), 0);
         data
+    }
+
+    #[tokio::test]
+    async fn identical_transfers_have_distinct_request_bound_signed_identities() {
+        let signer = test_signer();
+        let address = signer.address().to_owned();
+        let adapter = SolanaWalletAdapter::new(
+            "synthetic",
+            &address,
+            Some(signer),
+            Arc::new(Rpc::default()),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        let recipient = bs58::encode([8u8; 32]).into_string();
+        let mut input = json!({"wallet":"synthetic","network":"solana","cluster":"mainnet-beta","recipient":recipient,"amount":"0.0001","max_fee_sol":"0.00001","requestId":"memo-transfer-1"});
+        let first = adapter.prepare("wallet.transfer", &input).await.unwrap();
+        input["requestId"] = json!("memo-transfer-2");
+        let second = adapter.prepare("wallet.transfer", &input).await.unwrap();
+        assert!(adapter.supports_independent_submission(&first));
+        let instructions = first.binding["instructions"].to_string();
+        assert!(!instructions.contains("memo-transfer-1"));
+        let mut legacy = first.clone();
+        legacy.binding["instructions"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        assert!(!adapter.supports_independent_submission(&legacy));
+        assert_eq!(first.binding["blockhash"], second.binding["blockhash"]);
+        assert_ne!(
+            first.binding["message_sha256"],
+            second.binding["message_sha256"]
+        );
+        assert!(
+            adapter
+                .validate_approved_candidate(&first, &second)
+                .is_err()
+        );
+        let one = adapter
+            .submit(
+                &adapter.revalidate(&first).await.unwrap(),
+                Arc::new(Journal::default()),
+            )
+            .await
+            .unwrap();
+        let two = adapter
+            .submit(
+                &adapter.revalidate(&second).await.unwrap(),
+                Arc::new(Journal::default()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(one.data["chain_signature"], two.data["chain_signature"]);
+        assert_ne!(one.reference, two.reference);
     }
 
     #[tokio::test]
@@ -5616,6 +5735,20 @@ mod tests {
         .unwrap();
         let input = json!({"wallet":"synthetic","network":"solana","cluster":"mainnet-beta","recipient":recipient,"mint":mint,"source_token_account":source,"amount":"1.25","max_fee_sol":"0.00001","max_account_funding_sol":"0.003","requestId":"synthetic-token-ata"});
         let prepared = adapter.prepare("wallet.transfer", &input).await.unwrap();
+        let no_price = SolanaWalletAdapter::new(
+            "synthetic",
+            &owner,
+            Some(test_signer()),
+            rpc.clone(),
+            Arc::new(UnavailablePrices),
+        )
+        .unwrap();
+        let native_only = no_price.prepare("wallet.transfer", &input).await.unwrap();
+        assert!(native_only.valuation.is_none());
+        assert_eq!(
+            native_only.binding["amount_atoms"],
+            prepared.binding["amount_atoms"]
+        );
         assert_eq!(prepared.binding["destination_account_created"], true);
         assert_eq!(prepared.binding["account_funding_lamports"], 2_039_280);
         assert!(
@@ -5906,9 +6039,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .additional_allocation_usd_micros,
-            // The shared bound rounds USD reservations conservatively to the
-            // next cent: $0.203928 becomes $0.21.
-            gofin_domain::Quantity::from_u64(210_000)
+            // USD is reporting only; preserve the observed exact value.
+            gofin_domain::Quantity::from_u64(203_928)
         );
         assert_eq!(
             prepared.binding["instructions"].as_array().unwrap().len(),
