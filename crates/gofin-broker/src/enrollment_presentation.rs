@@ -28,12 +28,12 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 "The execution update review is invalid.",
             ));
         }
-        lines.push("Update GoFin's execution contract".into());
-        lines.push("Personal USD movement and rolling allocation limits are retired. Existing settings will no longer restrict financial actions.".into());
-        lines.push("Without Yolo, each action requires approval of its native quantities, destinations and financial bounds.".into());
-        lines.push("If Yolo is enabled, it stays enabled: agents may choose each action's terms without per-action approval. GoFin no longer applies personal USD limits. Funds may be lost.".into());
-        lines.push("Credentials, submission identities and financial history are preserved. Open operations do not block the update.".into());
-        lines.push("Your confirmation acknowledges these changes for this runtime update.".into());
+        lines.push("Update GoFin".into());
+        lines.push("Financial approvals use native quantities and bounds; personal USD limits no longer apply.".into());
+        lines.push(
+            "Keep Yolo enabled if already enabled, allowing actions without per-action approval."
+                .into(),
+        );
     } else if action == "operation_dismiss" {
         let id = binding["operation_id"]
             .as_str()
@@ -556,7 +556,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     if let Some(warning) = binding["warning"].as_str() {
         lines.push(format!("Warning: {}", safe(warning)));
     }
-    if action != "initialize" {
+    if action != "initialize" && action != "runtime_update" {
         lines.push("Storage: protected local files in /Library/GoFin/private (credentials, configuration and journal).".into());
         lines.push(
             "No funds move now. Later financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo."
