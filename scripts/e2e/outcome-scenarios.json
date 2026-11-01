@@ -97,11 +97,9 @@
     "id": "outcome.a26",
     "group": "outcome",
     "environment": "mock",
-    "description": "Native approval rendering plus real CLI synthetic cancellation; no action submission or approval on observation, and unrelated accounts continue.",
+    "description": "Real CLI synthetic cancellation; no submission or approval on observation, and unrelated accounts continue. Native approval rendering runs separately in the security/release validation job.",
     "requires": [
-      "cargo",
-      "make",
-      "xcrun"
+      "cargo"
     ],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
@@ -126,12 +124,6 @@
       ]
     ],
     "run": [
-      {
-        "argv": [
-          "make",
-          "test-native-approval"
-        ]
-      },
       {
         "argv": [
           "cargo",
@@ -723,7 +715,7 @@
     "id": "outcome.a24",
     "group": "outcome",
     "environment": "mock",
-    "description": "Schema-25 identity, plan, grant, resolution, bridge, and over-limit run fixtures migrate and remain observable while independent writes proceed; finite config and interrupted migrations are verified.",
+    "description": "Schema-25 identity, plan, grant, resolution, bridge, and over-limit run fixtures migrate and remain observable while independent writes proceed; finite config and interrupted migrations are verified. Protected runtime-update interruption fixtures run separately in the lifecycle/release validation job.",
     "requires": [
       "cargo"
     ],
@@ -790,12 +782,6 @@
           "--quiet"
         ],
         "expected_tests": 1
-      },
-      {
-        "argv": [
-          "python3",
-          "scripts/test-rust-macos-runtime-update.py"
-        ]
       },
       {
         "argv": [

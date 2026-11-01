@@ -8,10 +8,15 @@ on:
         required: false
         type: string
         default: ''
+      profile:
+        description: Scenario coverage (ci or full)
+        required: false
+        type: string
+        default: ci
 
 jobs:
   e2e:
-    name: Positive CLI scenarios (${{ matrix.group }})
+    name: Positive CLI scenarios (${{ matrix.group }}, ${{ inputs.profile }})
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -34,35 +39,40 @@ jobs:
         with:
           version: nightly-099390013af6606c37c2034413d59b4b698b307d
       - name: Install pinned Solana fixture tools
-        if: matrix.group == 'solana' || matrix.group == 'outcome'
+        if: matrix.group == 'solana' || (matrix.group == 'outcome' && inputs.profile == 'full')
         run: |
           python3 scripts/e2e/install-solana-cli.py "$RUNNER_TEMP/solana-bin"
           echo "$RUNNER_TEMP/solana-bin" >> "$GITHUB_PATH"
       - name: Identify Surfpool runner image
-        if: matrix.group == 'solana' || matrix.group == 'outcome'
+        if: matrix.group == 'solana' || (matrix.group == 'outcome' && inputs.profile == 'full')
         id: surfpool-platform
         run: echo "image=${ImageOS:?}" >> "$GITHUB_OUTPUT"
       - name: Restore patched Surfpool
-        if: matrix.group == 'solana' || matrix.group == 'outcome'
+        if: matrix.group == 'solana' || (matrix.group == 'outcome' && inputs.profile == 'full')
         id: surfpool-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/surfpool-bin
           key: surfpool-${{ runner.os }}-${{ runner.arch }}-${{ steps.surfpool-platform.outputs.image }}-86493c4bf716b01d4bedbc531aa9288cb14d5f36-${{ hashFiles('scripts/e2e/surfpool-v1.5.0.patch', 'scripts/e2e/surfpool-expiry-height.patch', 'scripts/e2e/install-surfpool.py') }}
       - name: Install pinned patched Surfpool
-        if: matrix.group == 'solana' || matrix.group == 'outcome'
+        if: matrix.group == 'solana' || (matrix.group == 'outcome' && inputs.profile == 'full')
         run: |
           python3 scripts/e2e/install-surfpool.py "$RUNNER_TEMP/surfpool-bin"
           echo "$RUNNER_TEMP/surfpool-bin" >> "$GITHUB_PATH"
       # Persist a successful build even if a later acceptance scenario fails.
       - name: Save patched Surfpool
-        if: (matrix.group == 'solana' || matrix.group == 'outcome') && steps.surfpool-cache.outputs.cache-hit != 'true'
+        if: (matrix.group == 'solana' || (matrix.group == 'outcome' && inputs.profile == 'full')) && steps.surfpool-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/surfpool-bin
           key: ${{ steps.surfpool-cache.outputs.cache-primary-key }}
       - name: Run required positive scenarios
-        run: make test-e2e E2E_ARGS='--group ${{ matrix.group }}'
+        env:
+          GOFIN_E2E_PROFILE: ${{ inputs.profile }}
+          GOFIN_E2E_GROUP: ${{ matrix.group }}
+        run: |
+          case "$GOFIN_E2E_PROFILE" in ci|full) ;; *) exit 2 ;; esac
+          make test-e2e E2E_ARGS="--profile $GOFIN_E2E_PROFILE --group $GOFIN_E2E_GROUP"
       - name: Verify CLI regressions are detected and restored
         if: matrix.group == 'core'
         run: make test-cli-regressions
@@ -70,7 +80,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: positive-e2e-${{ matrix.group }}
+          name: positive-e2e-${{ matrix.group }}-${{ inputs.profile }}
           path: |
             .context/test-runs/
             work/aave-cli-plan-fork.*/[0-9]/*-result.json

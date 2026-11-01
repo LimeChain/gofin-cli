@@ -39,6 +39,34 @@ def scenarios():
     return result
 
 
+def ci_profile(registered, required, document):
+    """Validate the entire checked-in profile, even for a single group run."""
+    if not isinstance(document, dict) or set(document) != set(required):
+        raise ValueError("CI profile must contain exactly the required scenario groups")
+    selected = set()
+    for group, names in document.items():
+        if not isinstance(names, list) or not names:
+            raise ValueError(f"CI profile group {group} must be nonempty")
+        for name in names:
+            if not isinstance(name, str) or name not in registered:
+                raise ValueError(f"CI profile references an unknown scenario: {name}")
+            if name in selected:
+                raise ValueError(f"CI profile contains a duplicate scenario: {name}")
+            if registered[name]["group"] != group:
+                raise ValueError(f"CI profile scenario {name} belongs to a different group")
+            selected.add(name)
+    return selected
+
+
+def unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate CI profile key: {key}")
+        value[key] = item
+    return value
+
+
 def expand(value, substitutions):
     for key, replacement in substitutions.items():
         value = value.replace("{" + key + "}", str(replacement))
@@ -108,6 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--group", action="append", default=[])
+    parser.add_argument("--profile", choices=["full", "ci"], default="full")
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("--report", type=Path)
     parser.add_argument("--fail-fast", action="store_true")
@@ -123,17 +152,31 @@ def main():
     unknown_groups = set(args.group) - required.keys()
     if unknown or unknown_groups:
         parser.error(f"Unknown scenarios/groups: {sorted(unknown | unknown_groups)}")
+    profile_ids = set(registered)
+    if args.profile == "ci":
+        try:
+            profile_ids = ci_profile(registered, required, json.loads(
+                (MANIFESTS / "ci.json").read_text(), object_pairs_hook=unique_json_object))
+        except (OSError, ValueError, TypeError) as error:
+            parser.error(f"Invalid CI profile: {error}")
+        outside = set(args.scenario) - profile_ids
+        if outside:
+            parser.error(f"Scenarios outside CI profile: {sorted(outside)}")
     selected = [s for s in registered.values() if
+                s["id"] in profile_ids and
                 (not args.scenario or s["id"] in args.scenario) and
                 (not args.group or s["group"] in args.group)]
+    filtered = set(args.scenario) - {s["id"] for s in selected}
+    if filtered:
+        parser.error(f"Scenarios do not belong to the selected groups: {sorted(filtered)}")
     needed = {name for group, names in required.items() if not args.group or group in args.group for name in names}
-    missing = sorted(needed - registered.keys()) if not args.scenario else []
+    missing = sorted(needed - registered.keys()) if args.profile == "full" and not args.scenario else []
     if args.list:
         for scenario in selected:
             print(f"{scenario['id']}\t{scenario['group']}\t{scenario.get('environment', 'mock')}\t{scenario['description']}")
         for name in missing:
             print(f"{name}\tNOT_IMPLEMENTED\tRequired scenario has no executable registration")
-        return 0
+        return 1 if missing else 0
     if not selected and not missing:
         parser.error("No scenarios selected")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -141,7 +184,7 @@ def main():
     artifacts.mkdir(parents=True)
     report_path = args.report.resolve() if args.report else artifacts / "report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report = {"schema_version": 1, "started_at": stamp,
+    report = {"schema_version": 1, "started_at": stamp, "profile": args.profile,
               **source_snapshot(),
               "prepare_skipped": args.skip_prepare,
               "scenarios": [{"id": name, "status": "not_implemented"} for name in missing]}

@@ -4,7 +4,7 @@ Use this guide to select evidence for the change being made. It is not a release
 
 ## Positive acceptance scenarios
 
-The required `outcome` group covers A1–A26 of the execution simplification contract. Missing registrations fail the group; they are never marked passed by component tests. Each acceptance scenario uses the real CLI, broker, engine and adapter against a controlled external transport. Record approvals, exact provider submissions per stage, developer interventions, remaining uncertainty and admission probes on the same and another account. The four-action workflow has four logical actions and approvals; provider submission counts follow its actual stages. A13 tests conservative unconfirmed order lookups, not a venue guarantee that absence proves nonexecution. A15 proves Kraken's correlated refund; Binance and Hyperliquid remain unconfirmed when their supported observations cannot prove a refund. The user waived the Coinbase-specific refund and UI-approval cases and requested Coinbase App guidance. A passing qualified aggregate does not erase those evidence limits.
+The full-profile `outcome` group covers A1–A26 of the execution simplification contract. Missing registrations fail the group; they are never marked passed by component tests. Each acceptance scenario uses the real CLI, broker, engine and adapter against a controlled external transport. Record approvals, exact provider submissions per stage, developer interventions, remaining uncertainty and admission probes on the same and another account. The four-action workflow has four logical actions and approvals; provider submission counts follow its actual stages. A13 tests conservative unconfirmed order lookups, not a venue guarantee that absence proves nonexecution. A15 proves Kraken's correlated refund; Binance and Hyperliquid remain unconfirmed when their supported observations cannot prove a refund. The user waived the Coinbase-specific refund and UI-approval cases and requested Coinbase App guidance. A passing qualified aggregate does not erase those evidence limits.
 
 
 The acceptance suite exercises the public CLI, broker and real adapters against
@@ -17,10 +17,45 @@ settlement implementation.
 make test-e2e-list
 make test-e2e E2E_ARGS='--scenario cli.discovery'
 make test-e2e E2E_ARGS='--group papertrade'
-make test-e2e
+make test-e2e E2E_ARGS='--profile ci'
+make test-e2e # Full coverage remains the local default.
 make test-security
 make test
 ```
+
+Normal branch and main pushes use the explicit **CI profile** in
+`scripts/e2e/ci.json`: 59 scenarios across the same seven groups. The **full
+profile** retains all 83 registered scenarios and remains the default for local
+`make test-e2e`. Release validation explicitly requests `full`. To run full
+coverage on a branch without publishing, manually dispatch the Automated
+financial regressions workflow with `e2e_profile=full`:
+
+```sh
+gh workflow run test.yml --ref YOUR_BRANCH -f e2e_profile=full
+make test-e2e-list E2E_ARGS='--profile ci'
+```
+
+The CI profile keeps all core, exchange, bridge and Papertrade scenarios; all
+four EVM AMM paths plus representative Ethereum Aave/Morpho markets; Jupiter
+swap, perpetual and quote-expiry paths; and 27 outcome cases covering recovery,
+concurrency, continuation, native bounds, migration, Yolo and uncertain venue
+observations. Outcome aggregates already execute their venue leaves, so those
+leaves are not selected a second time in CI.
+
+Additional Aave markets/chains, Morpho Base, JLP, Meteora and Kamino validators,
+and the owned Surfpool blockhash-expiry case remain in full coverage. Their
+absence from a passing CI-profile run is not evidence that those scenarios ran.
+Critical security negatives remain unchanged. A24 retains CLI/store/configuration
+migration checks; full protected-update interruption tests run once in the
+lifecycle job. A26 retains CLI approval-cancellation checks; native presentation
+runs once in the security job. Release validation retains both separate suites.
+
+The outcome CI job needs Anvil but no Surfpool build; the Solana CI job still
+uses Surfpool for the representative Jupiter swap. Job names, artifacts and
+reports identify the profile. Profile definitions reject unknown, duplicate,
+misgrouped or empty selections, and explicitly requesting a scenario outside
+`ci` is an error. Use `--profile full` for that scenario. Run
+`python3 scripts/test-e2e-profiles.py` for selection and reporting checks.
 
 `scripts/e2e/required.json` defines required scenario IDs by group. Executable
 definitions live in `scripts/e2e/*-scenarios.json`. A focused `--scenario` run
@@ -99,7 +134,7 @@ fix allows switching to an official binary. Run
 
 ### Reusing E2E evidence after merge
 
-Branch pushes run the complete acceptance suite. On the first `main` push run,
+Branch pushes run the CI acceptance profile. On the first `main` push run,
 CI may reuse a successful same-repository branch-push run from the last 24 hours
 when its entire Git tree is identical to the merged tree. Comparing file trees
 allows merge/squash commit identities to differ while still requiring identical
@@ -107,14 +142,15 @@ source, workflows, tests and dependency lockfiles. A branch that was tested
 against older main content will not match if merging changes the resulting tree.
 
 The lookup checks GitHub's workflow and attempt-specific job records, including
-every group from `scripts/e2e/required.json`, the actual scenario execution steps
+every CI-profile group from `scripts/e2e/ci.json`, the profile-qualified job names and actual scenario execution steps
 and the core mutation checks. It links the reused run in the job summary. It
 does not trust a cached success file or infer success from a PR being merged.
 Missing, failed, stale or unavailable evidence runs the suite normally. The
 required `rust (macos-latest)` check accepts an E2E skip only after this verified
 lookup succeeds; the other checks still have to pass.
 
-Manual dispatch, reruns and release verification always execute fresh E2Es.
+Manual dispatch and reruns always execute fresh E2Es for the selected profile.
+Release verification always executes the full profile and never reuses a CI-profile result.
 The bounded lookup examines up to 100 successful runs; a miss is harmless and
 falls back to execution. Run `python3 scripts/test-ci-e2e-reuse.py` for the
 synthetic evidence and required-gate regression checks.
