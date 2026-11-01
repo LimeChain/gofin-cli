@@ -51565,10 +51565,12 @@
               "type": "string"
             },
             "max_notional_usdc": {
+              "description": "Maximum gross fill notional accepted during reconciliation; a favorable\nperpetual sell fill can exceed it because the venue enforces only a price floor.",
               "type": "string"
             },
             "max_price": {
               "default": null,
+              "description": "Perpetual buy execution-price ceiling; unsupported for perpetual sells.\nSpot orders retain a two-sided receipt-price band, including this ceiling.",
               "type": [
                 "string",
                 "null"
@@ -51583,6 +51585,7 @@
             },
             "min_price": {
               "default": null,
+              "description": "Perpetual sell execution-price floor; unsupported for perpetual buys.\nSpot orders retain a two-sided receipt-price band, including this floor.",
               "type": [
                 "string",
                 "null"
@@ -51803,8 +51806,6 @@
             "market_type": "perpetual",
             "max_fee_usdc": "0.1",
             "max_notional_usdc": "100",
-            "max_price": "50000",
-            "min_price": "50000",
             "order_type": "limit",
             "reduce_only": false,
             "request_id": "SYNTHETIC-CHILD-001",
@@ -51822,7 +51823,18 @@
     "semantics": {
       "approval": "fresh per-write approval per submitted action",
       "atomicity": "venue dependent; each outcome is reconciled",
+      "exact_plan_accounting": {
+        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
+        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
+        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
+        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
+        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
+        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
+        "market_type": "perpetual",
+        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
+      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved.",
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -51848,7 +51860,8 @@
         "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
         "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
-      "plan_immediate_orders": true
+      "plan_immediate_orders": true,
+      "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement."
     }
   },
   {
@@ -52253,7 +52266,18 @@
     "completion": "A successful response records submission evidence; settlement and reconciliation remain adapter responsibilities.",
     "semantics": {
       "approval": "fresh per-write approval",
+      "exact_plan_accounting": {
+        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
+        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
+        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
+        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
+        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
+        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
+        "market_type": "perpetual",
+        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
+      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved.",
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -52280,6 +52304,7 @@
         "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
       "plan_immediate_orders": true,
+      "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement.",
       "replacement": {
         "version": 1
       }
@@ -52450,7 +52475,18 @@
     "semantics": {
       "approval": "fresh per-write approval per submitted action",
       "atomicity": "venue dependent; each replacement is reconciled independently",
+      "exact_plan_accounting": {
+        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
+        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
+        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
+        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
+        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
+        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
+        "market_type": "perpetual",
+        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
+      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved.",
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -52477,6 +52513,7 @@
         "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
       "plan_immediate_orders": true,
+      "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement.",
       "replacement": {
         "version": 1
       }
@@ -52604,10 +52641,12 @@
           "type": "string"
         },
         "max_notional_usdc": {
+          "description": "Maximum gross fill notional accepted during reconciliation; a favorable\nperpetual sell fill can exceed it because the venue enforces only a price floor.",
           "type": "string"
         },
         "max_price": {
           "default": null,
+          "description": "Perpetual buy execution-price ceiling; unsupported for perpetual sells.\nSpot orders retain a two-sided receipt-price band, including this ceiling.",
           "type": [
             "string",
             "null"
@@ -52622,6 +52661,7 @@
         },
         "min_price": {
           "default": null,
+          "description": "Perpetual sell execution-price floor; unsupported for perpetual buys.\nSpot orders retain a two-sided receipt-price band, including this floor.",
           "type": [
             "string",
             "null"
@@ -52750,8 +52790,6 @@
         "market_type": "perpetual",
         "max_fee_usdc": "0.1",
         "max_notional_usdc": "100",
-        "max_price": "50000",
-        "min_price": "50000",
         "order_type": "limit",
         "reduce_only": false,
         "request_id": "SYNTHETIC-REQUEST-001",
@@ -52765,7 +52803,18 @@
     "completion": "A successful response records submission evidence; settlement and reconciliation remain adapter responsibilities.",
     "semantics": {
       "approval": "fresh per-write approval",
+      "exact_plan_accounting": {
+        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
+        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
+        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
+        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
+        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
+        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
+        "market_type": "perpetual",
+        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
+      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved.",
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -52792,7 +52841,8 @@
         "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
       "plan_immediate_orders": true,
-      "precision": "native market metadata required"
+      "precision": "native market metadata required",
+      "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement."
     }
   },
   {

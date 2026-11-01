@@ -634,7 +634,7 @@ impl HyperliquidProfile {
                     }
                     _ => {
                         json!({"base":self.transport.info(Info::UserAbstractionState { owner:account.execution_address().to_owned() }).await?,
-                        "dex":self.transport.info(Info::UserDexAbstractionState { owner:account.execution_address().to_owned() }).await?})
+                        "dex":null,"dex_state_observed":false})
                     }
                 }
             }
@@ -846,14 +846,6 @@ impl HyperliquidProfile {
                 resource: account.resource("account", None),
                 authority: "hyperliquid:native:account_abstraction".into(),
                 value: account_mode.native_abstraction.clone(),
-            });
-            state.authorities.push(AuthorityState {
-                resource: account.resource("account", None),
-                authority: "hyperliquid:native:dex_abstraction".into(),
-                value: account_mode
-                    .dex_abstraction
-                    .map(|enabled| enabled.to_string())
-                    .unwrap_or_else(|| "null".into()),
             });
             let positions = raw
                 .get("assetPositions")
@@ -1268,7 +1260,11 @@ mod read_profile_tests {
             Ok(match request {
                 Info::UserRole { .. } => json!({"role":"user"}),
                 Info::UserAbstractionState { .. } => json!(self.abstraction),
-                Info::UserDexAbstractionState { .. } => json!(false),
+                Info::UserDexAbstractionState { .. } => {
+                    return Err(native_error(
+                        "Legacy abstraction endpoint rejects requests.",
+                    ));
+                }
                 Info::MetaAndAssetCtxs => {
                     json!([{"universe":[{"name":"ETH","szDecimals":4,"maxLeverage":20}]},[{"markPx":"10"}]])
                 }
@@ -1313,6 +1309,29 @@ mod read_profile_tests {
             std::sync::Arc::new(DeferredExecutionState::default()),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn abstraction_read_uses_current_endpoint_and_labels_legacy_state_unobserved() {
+        let fixture = std::sync::Arc::new(SnapshotFixture {
+            abstraction: "unifiedAccount",
+            requests: Mutex::new(Vec::new()),
+        });
+        let profile = snapshot_profile(fixture.clone());
+        let response = profile
+            .read_operation("hyperliquid.abstraction", &json!({"account":"primary"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            response["data"],
+            json!({"base":"unifiedAccount","dex":null,"dex_state_observed":false})
+        );
+        assert_eq!(
+            *fixture.requests.lock().unwrap(),
+            vec![Info::UserAbstractionState {
+                owner: "0x1111111111111111111111111111111111111111".into()
+            }]
+        );
     }
 
     #[tokio::test]

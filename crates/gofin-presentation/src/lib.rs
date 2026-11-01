@@ -171,6 +171,9 @@ impl Ui {
         if self.machine {
             return Ok(());
         }
+        for (text, color) in plan_review_validation_rows(preview) {
+            self.message_to(&text, color, output)?;
+        }
         if let Some(summary) = preview["summary"].as_str() {
             self.message_to(&format!("→ {summary}"), "36", output)?;
         }
@@ -213,6 +216,9 @@ impl Ui {
     ) -> io::Result<()> {
         if self.machine {
             return Ok(());
+        }
+        for (text, color) in plan_review_validation_rows(preview) {
+            self.message_to(&text, color, output)?;
         }
         if let Some(summary) = preview["summary"].as_str() {
             self.message_to(&format!("→ {summary}"), "36", output)?;
@@ -341,17 +347,8 @@ impl Ui {
             "36",
             output,
         )?;
-        if let Some(warnings) = review["timing_warnings"].as_array() {
-            for warning in warnings {
-                if let Some(message) = warning["message"].as_str() {
-                    self.message_to(message, "33", output)?;
-                }
-            }
-        }
-        if let Some(warnings) = review["feasibility_warnings"].as_array() {
-            for warning in warnings.iter().filter_map(Value::as_str) {
-                self.message_to(warning, "33", output)?;
-            }
+        for (text, color) in plan_review_validation_rows(review) {
+            self.message_to(&text, color, output)?;
         }
         if let Some(revision) = review["replaces_revision_id"].as_str() {
             self.message_to(&format!("Revises: {revision}"), "33", output)?;
@@ -2290,6 +2287,37 @@ fn authorization_rows(value: &Value) -> Vec<(String, &'static str)> {
     rows
 }
 
+fn plan_review_validation_rows(value: &Value) -> Vec<(String, &'static str)> {
+    if !value["plan"].is_object() {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let status = if value["validation"]["authorization_scope"] == "structurally_validated" {
+        "Plan scope checked; execution readiness not established."
+    } else {
+        "Execution readiness is not established by this review."
+    };
+    rows.push((status.into(), "33"));
+    rows.push((
+        "Each step still needs current execution checks, including applicable balances, quotes and fees.".into(),
+        "36",
+    ));
+    for warning in value["timing_warnings"].as_array().into_iter().flatten() {
+        if let Some(message) = warning["message"].as_str() {
+            rows.push((message.into(), "33"));
+        }
+    }
+    for warning in value["feasibility_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        rows.push((warning.into(), "33"));
+    }
+    rows
+}
+
 fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
     let mut rows = Vec::new();
     let plan_id = value["plan_id"].as_str().unwrap_or("unavailable");
@@ -2402,7 +2430,7 @@ fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
             rows.push((format!("Blocked: {blocker}"), "33"));
         }
     }
-    if rows.len() == 2 && authorization_state == "reviewed" {
+    if value["plan"].is_object() && authorization_state == "reviewed" {
         if let Some(hash) = value["review_hash"].as_str() {
             rows.push((format!("Review hash: {hash}"), "36"));
         }
@@ -2410,6 +2438,7 @@ fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
             rows.push((format!("Ordered steps: {}", steps.len()), "36"));
         }
     }
+    rows.extend(plan_review_validation_rows(value));
     rows
 }
 
@@ -2607,6 +2636,80 @@ mod rpc_diagnostics_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_preview_shows_deferred_readiness_and_warnings_without_hiding_review_identity() {
+        let mut review = json!({
+            "plan":{"name":"Fund then trade","summary":"Bounded two-step plan","steps":[{},{}]},
+            "review_hash":"review-hash",
+            "validation":{"authorization_scope":"structurally_validated","execution_readiness":"deferred"},
+            "feasibility_warnings":["trade: balance check deferred until funding settles"],
+            "timing_warnings":[{"message":"Approval may expire before settlement"}]
+        });
+        let ui = Ui {
+            machine: false,
+            verbose: false,
+            terminal: TerminalPolicy::from_environment(false, false, false, false),
+        };
+        let mut output = Vec::new();
+        ui.write_result_to(&review, "plans", &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Plan scope checked; execution readiness not established."));
+        assert!(text.contains("balance check deferred until funding settles"));
+        assert!(text.contains("Approval may expire before settlement"));
+        assert!(text.contains("Review hash: review-hash"));
+        assert!(text.contains("Ordered steps: 2"));
+        assert!(!text.contains('\x1b'));
+
+        review
+            .as_object_mut()
+            .unwrap()
+            .remove("feasibility_warnings");
+        review.as_object_mut().unwrap().remove("timing_warnings");
+        assert!(
+            plan_review_validation_rows(&review)[0]
+                .0
+                .contains("readiness not established")
+        );
+        review.as_object_mut().unwrap().remove("validation");
+        assert!(
+            plan_review_validation_rows(&review)[0]
+                .0
+                .contains("not established")
+        );
+    }
+
+    #[test]
+    fn plan_authorization_reviews_show_deferred_checks_and_machine_reviews_stay_quiet() {
+        let review = json!({
+            "plan":{"name":"Fund then trade","steps":[]},
+            "validation":{"authorization_scope":"structurally_validated","execution_readiness":"deferred"},
+            "feasibility_warnings":["trade: balance check deferred"]
+        });
+        for machine in [false, true] {
+            let ui = Ui {
+                machine,
+                verbose: false,
+                terminal: TerminalPolicy::from_environment(false, false, false, false),
+            };
+            for mode in 0..3 {
+                let mut output = Vec::new();
+                match mode {
+                    0 => ui.plan_authorization_review_to(&review, &mut output),
+                    1 => ui.synthetic_review_to(&review, true, &mut output),
+                    _ => ui.live_development_review_to(&review, true, &mut output),
+                }
+                .unwrap();
+                if machine {
+                    assert!(output.is_empty());
+                } else {
+                    let text = String::from_utf8(output).unwrap();
+                    assert!(text.contains("execution readiness not established"));
+                    assert!(text.contains("trade: balance check deferred"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn controls_and_bidi_are_escaped_in_keys_values_and_errors() {

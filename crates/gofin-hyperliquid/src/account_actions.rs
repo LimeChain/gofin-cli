@@ -1475,7 +1475,7 @@ impl HyperliquidProfile {
                 }
             };
             match binding.account_mode.as_ref() {
-                Some(frozen) if frozen == &current_mode => {}
+                Some(frozen) if current_mode.same_cash_mode(frozen) => {}
                 // Older immutable submissions did not persist mode. Their
                 // historical resource identity is safe only in the separate
                 // wallet mode that originally defined that identity.

@@ -493,7 +493,7 @@ async fn enabled_dex_abstraction_still_rejects_nonce_recovery_before_noop_dispat
     let transport = Arc::new(SyntheticTransport::new(NoopResult::LostResponse));
     let (engine, _adapter, shared) = build_engine(&database, transport.clone());
     let parent = create_uncertain_parent(&engine, &shared).await;
-    *transport.dex_abstraction.lock().unwrap() = Some(true);
+    *transport.native_abstraction.lock().unwrap() = "dexAbstraction".into();
 
     let request = OperationRequest {
         request_id: "synthetic-recovery-with-dex-enabled".into(),

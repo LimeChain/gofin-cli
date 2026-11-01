@@ -328,18 +328,6 @@ pub fn info_requests(
     intent: &ReadIntent,
     owner: Option<&str>,
 ) -> Result<Vec<InfoRequest>, &'static str> {
-    if intent.route == ReadRoute::Abstraction {
-        let address = owner
-            .filter(|s| !s.is_empty())
-            .ok_or("protected owner required")?
-            .to_owned();
-        return Ok(vec![
-            InfoRequest::UserAbstractionState {
-                owner: address.clone(),
-            },
-            InfoRequest::UserDexAbstractionState { owner: address },
-        ]);
-    }
     if intent.route == ReadRoute::Balances {
         let address = owner
             .filter(|s| !s.is_empty())
@@ -928,6 +916,17 @@ mod tests {
         );
         assert!(
             matches!(&requests[1], InfoRequest::SpotClearinghouseState { owner } if owner == "0xowner")
+        );
+        let abstraction = ReadIntent {
+            route: ReadRoute::Abstraction,
+            ..intent
+        };
+        assert!(info_requests(&abstraction, None).is_err());
+        assert_eq!(
+            info_requests(&abstraction, Some("0xowner")).unwrap(),
+            vec![InfoRequest::UserAbstractionState {
+                owner: "0xowner".into()
+            }]
         );
     }
     #[test]

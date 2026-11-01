@@ -400,11 +400,9 @@ def build_plan(evidence: dict[str, Any], account: str, wallet_address: str,
     buy_max = round_price(ask_h * Decimal("1.005"), hype_sz_decimals, price_decimals=8, upward=False)
     sell_min = round_price(bid_h * Decimal("0.995"), hype_sz_decimals, price_decimals=8, upward=True)
     sell_max = round_price(bid_h * Decimal("1.005"), hype_sz_decimals, price_decimals=8, upward=False)
-    eth_buy_min = round_price(bid_e * Decimal("0.995"), eth_sz_decimals, price_decimals=6, upward=True)
     eth_buy_max = round_price(ask_e * Decimal("1.005"), eth_sz_decimals, price_decimals=6, upward=False)
     eth_sell_min = round_price(bid_e * Decimal("0.995"), eth_sz_decimals, price_decimals=6, upward=True)
-    eth_sell_max = round_price(bid_e * Decimal("1.005"), eth_sz_decimals, price_decimals=6, upward=False)
-    if buy_min > buy_max or sell_min > sell_max or eth_buy_min > eth_buy_max or eth_sell_min > eth_sell_max:
+    if buy_min > buy_max or sell_min > sell_max or eth_sell_min > eth_buy_max:
         raise PlanError("current price ranges cannot be represented at native precision")
     hype_size = floor_size(Decimal("11") / buy_max, hype_sz_decimals)
     eth_size = floor_size(Decimal("11") / eth_buy_max, eth_sz_decimals)
@@ -416,8 +414,8 @@ def build_plan(evidence: dict[str, Any], account: str, wallet_address: str,
     total_risk_cap = (max_fee_usdc * 4) + (max_loss_usdc * 2) + Decimal("1") + spot_roundtrip_loss
     if total_risk_cap > Decimal("5"):
         raise PlanError("cumulative fees, spot roundtrip price loss, realized-loss caps and withdrawal fee exceed the $5 plan risk ceiling")
-    if hype_size * buy_min < 10 or hype_size * sell_min < 10 or eth_size * eth_buy_min < 10:
-        raise PlanError("native minimum notional would not be met at the approved lower price bound")
+    if hype_size * buy_min < 10 or hype_size * sell_min < 10 or eth_size * eth_buy_max < 10:
+        raise PlanError("native minimum notional would not be met at the submitted limit price")
     balances = balances_by_coin(payload(spot_balance).get("spot"))
     hype_total, hype_hold = balances.get("HYPE", (Decimal(0), Decimal(0)))
     hype_free = hype_total - hype_hold
@@ -511,13 +509,12 @@ def build_plan(evidence: dict[str, Any], account: str, wallet_address: str,
     specs.append(("hyperliquid.orders.place", "eth-perp-open", {
         "request_id": request_id("eth-open"), "account": account, "symbol": "ETH/USDC:USDC", "market_type": "perpetual",
         "side": "buy", "order_type": "limit", "size": fmt(eth_size), "limit_price": fmt(eth_buy_max),
-        "min_price": fmt(eth_buy_min), "max_price": fmt(eth_buy_max), "time_in_force": "ioc",
+        "max_price": fmt(eth_buy_max), "time_in_force": "ioc",
         "max_notional_usdc": "12", "max_fee_usdc": fmt(max_fee_usdc), "max_realized_loss_usdc": fmt(max_loss_usdc), "reduce_only": False,
     }, perp_scope))
     specs.append(("hyperliquid.orders.place", "eth-perp-reduce-only-close", {
         "request_id": request_id("eth-close"), "account": account, "symbol": "ETH/USDC:USDC", "market_type": "perpetual",
         "side": "sell", "order_type": "market", "size": fmt(eth_size), "min_price": fmt(eth_sell_min),
-        "max_price": fmt(eth_sell_max),
         "time_in_force": "ioc", "max_notional_usdc": "12", "max_fee_usdc": fmt(max_fee_usdc),
         "max_realized_loss_usdc": fmt(max_loss_usdc), "reduce_only": True,
     }, perp_scope))

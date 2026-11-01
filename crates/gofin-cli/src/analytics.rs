@@ -188,7 +188,7 @@ pub(crate) fn context(command: &Command, machine: bool) -> Option<CommandContext
             AuthorizationsCommand::Cancel { .. } => ("authorizations.cancel", None, None),
         },
         Command::Plans { command } => match command {
-            PlansCommand::Authorize(args) => ("plans.authorize", None, Some(&args.input)),
+            PlansCommand::Authorize(args) => ("plans.authorize", None, args.input.as_deref()),
             PlansCommand::Preview(args) => ("plans.preview", None, Some(&args.input)),
             PlansCommand::Status { .. } => ("plans.status", None, None),
             PlansCommand::Cancel { .. } => ("plans.cancel", None, None),

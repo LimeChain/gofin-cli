@@ -101,7 +101,7 @@ pub fn leverage_input() -> Value {
 pub fn order_input() -> Value {
     json!({"request_id":"full-plan-order","account":"synthetic-hl","symbol":"SOL/USDC:USDC",
         "market_type":"perpetual","side":"buy","order_type":"limit","size":"0.34",
-        "limit_price":"100","min_price":"100","time_in_force":"ioc","max_notional_usdc":"34",
+        "limit_price":"100","time_in_force":"ioc","max_notional_usdc":"34",
         "max_fee_usdc":"0.1","max_realized_loss_usdc":"0"})
 }
 

@@ -13,7 +13,7 @@ use crate::{
         EditOrderInput, EditOrderItem, EditOrdersInput, MarketKind, MarketType, NativeMarket,
         OrderSide, OrderType, TimeInForce, TriggerKind,
     },
-    writes::{ActionBinding, OrderScope, positive, q},
+    writes::{ActionBinding, OrderScope, positive, q, validate_edit_order_amounts},
 };
 use gofin_domain::{
     FinancialIntent, GoFinError, Quantity, ReplacementBinding, Result, Status, binding_hash,
@@ -268,7 +268,10 @@ fn validate_parent_order(
     }
     let parent_binding = ActionBinding::decode(&prepared.binding)?;
     if parent_binding.account != *account
-        || parent_binding.account_mode.as_ref() != Some(account_mode)
+        || parent_binding
+            .account_mode
+            .as_ref()
+            .is_none_or(|previous| !account_mode.same_cash_mode(previous))
     {
         return Err(GoFinError::validation(
             "The parent GoFin order belongs to a different protected account or account mode.",
@@ -436,6 +439,13 @@ impl HyperliquidProfile {
             }
             _ => return Ok(None),
         };
+        for request in &requests {
+            validate_edit_order_amounts(
+                &request.size,
+                &request.limit_price,
+                &request.max_notional_usdc,
+            )?;
+        }
         let parent_ids: BTreeSet<_> = requests
             .iter()
             .filter_map(|request| request.parent_operation_id.as_deref())
@@ -531,8 +541,10 @@ impl HyperliquidProfile {
                 },
                 size: request.size.clone(),
                 limit_price: Some(request.limit_price.clone()),
-                min_price: Some(request.limit_price.clone()),
-                max_price: Some(request.limit_price.clone()),
+                min_price: matches!(request.market_type, MarketType::Spot)
+                    .then(|| request.limit_price.clone()),
+                max_price: matches!(request.market_type, MarketType::Spot)
+                    .then(|| request.limit_price.clone()),
                 time_in_force: if old.is_trigger {
                     None
                 } else {
@@ -627,6 +639,13 @@ mod tests {
                 HyperliquidInfoRequest::MetaAndAssetCtxs => json!([
                     {"universe":[{"name":"BTC","szDecimals":3,"maxLeverage":50}]},
                     [{"markPx":"10","midPx":"10","oraclePx":"10"}]
+                ]),
+                HyperliquidInfoRequest::SpotMetaAndAssetCtxs => json!([
+                    {"tokens":[
+                        {"name":"ETH","index":1,"weiDecimals":18,"szDecimals":4,"tokenId":"0xeeee"},
+                        {"name":"USDC","index":0,"weiDecimals":8,"szDecimals":8,"tokenId":"0x6d1e7cde53ba9467b783cb7c530ce054"}
+                    ],"universe":[{"name":"ETH/USDC","index":0,"tokens":[1,0]}]},
+                    [{"midPx":"10"}]
                 ]),
                 HyperliquidInfoRequest::ClearinghouseState { .. } => {
                     json!({"assetPositions":[],"withdrawable":"1000"})
@@ -820,6 +839,7 @@ mod tests {
                 cloid,
                 min_price: "100".into(),
                 max_price: "100".into(),
+                price_semantics: Default::default(),
                 position_before: "0".into(),
                 capacity_before: None,
             }],
@@ -909,6 +929,31 @@ mod tests {
         })
     }
 
+    #[test]
+    fn historical_order_binding_retains_two_sided_bounds_without_rewriting_serialization() {
+        let record = durable_parent(Status::Pending);
+        let original = &record.preview.as_ref().unwrap().binding;
+        assert!(original["orders"][0].get("price_semantics").is_none());
+        let binding = ActionBinding::decode(original).unwrap();
+        let scope = &binding.orders[0];
+        assert_eq!(scope.fill_price_bounds(), (Some("100"), Some("100")));
+        assert_eq!(serde_json::to_value(&binding).unwrap(), *original);
+        let row = json!({"coin":"BTC","side":"B","oid":12,"tid":1,"time":100,
+            "hash":format!("0x{}", "a".repeat(64)),"sz":"1","px":"99","fee":"0","feeToken":"USDC","closedPnl":"0"});
+        assert!(
+            crate::fills::aggregate_fills(
+                &[row],
+                "BTC",
+                crate::fills::FillSide::Buy,
+                12,
+                0,
+                "1",
+                scope.fill_price_bounds()
+            )
+            .is_err()
+        );
+    }
+
     fn status(status: &str) -> Value {
         json!({"status":"order","order":{"status":status,"order":{
             "coin":"BTC","side":"B","limitPx":"100.00","sz":"0.4","oid":12,
@@ -994,6 +1039,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spot_limit_and_trigger_edits_preserve_both_historical_price_bounds() {
+        for side in ["B", "A"] {
+            for trigger in [false, true] {
+                let mut original = status("open");
+                let order = &mut original["order"]["order"];
+                order["coin"] = json!("@0");
+                order["side"] = json!(side);
+                if trigger {
+                    order["isTrigger"] = json!(true);
+                    order["orderType"] = json!("Take Profit Market");
+                    order["triggerPx"] = json!("12");
+                    order["triggerCondition"] = json!("Price above 12");
+                }
+                let profile = test_profile(&[(12, original)]);
+                let mut input = edit_input();
+                input["market_type"] = json!("spot");
+                input["symbol"] = json!("ETH/USDC");
+                let prepared = profile
+                    .prepare_amend("hyperliquid.orders.edit", &input)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let scope = &prepared.binding.orders[0];
+                assert_eq!(scope.fill_price_bounds(), (Some("11"), Some("11")));
+                assert_eq!(scope.input.min_price.as_deref(), Some("11"));
+                assert_eq!(scope.input.max_price.as_deref(), Some("11"));
+                assert_eq!(scope.input.trigger_is_market, trigger.then_some(true));
+                assert!(
+                    serde_json::to_value(scope)
+                        .unwrap()
+                        .get("price_semantics")
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn batch_edit_has_unique_cloids_and_rejects_failed_child_without_partial_action() {
         let mut second = status("open");
         second["order"]["order"]["oid"] = json!(13);
@@ -1024,6 +1107,14 @@ mod tests {
         );
         assert!(modifies[0].order.is_buy);
         assert!(!modifies[1].order.is_buy);
+        assert_eq!(
+            prepared.binding.orders[0].fill_price_bounds(),
+            (None, Some("11"))
+        );
+        assert_eq!(
+            prepared.binding.orders[1].fill_price_bounds(),
+            (Some("11"), None)
+        );
 
         let mut rejected = second;
         rejected["order"]["status"] = json!("canceled");

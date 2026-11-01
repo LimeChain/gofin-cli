@@ -43,6 +43,30 @@ fn definition(
 ) -> Definition {
     let (kind, actor) = contract;
     let mut semantics = semantics;
+    if matches!(
+        name,
+        "hyperliquid.orders.place"
+            | "hyperliquid.orders.batch"
+            | "hyperliquid.orders.edit"
+            | "hyperliquid.orders.edit_batch"
+    ) {
+        semantics["execution_price"] = json!(
+            "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved."
+        );
+        semantics["reconciliation_limits"] = json!(
+            "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement."
+        );
+        semantics["exact_plan_accounting"] = json!({
+            "market_type": "perpetual",
+            "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
+            "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit.",
+            "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
+            "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
+            "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
+            "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
+            "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority."
+        });
+    }
     if kind != OperationKind::Read {
         semantics["example_inputs"] = json!(
             "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
@@ -196,7 +220,7 @@ fn examples(name: &str) -> Vec<Value> {
 }
 
 fn limit_order_example(request_id: &str) -> Value {
-    json!({"request_id":request_id,"account":"SYNTHETIC-ACCOUNT","symbol":"BTC/USDC:USDC","market_type":"perpetual","side":"buy","order_type":"limit","size":"0.001","limit_price":"50000","min_price":"50000","max_price":"50000","time_in_force":"gtc","max_notional_usdc":"100","max_fee_usdc":"0.1","reduce_only":false})
+    json!({"request_id":request_id,"account":"SYNTHETIC-ACCOUNT","symbol":"BTC/USDC:USDC","market_type":"perpetual","side":"buy","order_type":"limit","size":"0.001","limit_price":"50000","time_in_force":"gtc","max_notional_usdc":"100","max_fee_usdc":"0.1","reduce_only":false})
 }
 
 fn coverage(name: &str) -> &'static str {

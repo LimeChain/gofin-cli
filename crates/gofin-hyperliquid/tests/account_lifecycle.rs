@@ -1276,6 +1276,18 @@ async fn builder_referral_and_abstraction_require_separate_configuration_authori
         matches!(effect, gofin_domain::FinancialEffect::AuthorityChange { authority, after, .. }
             if authority == "unified_account" && after == "portfolioMargin")
     }));
+    // Unsupported cash accounting must not block unchanged-mode, non-cash
+    // administration during reconciliation.
+    let portfolio_referral = engine.execute_configuration(
+        request("portfolio-referral", "hyperliquid.referral.set",
+            json!({"request_id":"portfolio-referral","account":"main","referral_code":"portfolio-code"})),
+        Arc::new(ConfigurationApproval),
+    ).await.unwrap();
+    assert_eq!(
+        portfolio_referral.status,
+        Status::Completed,
+        "{portfolio_referral:#?}"
+    );
     let leave_portfolio = request(
         "leave-portfolio-margin",
         "hyperliquid.account.set_abstraction",
@@ -1320,7 +1332,7 @@ async fn builder_referral_and_abstraction_require_separate_configuration_authori
         matches!(effect, gofin_domain::FinancialEffect::AuthorityChange { authority, before, after, .. }
             if authority == "dex_abstraction" && before == "null" && after == "true")
     }));
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 7);
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 8);
 }
 
 #[tokio::test]

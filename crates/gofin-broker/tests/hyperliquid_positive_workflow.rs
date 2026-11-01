@@ -187,7 +187,7 @@ async fn positive_hyperliquid_perpetual_via_public_cli() {
         ("short-open", "sell", false),
         ("short-close", "buy", true),
     ] {
-        let order = json!({"request_id":id,"account":"synthetic-hl","symbol":"SOL/USDC:USDC","market_type":"perpetual","side":side,"order_type":"limit","size":"0.1","limit_price":"100","min_price":"100","time_in_force":"ioc","reduce_only":reduce,"max_notional_usdc":"10","max_fee_usdc":"0.1","max_realized_loss_usdc":"0"});
+        let order = json!({"request_id":id,"account":"synthetic-hl","symbol":"SOL/USDC:USDC","market_type":"perpetual","side":side,"order_type":"limit","size":"0.1","limit_price":"100","time_in_force":"ioc","reduce_only":reduce,"max_notional_usdc":"10","max_fee_usdc":"0.1","max_realized_loss_usdc":"0"});
         let result = execute(&client, "hyperliquid.orders.place", order).await;
         assert_eq!(result["status"], "completed", "{result}");
         if id == "long-close" {

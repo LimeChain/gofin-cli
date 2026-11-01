@@ -93,7 +93,15 @@ impl HyperliquidTransport for Venue {
                     mode.as_str()
                 })
             }
-            HyperliquidInfoRequest::UserDexAbstractionState { .. } => json!(false),
+            HyperliquidInfoRequest::UserDexAbstractionState { .. } => {
+                return Err(GoFinError::new(
+                    "VENUE_READ_REJECTED",
+                    "read",
+                    "Legacy endpoint rejected.",
+                    "Use current account mode.",
+                )
+                .with_details(json!({"http_status":422})));
+            }
             HyperliquidInfoRequest::UserFillsByTime { .. } => {
                 self.fills.lock().unwrap().clone().into()
             }
@@ -268,10 +276,14 @@ fn fill_economics(
 }
 
 fn input(request_id: &str, market_type: &str, symbol: &str, size: &str, price: &str) -> Value {
-    json!({"request_id":request_id,"account":"main","symbol":symbol,
+    let mut input = json!({"request_id":request_id,"account":"main","symbol":symbol,
         "market_type":market_type,"side":"buy","order_type":"limit","size":size,
-        "limit_price":price,"min_price":price,"time_in_force":"gtc","max_notional_usdc":"20",
-        "max_fee_usdc":"1","max_realized_loss_usdc":"0"})
+        "limit_price":price,"time_in_force":"gtc","max_notional_usdc":"20",
+        "max_fee_usdc":"1","max_realized_loss_usdc":"0"});
+    if market_type == "spot" {
+        input["min_price"] = json!(price);
+    }
+    input
 }
 
 async fn engine(path: &std::path::Path, venue: Arc<Venue>) -> Engine {
@@ -283,6 +295,16 @@ async fn engine_with(
     venue: Arc<Venue>,
     prices: Arc<dyn HyperliquidPrices>,
     approval: Arc<dyn gofin_domain::Authorizer>,
+) -> Engine {
+    engine_with_options(path, venue, prices, approval, EngineOptions::default()).await
+}
+
+async fn engine_with_options(
+    path: &std::path::Path,
+    venue: Arc<Venue>,
+    prices: Arc<dyn HyperliquidPrices>,
+    approval: Arc<dyn gofin_domain::Authorizer>,
+    options: EngineOptions,
 ) -> Engine {
     let store = Store::open(path).unwrap();
     let shared_store = store.share();
@@ -304,13 +326,7 @@ async fn engine_with(
     )
     .unwrap();
     let adapter: Arc<dyn Adapter> = Arc::new(ExchangeAdapter::new(profile));
-    Engine::new_with_shared_store(
-        shared_store,
-        vec![adapter],
-        approval,
-        EngineOptions::default(),
-    )
-    .unwrap()
+    Engine::new_with_shared_store(shared_store, vec![adapter], approval, options).unwrap()
 }
 
 fn request(
@@ -1356,6 +1372,31 @@ async fn spot_full_fill_is_a_conversion_and_invalid_precision_never_dispatches()
         row["order"]["order"]["sz"] = json!("0");
         row["order"]["status"] = json!("filled");
     }
+    // Reconcile the same pending wire submission with a pre-upgrade binding.
+    // Historical evidence stays intact; it must not strand an otherwise
+    // verified fill just because the legacy endpoint is no longer queried.
+    let mut historical_json = serde_json::to_value(&submitted).unwrap();
+    historical_json["preview"]["binding"]["account_mode"]["dex_abstraction"] = json!(false);
+    let historical: gofin_domain::OperationRecord =
+        serde_json::from_value(historical_json.clone()).unwrap();
+    let historical_profile = HyperliquidProfile::new(
+        vec![
+            serde_json::from_value(historical.preview.as_ref().unwrap().binding["account"].clone())
+                .unwrap(),
+        ],
+        venue.clone(),
+        Arc::new(Prices),
+        Arc::new(DeferredExecutionState::default()),
+    )
+    .unwrap();
+    let recovered = historical_profile
+        .reconcile_action(&historical, historical.submission.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recovered.status, Status::Completed);
+    assert_eq!(serde_json::to_value(&historical).unwrap(), historical_json);
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
+
     let final_record = engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(final_record.status, Status::Completed);
     assert!(
@@ -1832,5 +1873,205 @@ async fn exact_plan_orders_are_sequenced_and_revocation_still_allows_pending_rec
         )
         .await;
     assert!(after_revoke.is_err());
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
+}
+
+struct CountingApproval(AtomicUsize);
+
+#[async_trait]
+impl gofin_domain::Authorizer for CountingApproval {
+    async fn authorize(
+        &self,
+        challenge: &AuthorizationChallenge,
+    ) -> Result<ApprovalAudit, GoFinError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Approval.authorize(challenge).await
+    }
+}
+
+#[tokio::test]
+async fn unsupported_price_bands_fail_before_approval_for_single_and_batch_orders() {
+    for side in ["buy", "sell"] {
+        for batch in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let venue = Arc::new(Venue::default());
+            let approval = Arc::new(CountingApproval(AtomicUsize::new(0)));
+            let engine = engine_with(
+                &dir.path().join("band.sqlite"),
+                venue.clone(),
+                Arc::new(Prices),
+                approval.clone(),
+            )
+            .await;
+            let mut request = request("unsupported-band", "perpetual", "BTC/USDC:USDC", "1", "10");
+            request.input["side"] = json!(side);
+            request.input["min_price"] = json!("10");
+            request.input["max_price"] = json!("10");
+            if batch {
+                request.operation = "hyperliquid.orders.batch".into();
+                request.input = json!({"request_id":"unsupported-band","account":"main","orders":[request.input]});
+            }
+            let failed = engine.execute(request).await.unwrap();
+            assert_eq!(failed.status, Status::Failed);
+            assert_eq!(
+                failed.error.unwrap().code,
+                "HYPERLIQUID_UNSUPPORTED_PRICE_BOUND"
+            );
+            assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+            assert_eq!(venue.dispatches.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_limits() {
+    for (side, fill_price, fee, notional, completes) in [
+        ("sell", "95.75", "0.01", "95", true),
+        ("buy", "85", "0.01", "95", true),
+        ("sell", "89", "0.01", "95", false),
+        ("buy", "92", "0.01", "95", false),
+        ("sell", "110", "0.01", "95", false),
+        ("sell", "95.75", "1.01", "95", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("close.sqlite");
+        let venue = Arc::new(Venue::default());
+        let options = EngineOptions {
+            max_run_allocation_usd_micros: "1000000000".into(),
+            ..EngineOptions::default()
+        };
+        let first = engine_with_options(
+            &path,
+            venue.clone(),
+            Arc::new(Prices),
+            Arc::new(Approval),
+            options.clone(),
+        )
+        .await;
+        // Establish the owned verified anchor by settling the opening order;
+        // a bare native position snapshot is not a GoFin settlement baseline.
+        let mut opening = request("opening", "perpetual", "BTC/USDC:USDC", "0.95", "90.95");
+        opening.input["side"] = json!(if side == "sell" { "buy" } else { "sell" });
+        opening.input["max_notional_usdc"] = json!(notional);
+        let opened = first.execute(opening).await.unwrap();
+        assert_eq!(opened.status, Status::Pending, "{:?}", opened.error);
+        venue.fills.lock().unwrap().push(fill(
+            100,
+            1,
+            "BTC",
+            if side == "sell" { "B" } else { "A" },
+            "0.95",
+            "90.95",
+        ));
+        for row in venue.orders.lock().unwrap().values_mut() {
+            row["order"]["order"]["sz"] = json!("0");
+            row["order"]["status"] = json!("filled");
+        }
+        let opened = first.status(&opened.id, true).await.unwrap();
+        assert_eq!(opened.status, Status::Completed, "{:?}", opened.error);
+        *venue.positions.lock().unwrap() = Some(vec![json!({"position":{
+            "coin":"BTC","szi":if side == "sell" {"0.95"} else {"-0.95"}
+        }})]);
+        let mut request = request(
+            "directional-close",
+            "perpetual",
+            "BTC/USDC:USDC",
+            "0.95",
+            "90.95",
+        );
+        request.input["side"] = json!(side);
+        request.input["reduce_only"] = json!(true);
+        request.input["time_in_force"] = json!("ioc");
+        request.input["max_notional_usdc"] = json!(notional);
+        let submitted = first.execute(request.clone()).await.unwrap();
+        assert_eq!(submitted.status, Status::Pending, "{submitted:#?}");
+        assert_eq!(
+            submitted.preview.as_ref().unwrap().binding["orders"][0]["price_semantics"],
+            "directional_limit_v1"
+        );
+        let oid = 200;
+        venue.fills.lock().unwrap().push(fill_economics(
+            oid,
+            1,
+            "BTC",
+            if side == "buy" { "B" } else { "A" },
+            "0.95",
+            fill_price,
+            (fee, "0"),
+        ));
+        for row in venue.orders.lock().unwrap().values_mut() {
+            row["order"]["order"]["sz"] = json!("0");
+            row["order"]["status"] = json!("filled");
+        }
+        drop(first);
+        let resumed = engine_with_options(
+            &path,
+            venue.clone(),
+            Arc::new(Prices),
+            Arc::new(Approval),
+            options,
+        )
+        .await;
+        let reconciled = resumed.status(&submitted.id, true).await.unwrap();
+        assert_eq!(
+            reconciled.status,
+            if completes {
+                Status::Completed
+            } else {
+                Status::Pending
+            },
+            "{side} {fill_price} fee={fee}: {reconciled:#?}"
+        );
+        let retried = resumed.execute(request).await.unwrap();
+        assert_eq!(retried.id, submitted.id);
+        assert_eq!(
+            venue.dispatches.load(Ordering::SeqCst),
+            2,
+            "one opening plus one close; reconciliation must not replay either"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spot_orders_preserve_two_sided_price_and_fee_valuation_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = Arc::new(Venue::default());
+    let engine = engine(&dir.path().join("spot-compatibility.sqlite"), venue.clone()).await;
+    let request = request("spot-compatibility", "spot", "ETH/USDC", "1", "10");
+    let preview = engine
+        .preview(&request.operation, &request.input)
+        .await
+        .unwrap();
+    assert!(
+        preview.binding["orders"][0]
+            .get("price_semantics")
+            .is_none()
+    );
+    assert_eq!(preview.binding["orders"][0]["min_price"], "10");
+    assert_eq!(preview.binding["orders"][0]["max_price"], "10");
+    assert_eq!(
+        preview.valuation.unwrap().maximum_fee_usd_micros.as_str(),
+        "2000000"
+    );
+    let submitted = engine.execute(request).await.unwrap();
+    assert_eq!(submitted.status, Status::Pending);
+    venue
+        .fills
+        .lock()
+        .unwrap()
+        .push(fill(100, 1, "@0", "B", "1", "9"));
+    for row in venue.orders.lock().unwrap().values_mut() {
+        row["order"]["order"]["sz"] = json!("0");
+        row["order"]["status"] = json!("filled");
+    }
+    let reconciled = engine.status(&submitted.id, true).await.unwrap();
+    assert_eq!(reconciled.status, Status::Pending);
+    assert!(
+        reconciled
+            .error
+            .unwrap()
+            .message
+            .contains("outside the approved bounds")
+    );
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
 }
