@@ -1138,6 +1138,9 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             definition.semantics["execution_input"] = json!(
                 "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting."
             );
+            definition.semantics["preview_timing"] = json!(
+                "Preview binding.timing_guidance reports the provider arrival estimate when available, the remaining approval window at observed_at, and a suggested deadline with a 25% buffer of at least 300 seconds. A shorter window produces a warning. These are advisory estimates, not settlement guarantees; the reviewed deadline never extends automatically."
+            );
             definition.semantics["selection"] = json!(
                 "The broker prepares stages within the approved provider and route; no automatic provider switching."
             );

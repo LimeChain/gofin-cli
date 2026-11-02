@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.20.0"
+  version: "1.21.0"
   openclaw:
     requires:
       bins: [gofin]
@@ -59,8 +59,14 @@ Complete non-time-sensitive preparation before the broker requests any required
 approval. Check exact account, asset, network and destination identities, current
 venue balances, required permissions and fee assets. For compound actions, inspect every declared
 stage and the explicit reviewed deadline, including fees on destination chains.
-That deadline limits admission of new stages; it does not guarantee settlement by
-that time. Account for fees already spent against the action-wide budget.
+Before approval, use current preview timing guidance to choose a window covering
+all stages, expected protocol waits and a buffer for approval, confirmation and
+continuation. Resolve short-window warnings before proceeding unless the human
+intentionally requires that shorter cutoff. If an estimate is unavailable, do not
+treat it as zero or assume a short window is sufficient. Respect any human-imposed
+cutoff. The deadline limits admission of new stages; estimates and recommended
+deadlines do not guarantee settlement. Account for fees already spent against the
+action-wide budget.
 Use current discovery to distinguish enforced terms, estimates and terms checked
 after execution. A requested hard bound must never silently become an estimate.
 Missing optional valuation is unavailable, not zero, and is not by itself an
@@ -95,7 +101,14 @@ is not settlement. Source confirmation is not destination credit. Check the
 original action with the installed observation command, using bounded polling and
 persisted transfer identities. Observation never approves or dispatches. Continue
 supported observation and eligible continuation within the human's task without
-asking them to prompt each poll or stage. When the structured next action indicates
+asking them to prompt each poll or stage. A bounded call returning pending is not
+completion of the task: keep the workflow active through expected protocol waits,
+following the returned polling guidance until the requested outcome is verified
+or a genuine blocker needs human attention. For transfers, do not end the task
+merely because its source stage succeeded; verify destination credit. If
+interrupted, report the unfinished work and its next
+action explicitly; do not imply that a background runner will finish it.
+When the structured next action indicates
 eligible continuation, use its arguments and token for the same action; do not
 invent recovery commands or tokens or extend the approved deadline.
 Continuation can admit unfinished work and can require initial approval if an

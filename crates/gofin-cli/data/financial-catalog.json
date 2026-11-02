@@ -27690,6 +27690,7 @@
       "command_line_example": "gofin execute bridge.execute --input JSON --json",
       "execution_input": "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting.",
       "financial_authorization": "One native action approval covering declared stages through the explicit deadline, or protected Yolo.",
+      "preview_timing": "Preview binding.timing_guidance reports the provider arrival estimate when available, the remaining approval window at observed_at, and a suggested deadline with a 25% buffer of at least 300 seconds. A shorter window produces a warning. These are advisory estimates, not settlement guarantees; the reviewed deadline never extends automatically.",
       "providers": [
         "relay",
         "arbitrum_canonical",

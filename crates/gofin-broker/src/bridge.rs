@@ -2887,12 +2887,36 @@ impl BridgeAdapter {
             resolved_at: current.to_rfc3339(),
             deadline_unix_seconds: deadline,
         };
+        let timing_guidance = bridge_timing_guidance(
+            saved.quote.estimated_arrival_seconds,
+            deadline,
+            self.clock.now(),
+        );
+        let warnings = if timing_guidance["shorter_than_estimate"] == true {
+            let recommendation = timing_guidance["recommended_deadline_rfc3339"]
+                .as_str()
+                .map(|deadline| {
+                    format!(
+                        "A suggested deadline is {deadline}, including a {} second buffer. ",
+                        timing_guidance["buffer_seconds"]
+                    )
+                })
+                .unwrap_or_default();
+            vec![format!(
+                "The remaining approval window ({} seconds) is shorter than the estimated arrival ({} seconds). {}Estimates are not guarantees and the deadline will not extend automatically.",
+                timing_guidance["remaining_window_seconds"],
+                timing_guidance["estimated_arrival_seconds"],
+                recommendation,
+            )]
+        } else {
+            vec![]
+        };
         Ok(PreparedOperation {
             operation:"bridge.execute".into(), input:input.clone(),
-            binding:json!({"compound_bridge":true,"transfer_id":transfer_id,"scope":permission.spec,"provider":provider}),
+            binding:json!({"compound_bridge":true,"transfer_id":transfer_id,"scope":permission.spec,"provider":provider,"timing_guidance":timing_guidance}),
             summary:permission.spec.summary.clone(),
             checks:vec![Check{name:"bridge_stage_requirements".into(),status:CheckStatus::Passed,detail:"The selected route, destination, native fee assets and stage limits were checked before approval.".into()}],
-            warnings:vec![], observed_at:current.to_rfc3339(), expires_at:deadline_time.to_rfc3339(), valuation:None,
+            warnings, observed_at:current.to_rfc3339(), expires_at:deadline_time.to_rfc3339(), valuation:None,
             intent:FinancialIntent { debits:permission.spec.maximum_debits.clone(), maximum_costs:permission.spec.maximum_costs.clone(), expected:vec![EffectConstraint::Transfer { from:debit.resource.clone(),to:destination,debit_asset:debit.amount.asset.clone(),credit_asset:min.asset,maximum_debit:debit.amount.atoms.clone(),minimum_credit:min.atoms }],locks:vec![] },
             operation_version:1, action_deadline:Some(action_deadline),
         })
@@ -8889,6 +8913,40 @@ fn bridge_step_execution_matches(approved: &Value, candidate: &Value) -> bool {
                 .as_str()
                 .unwrap_or_default()
                 .to_ascii_lowercase()
+}
+
+fn bridge_timing_guidance(
+    estimate: Option<u64>,
+    deadline: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let now_unix = u64::try_from(now.timestamp()).unwrap_or(0);
+    let remaining = deadline
+        .saturating_sub(now_unix)
+        .saturating_sub(u64::from(now.timestamp_subsec_nanos() != 0));
+    let buffer = estimate.map(|seconds| (seconds / 4 + u64::from(seconds % 4 != 0)).max(300));
+    let recommended = estimate.zip(buffer).and_then(|(seconds, buffer)| {
+        now_unix
+            .checked_add(u64::from(now.timestamp_subsec_nanos() != 0))?
+            .checked_add(seconds)?
+            .checked_add(buffer)
+            .filter(|timestamp| {
+                i64::try_from(*timestamp)
+                    .ok()
+                    .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+                    .is_some()
+            })
+    });
+    json!({
+        "observed_at": now.to_rfc3339(),
+        "estimated_arrival_seconds": estimate,
+        "remaining_window_seconds": remaining,
+        "buffer_seconds": buffer,
+        "recommended_deadline_unix_seconds": recommended,
+        "recommended_deadline_rfc3339": recommended.and_then(|timestamp| i64::try_from(timestamp).ok()).and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0)).map(|time| time.to_rfc3339()),
+        "shorter_than_estimate": estimate.map(|seconds| remaining < seconds),
+        "note": "Arrival is an estimate, not a guarantee. The approval deadline does not extend automatically."
+    })
 }
 
 fn validate_bridge_execute_candidate(
