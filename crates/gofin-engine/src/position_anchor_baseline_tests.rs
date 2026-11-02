@@ -587,6 +587,68 @@ fn observer_rpc_diagnostic_method_requires_known_solana_method() {
 }
 
 #[tokio::test]
+async fn binance_futures_fresh_bound_baseline_survives_stale_and_newer_history() {
+    let engine = build_engine(vec![]);
+    let mut prepared = prepared();
+    prepared.operation = "binance.futures.order-place".into();
+    prepared.intent.expected = vec![EffectConstraint::DerivativePosition {
+        resource: resource(),
+        position: POSITION.into(),
+        asset: asset(),
+        position_kind: PositionKind::DerivativeLong,
+        minimum_delta: SignedQuantity::new("-5").unwrap(),
+        maximum_delta: SignedQuantity::new("0").unwrap(),
+    }];
+    let mut fresh = anchor("5");
+    fresh.position_kind = PositionKind::DerivativeLong;
+    fresh.observed_at = prepared.observed_at.clone();
+    prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY] = json!([fresh.clone()]);
+    let mut stale = fresh.clone();
+    stale.principal.atoms = Quantity::new("2").unwrap();
+    let prior = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![stale.clone()],
+    };
+    let baseline = engine
+        .capture_position_baseline("synthetic-operation", &prepared, &prior)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(baseline.anchors, vec![fresh.clone()]);
+    let rec = record(prepared.clone(), Some(baseline));
+    let recovered = engine
+        .merge_record_position_baseline(&rec, &[], prior.clone())
+        .unwrap();
+    assert_eq!(recovered.positions, vec![fresh]);
+
+    // Older candidates without a bound observation retain conflict protection.
+    let mut legacy = prepared;
+    legacy
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove(gofin_domain::BASELINE_ANCHORS_KEY);
+    let baseline = engine
+        .capture_position_baseline("synthetic-operation", &legacy, &prior)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut newer = stale.clone();
+    newer.principal.atoms = Quantity::new("3").unwrap();
+    let context = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![newer],
+    };
+    assert_eq!(
+        engine
+            .merge_record_position_baseline(&record(legacy, Some(baseline)), &[], context)
+            .unwrap_err()
+            .code,
+        "POSITION_BASELINE_CONFLICT"
+    );
+}
+
+#[tokio::test]
 async fn validated_candidate_baseline_skips_unavailable_shared_observer() {
     let source = Arc::new(PositionObserver {
         resource: resource(),

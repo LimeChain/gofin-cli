@@ -954,11 +954,10 @@ impl Engine {
                 return Err(ambiguous_anchor());
             }
         }
-        // Historical anchors are authoritative. Preserve the exact anchors
-        // needed by this action in the operation's immutable reconciliation
-        // baseline, then capture only keys with no prior journal/run history.
-        // A newer snapshot must not erase accrued or otherwise recorded
-        // historical semantics.
+        // Preserve the selected anchors in the immutable reconciliation
+        // baseline, then observe only keys with no selected anchor. The merge
+        // normally prefers history; Binance futures candidates may bind their
+        // fresh native derivative observation instead.
         let mut anchors = historical
             .values()
             .filter(|anchor| {
@@ -1250,6 +1249,18 @@ impl Engine {
             let key = position_anchor_key(anchor)?;
             if !seen.insert(key.clone()) {
                 return Err(ambiguous_anchor());
+            }
+            // This exact native observation was bound into the approved Binance
+            // futures candidate and persisted before dispatch. Reconciliation
+            // must use it even if the materialized history subsequently changes.
+            if let Some(preview) = &record.preview
+                && baseline_anchors::is_bound_fresh_binance_anchor(preview, anchor)?
+            {
+                context.positions.retain(|previous| {
+                    position_anchor_key(previous).ok().as_deref() != Some(key.as_str())
+                });
+                context.positions.push(anchor.clone());
+                continue;
             }
             if let Some(previous) = historical.get(&key) {
                 let predecessor_matches_history = approved_predecessors.iter().any(|candidate| {

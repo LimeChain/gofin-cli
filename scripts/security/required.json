@@ -12,7 +12,7 @@
   "evm-protocol-security": 12,
   "evm-rpc-evidence": 4,
   "evm-signing": 3,
-  "exchange-binance-authority": 2,
+  "exchange-binance-authority": 4,
   "exchange-binance-funding": 2,
   "exchange-binance-native-orders": 8,
   "exchange-binance-native-requests": 1,

@@ -1099,7 +1099,7 @@ async fn fund_between_legs(venue: &Venue, income: &str) {
 }
 
 #[tokio::test]
-async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cursor() {
+async fn historical_funding_between_actions_is_not_attributed_to_new_close() {
     for income in ["-0.05", "0.05"] {
         let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
         let auth = approve(ApprovalMode::Accept);
@@ -1124,15 +1124,8 @@ async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cur
         let closed = engine.execute(closing).await.unwrap();
         assert_eq!(closed.status, Status::Completed, "{closed:?}");
         let effects = &closed.effects.as_ref().unwrap().effects;
-        let funding_atoms =
-            gofin_domain::Quantity::from_decimal(income.trim_start_matches('-'), 36).unwrap();
-        let expected_delta = if income.starts_with('-') {
-            gofin_domain::SignedQuantity::negative(&funding_atoms)
-        } else {
-            gofin_domain::SignedQuantity::positive(&funding_atoms)
-        };
-        assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta, .. } if *delta == expected_delta)));
-        assert_eq!(effects.iter().filter(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { category, treatment: gofin_domain::CostTreatment::IncludedInDebit, amount, .. } if category == "funding_loss" && amount.atoms == funding_atoms)).count(), usize::from(income.starts_with('-')));
+        assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta, .. } if *delta == gofin_domain::SignedQuantity::new("0").unwrap())));
+        assert!(!effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { category, .. } if category == "funding_loss")));
         assert_eq!(venue.state.lock().unwrap().position, 0);
         assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
@@ -1144,7 +1137,7 @@ async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cur
 }
 
 #[tokio::test]
-async fn funding_above_native_loss_cap_is_reported_without_replay() {
+async fn historical_funding_above_new_action_cap_is_not_attributed_or_replayed() {
     let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
     let auth = approve(ApprovalMode::Accept);
     let engine = Engine::new(
@@ -1167,7 +1160,7 @@ async fn funding_above_native_loss_cap_is_reported_without_replay() {
     let closing = request(close, true);
     let outcome = engine.execute(closing.clone()).await.unwrap();
     assert_eq!(outcome.status, Status::Completed, "{outcome:?}");
-    assert_eq!(
+    assert_ne!(
         engine.operation_view(&outcome).unwrap()["outcome"]["attention"]["kind"],
         "discrepancy"
     );
@@ -1536,10 +1529,20 @@ async fn ordinary_partial_or_expired_ioc_close_retains_exposure_and_exact_identi
         assert_eq!(opened.status, Status::Completed, "{opened:?}");
         let closing = request(close, true);
         let settled = engine.execute(closing.clone()).await.unwrap();
-        assert_eq!(settled.status, Status::Completed, "{settled:?}");
+        assert_eq!(
+            settled.status,
+            if partial {
+                Status::Completed
+            } else {
+                Status::Failed
+            },
+            "{settled:?}"
+        );
         let remaining = if partial { "0.01" } else { "0.02" };
         assert_eq!(decimal(venue.state.lock().unwrap().position), remaining);
-        assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.to_decimal(36)==remaining)));
+        if partial {
+            assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.to_decimal(36)==remaining)));
+        }
         assert!(Store::open(&path).unwrap().get_run(id).unwrap().is_none());
         let duplicate = engine.execute(closing).await.unwrap();
         assert_eq!(duplicate.id, settled.id);
@@ -1736,6 +1739,139 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
         } else {
             assert_no_post(&result, &venue);
         }
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn external_futures_position_can_be_reduced_without_historical_anchor() {
+    for (position, side) in [("0.02", "SELL"), ("-0.02", "BUY")] {
+        let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
+        venue.state.lock().unwrap().position = units(position);
+        let auth = approve(ApprovalMode::Accept);
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let mut close = input("synthetic-external-position", side, true);
+        close["reduce_only"] = json!(true);
+        let closed = engine.execute(request(close, true)).await.unwrap();
+        assert_eq!(closed.status, Status::Completed, "{closed:?}");
+        let binding = &closed.preview.as_ref().unwrap().binding;
+        assert_eq!(
+            binding[gofin_domain::BASELINE_ANCHORS_KEY][0]["principal"]["atoms"],
+            gofin_domain::Quantity::from_decimal("0.02", 36)
+                .unwrap()
+                .to_string()
+        );
+        assert!(binding.get("priorAnchor").is_none());
+        assert_eq!(venue.state.lock().unwrap().position, 0);
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn changed_position_after_approval_never_dispatches_reduce_only_order() {
+    for changed in ["0.01", "-0.02", "0"] {
+        let venue = Venue::new(vec![]);
+        venue.state.lock().unwrap().position = units("0.02");
+        let copied = venue.clone();
+        let auth = Arc::new(Approval {
+            calls: AtomicUsize::new(0),
+            mode: ApprovalMode::Accept,
+            mutate: Some(Arc::new(move || {
+                copied.state.lock().unwrap().position = units(changed)
+            })),
+        });
+        let engine = make_engine(venue.clone(), prices(), auth, Store::in_memory().unwrap());
+        let mut close = input("synthetic-changed-position", "SELL", true);
+        close["reduce_only"] = json!(true);
+        let result = engine.execute(request(close, true)).await.unwrap();
+        assert_ne!(result.status, Status::Completed, "{result:?}");
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn legacy_futures_refresh_preserves_approved_binding_hash() {
+    use gofin_domain::Adapter;
+    let venue = Venue::new(vec![]);
+    venue.state.lock().unwrap().position = units("0.02");
+    let adapter = adapter(venue, prices());
+    let mut close = input("synthetic-legacy-refresh", "SELL", true);
+    close["reduce_only"] = json!(true);
+    let mut prepared = adapter
+        .prepare("binance.futures.order-place", &close)
+        .await
+        .unwrap();
+    prepared
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove(gofin_domain::BASELINE_ANCHORS_KEY);
+    let refreshed = adapter.revalidate(&prepared).await.unwrap();
+    assert!(
+        refreshed
+            .binding
+            .get(gofin_domain::BASELINE_ANCHORS_KEY)
+            .is_none()
+    );
+    assert_eq!(
+        gofin_domain::binding_hash(&gofin_domain::authorization_binding(&prepared)).unwrap(),
+        gofin_domain::binding_hash(&gofin_domain::authorization_binding(&refreshed)).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn funding_during_action_respects_approved_bounds_without_replay() {
+    for (income, discrepancy) in [
+        ("-0.05", false),
+        ("0.05", false),
+        ("-0.2", true),
+        ("0.2", true),
+    ] {
+        let mut fill = Fill::full("USDT", "0.04");
+        fill.pending = true;
+        let venue = Venue::new(vec![fill]);
+        let auth = approve(ApprovalMode::Accept);
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let mut order = input("synthetic-action-funding", "BUY", true);
+        order["maximum_funding_loss"] = json!("0.1");
+        order["maximum_funding_profit"] = json!("0.1");
+        let request = request(order, true);
+        let original = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(original.status, Status::Pending, "{original:?}");
+        let original_submission = original.submission.clone();
+        fund_between_legs(&venue, income).await;
+        for order in venue.state.lock().unwrap().orders.values_mut() {
+            order.row["status"] = json!("FILLED");
+        }
+        let settled = engine.status(&original.id, true).await.unwrap();
+        assert_eq!(settled.status, Status::Completed, "{income}: {settled:?}");
+        assert_eq!(settled.submission, original_submission);
+        let funding =
+            gofin_domain::Quantity::from_decimal(income.trim_start_matches('-'), 36).unwrap();
+        let delta = if income.starts_with('-') {
+            gofin_domain::SignedQuantity::negative(&funding)
+        } else {
+            gofin_domain::SignedQuantity::positive(&funding)
+        };
+        assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta: actual, .. } if *actual == delta)));
+        assert_eq!(
+            engine.operation_view(&settled).unwrap()["outcome"]["attention"]["kind"]
+                == "discrepancy",
+            discrepancy,
+            "{income}"
+        );
+        assert_eq!(engine.execute(request).await.unwrap().id, original.id);
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
     }
 }

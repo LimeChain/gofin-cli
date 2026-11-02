@@ -1019,9 +1019,15 @@ Prefer service-manager/on-demand activation where practical. Start invokes the f
 Binance trading builds on the same `ExchangeAdapter` rather than a separate order
 engine. Its profile owns closed CCXT route mapping, permissions, market filters,
 mode checks, deterministic client IDs, fills and before/after account evidence.
-`prepare_with_context` receives broker-owned position anchors;
-`refresh_prepared` preserves that trusted context while rechecking the exact
-approval binding. Clients cannot supply a substitute position provenance record.
+New Binance futures orders bind a fresh native position observation through the
+shared baseline contract. For these orders the engine selects that approved
+observation over historical position anchors, then retains it as the immutable
+reconciliation baseline. Missing or stale historical trade accounting cannot
+block a new reduction. `refresh_prepared` rechecks the exact exposure and approval
+binding before dispatch. New actions use their own submission-time funding
+interval; legacy submissions retain their original accounting boundaries.
+Clients cannot supply a substitute position provenance record, and a fresh
+baseline never rewrites earlier operation evidence.
 
 Shared domain effects distinguish derivative long/short exposure from cash and
 custody positions. Preserve realized PnL, funding, costs and partial fills from

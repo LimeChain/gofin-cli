@@ -20160,7 +20160,7 @@
   },
   {
     "name": "binance.futures.order-place",
-    "description": "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes.",
+    "description": "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only and uses the fresh venue position independently of historical reconciliation. Settings must already match; no implicit configuration changes.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -20242,7 +20242,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding loss from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_funding_profit": {
           "anyOf": [
@@ -20255,7 +20256,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding profit from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_loss": {
           "anyOf": [
@@ -25835,7 +25837,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding loss from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_funding_profit": {
           "anyOf": [
@@ -25848,7 +25851,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding profit from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_loss": {
           "anyOf": [

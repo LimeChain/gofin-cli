@@ -70,9 +70,11 @@ pub struct OrderInput {
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_profit: Option<String>,
+    /// Maximum funding loss from this submission through reconciliation; excludes earlier funding.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_loss: Option<String>,
+    /// Maximum funding profit from this submission through reconciliation; excludes earlier funding.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_profit: Option<String>,
@@ -92,7 +94,7 @@ pub(super) fn is_write(operation: &str) -> bool {
 pub(super) fn definitions() -> Vec<Definition> {
     let mut result:Vec<_> = [false,true].into_iter().map(|futures| Definition {
         name: order_name(futures).into(),
-        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes." } else { "Place a native SPOT MARKET, LIMIT IOC/FOK/GTC, or LIMIT_MAKER order. MARKET BUY uses an exact quote budget; MARKET SELL uses exact base quantity. Resting orders remain pending until terminal reconciliation." }.into(),
+        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only and uses the fresh venue position independently of historical reconciliation. Settings must already match; no implicit configuration changes." } else { "Place a native SPOT MARKET, LIMIT IOC/FOK/GTC, or LIMIT_MAKER order. MARKET BUY uses an exact quote budget; MARKET SELL uses exact base quantity. Resting orders remain pending until terminal reconciliation." }.into(),
         kind: OperationKind::Write, execution_actor: ExecutionActor::AgentInvocable,
         input_schema: native_spot::input_schema(futures), output_schema: json!({"type":"object"}), error_schema: schema_for!(GoFinError).into(),
         examples: vec![if futures {
@@ -422,82 +424,6 @@ impl BinanceProfile {
         })
     }
 
-    pub(in crate::adapter) async fn trading_prepare_with_anchor(
-        &self,
-        operation: &str,
-        raw: &Value,
-        context: &gofin_domain::PreparationContext,
-    ) -> Result<PreparedOperation, GoFinError> {
-        let mut prepared = self.trading_prepare(operation, raw, None).await?;
-        let input: OrderInput = self.parse_input(raw).await?;
-        if !input.reduce_only {
-            return Ok(prepared);
-        }
-        let resource: ResourceId = serde_json::from_value(prepared.binding["resource"].clone())
-            .map_err(|_| {
-                error(
-                    "PREVIEW_INVALID",
-                    "preview",
-                    "Derivative resource is invalid.",
-                )
-            })?;
-        let kind: PositionKind = serde_json::from_value(prepared.binding["positionKind"].clone())
-            .map_err(|_| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative direction is invalid.",
-            )
-        })?;
-        let position = position_name(&input.symbol, &kind);
-        let anchors: Vec<_> = context
-            .positions
-            .iter()
-            .filter(|a| a.resource == resource && a.position == position && a.position_kind == kind)
-            .collect();
-        let anchor = match anchors.as_slice() {
-            [anchor] => *anchor,
-            _ => {
-                return Err(error(
-                    "POSITION_PROVENANCE_MISSING",
-                    "preview",
-                    "Closing requires the original verified GoFin position anchor.",
-                ));
-            }
-        };
-        let before = BigInt::parse_bytes(
-            prepared.binding["positionBefore"]
-                .as_str()
-                .unwrap_or_default()
-                .as_bytes(),
-            10,
-        )
-        .ok_or_else(|| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative exposure is invalid.",
-            )
-        })?;
-        if anchor.principal.atoms.integer() != before.abs().to_biguint().unwrap_or_default()
-            || anchor.evidence["collateralBalance"].as_str().is_none()
-            || anchor.evidence["settledThroughMillis"].as_i64().is_none()
-        {
-            return Err(error(
-                "POSITION_PROVENANCE_MISMATCH",
-                "preview",
-                "Observed derivative exposure lacks compatible collateral and funding evidence.",
-            ));
-        }
-        prepared.binding["priorAnchor"] = serde_json::to_value(anchor).map_err(|_| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative anchor cannot be bound.",
-            )
-        })?;
-        Ok(prepared)
-    }
     async fn trading_funding(
         &self,
         account: &BinanceAccount,
@@ -807,6 +733,20 @@ impl BinanceProfile {
                     "Futures exposure observation is unavailable.",
                 )
             })?;
+            // Position Information V3 returns only symbols with a position or
+            // open orders. A complete empty array therefore represents zero.
+            // https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Position-Information-V3
+            if rows.iter().any(|r| {
+                r["symbol"].as_str().is_none()
+                    || r["positionSide"].as_str() != Some("BOTH")
+                    || r["positionAmt"].as_str().is_none()
+            }) {
+                return Err(error(
+                    "VENUE_RESPONSE_INVALID",
+                    "preview",
+                    "Futures exposure observation is incomplete or inconsistent with one-way mode.",
+                ));
+            }
             let matches: Vec<_> = rows
                 .iter()
                 .filter(|r| r["symbol"] == input.symbol && r["positionSide"] == "BOTH")
@@ -1403,6 +1343,22 @@ impl BinanceProfile {
             }
         }
         if futures {
+            if projected.is_none() {
+                binding[gofin_domain::BASELINE_ANCHORS_KEY] = json!([PositionAnchor {
+                    resource: resource.clone(),
+                    position: position_name(&input.symbol, &kind),
+                    position_kind: kind.clone(),
+                    principal: Amount {
+                        asset: base.clone(),
+                        atoms: Quantity::new(position_before.abs().to_string())
+                            .map_err(domain_error)?,
+                    },
+                    scaled_receipt: None,
+                    evidence_version: 1,
+                    evidence: json!({"source":"binance_futures_positions", "symbol":input.symbol, "positionSide":"BOTH", "positionAmtAtoms":position_before.to_string()}),
+                    observed_at: now(),
+                }]);
+            }
             let (leverage, margin) = configuration::requested(&input)?;
             binding["leverage"] = json!(leverage);
             binding["marginType"] = json!(margin);
@@ -1669,8 +1625,96 @@ impl BinanceProfile {
                     )
                 })?;
             let name = position_name(b["symbol"].as_str().unwrap_or_default(), &kind);
-            let mut anchor: PositionAnchor = serde_json::from_value(b["priorAnchor"].clone())
+            if b.get("priorAnchor").is_none() {
+                let baseline: Vec<PositionAnchor> = serde_json::from_value(
+                    b[gofin_domain::BASELINE_ANCHORS_KEY].clone(),
+                )
                 .map_err(|_| {
+                    error(
+                        "NOOP_ANCHOR_MISSING",
+                        "reconciliation",
+                        "The native zero-exposure baseline is missing.",
+                    )
+                })?;
+                if b["positionBefore"] != "0"
+                    || baseline.len() != 1
+                    || baseline[0].resource != resource
+                    || baseline[0].position != name
+                    || baseline[0].position_kind != kind
+                    || baseline[0].principal.asset != base
+                    || !baseline[0].principal.atoms.is_zero()
+                    || baseline[0].evidence["positionAmtAtoms"] != "0"
+                {
+                    return Err(error(
+                        "NOOP_ANCHOR_INVALID",
+                        "reconciliation",
+                        "The native zero-exposure baseline is invalid.",
+                    ));
+                }
+                let account =
+                    self.account(submission.data["account"].as_str().unwrap_or_default())?;
+                let rows = self
+                    .call(
+                        account,
+                        BinanceRequest::new(BinanceEndpoint::FuturesPositions)
+                            .push("symbol", b["symbol"].as_str().unwrap_or_default()),
+                        "reconciliation",
+                    )
+                    .await?;
+                let Some(rows) = rows.as_array() else {
+                    return Ok(unknown("The current derivative position is unavailable."));
+                };
+                if rows.iter().any(|r| {
+                    r["symbol"] != b["symbol"]
+                        || r["positionSide"].as_str() != Some("BOTH")
+                        || r["positionAmt"].as_str().is_none()
+                }) {
+                    return Ok(unknown(
+                        "The current derivative position response is incomplete.",
+                    ));
+                }
+                let matching: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r["symbol"] == b["symbol"] && r["positionSide"] == "BOTH")
+                    .collect();
+                if matching.len() > 1
+                    || matching
+                        .first()
+                        .map(|row| signed(row, "positionAmt"))
+                        .transpose()?
+                        .is_some_and(|position| !position.is_zero())
+                {
+                    return Ok(unknown(
+                        "The derivative position changed during the empty cleanup.",
+                    ));
+                }
+            }
+            let prior_anchor = if b.get("priorAnchor").is_some() {
+                b["priorAnchor"].clone()
+            } else {
+                let submitted = DateTime::parse_from_rfc3339(
+                    submission.data["submittedAt"].as_str().unwrap_or_default(),
+                )
+                .map_err(|_| {
+                    error(
+                        "SUBMISSION_INVALID",
+                        "reconciliation",
+                        "Submission funding boundary is invalid.",
+                    )
+                })?;
+                serde_json::to_value(PositionAnchor {
+                    resource: resource.clone(),
+                    position: name.clone(),
+                    position_kind: kind.clone(),
+                    principal: Amount { asset: base.clone(), atoms: Quantity::zero() },
+                    scaled_receipt: None,
+                    evidence_version: 1,
+                    evidence: json!({"positionSide":"BOTH", "positionAmtAtoms":"0", "collateralBalance":submission.data["balancesBefore"]["USDT"], "settledThroughMillis":submitted.timestamp_millis()}),
+                    observed_at: now(),
+                }).map_err(|_| error("SUBMISSION_INVALID", "reconciliation", "Cleanup position baseline is invalid."))?
+            };
+            let mut anchor: PositionAnchor =
+                serde_json::from_value(prior_anchor).map_err(|_| {
                     error(
                         "NOOP_ANCHOR_MISSING",
                         "reconciliation",
@@ -1692,9 +1736,8 @@ impl BinanceProfile {
                     "The empty derivative cleanup requires the original compatible zero-exposure backing and funding cursor.",
                 ));
             }
-            // No venue action changed the zero exposure. Keep the collateral
-            // backing and exclusive funding cursor from its already-proved
-            // anchor, so subsequent preparation cannot lose that history.
+            // Preserve a legacy cursor when present; new cleanup actions use
+            // their own submission snapshot and do not claim historical funding.
             anchor.observed_at = now();
             effects.push(FinancialEffect::PositionChange {
                 resource: resource.clone(),

@@ -3140,42 +3140,28 @@ impl ExchangeProfile for BinanceProfile {
         }
     }
 
-    async fn prepare_with_context(
-        &self,
-        operation: &str,
-        input: &Value,
-        context: &gofin_domain::PreparationContext,
-    ) -> Result<PreparedOperation, GoFinError> {
-        if operation == "binance.futures.order-place" {
-            return self
-                .trading_prepare_with_anchor(operation, input, context)
-                .await;
-        }
-        self.prepare(operation, input).await
-    }
-
     async fn refresh_prepared(
         &self,
         prepared: &PreparedOperation,
     ) -> Result<PreparedOperation, GoFinError> {
-        let mut current = if prepared.operation == "binance.futures.order-place" {
-            let mut context = gofin_domain::PreparationContext::default();
-            if let Some(anchor) = prepared.binding.get("priorAnchor") {
-                context
-                    .positions
-                    .push(serde_json::from_value(anchor.clone()).map_err(|_| {
-                        error(
-                            "PREVIEW_INVALID",
-                            "submission",
-                            "The trusted derivative anchor is invalid.",
-                        )
-                    })?);
+        let mut current = self.prepare(&prepared.operation, &prepared.input).await?;
+        // Retain the approved observation only when the refreshed native exposure
+        // still matches; positionBefore remains independently checked by refresh.
+        if prepared.operation == "binance.futures.order-place"
+            && current.binding["positionBefore"] == prepared.binding["positionBefore"]
+        {
+            if let Some(baseline) = prepared.binding.get(gofin_domain::BASELINE_ANCHORS_KEY) {
+                current.binding[gofin_domain::BASELINE_ANCHORS_KEY] = baseline.clone();
+            } else if let Some(binding) = current.binding.as_object_mut() {
+                binding.remove(gofin_domain::BASELINE_ANCHORS_KEY);
             }
-            self.trading_prepare_with_anchor(&prepared.operation, &prepared.input, &context)
-                .await?
-        } else {
-            self.prepare(&prepared.operation, &prepared.input).await?
-        };
+        }
+        // Preserve the reconciliation contract of submissions prepared by older versions.
+        if prepared.operation == "binance.futures.order-place"
+            && let Some(anchor) = prepared.binding.get("priorAnchor")
+        {
+            current.binding["priorAnchor"] = anchor.clone();
+        }
         let plan_metadata = prepared
             .binding
             .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?

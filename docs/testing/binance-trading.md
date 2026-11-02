@@ -22,6 +22,17 @@ authority; standalone subaccounts use their own key with `authority: "self"`.
 They do not move funds across different account owners. Each write retains its
 own durable identity and authorization.
 
+Each new futures order uses a fresh authenticated position observation. Reducing
+or closing a position does not require its opening trade or earlier GoFin trades
+to have reconciled. The observed account, symbol, direction and quantity are
+bound to the new approval and rechecked before dispatch; reductions remain
+native reduce-only orders. A changed position requires a refreshed candidate.
+Historical unresolved trades retain their identities and evidence. A successful
+new close does not resolve their accounting. New orders account for their own
+correlated fills and submission-time funding interval, without attributing
+funding from before the action; existing submissions retain their original
+accounting boundaries.
+
 ## Positive CLI acceptance and security regressions
 
 The required `binance-spot` scenario uses the public CLI, broker and real adapters
@@ -70,6 +81,13 @@ not guess a matching history row or repeat that transfer. The subaccount scenari
 also verifies that a persisted receipt with delayed history recovers after
 restart. Its deliberately lost transfer response is a separate fault case after
 the normal funding/trading/return cycles have restored their synthetic state.
+
+The main-account CLI scenario also verifies a close with missing historical
+position evidence and another with stale evidence. An opening order fills but
+loses its response, and external fixture activity makes its position attribution
+unresolved. New reductions settle from fresh reads across restarts without
+replaying or declaring the original trade reconciled. This intentional historical
+uncertainty is reported separately from the completed new actions.
 
 Focused adapter tests also cover cross/isolated modes, permissions, live setting
 changes, invalid reductions/reversals, insufficient collateral, venue filters,
