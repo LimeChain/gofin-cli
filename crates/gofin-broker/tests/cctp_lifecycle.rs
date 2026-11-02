@@ -1421,6 +1421,68 @@ async fn compound_cctp_native_review_covers_all_stages_once() {
             );
         }
         h.chain.lock().unwrap().attestation_ready = true;
+        let transfer_status = h.status(&transfer).await;
+        assert_eq!(
+            transfer_status["provider_status"]["status"], "mint_ready",
+            "{transfer_status}"
+        );
+        assert_eq!(
+            transfer_status["operation_next_action"]["command"],
+            "status"
+        );
+        assert_eq!(
+            transfer_status["operation_next_action"]["arguments"]["operation_id"],
+            id
+        );
+        assert!(
+            transfer_status["next_action"]
+                .as_str()
+                .unwrap()
+                .contains(&id)
+        );
+        assert_eq!(
+            transfer_status["provider_status"]["next_action"],
+            transfer_status["next_action"]
+        );
+        assert!(!transfer_status.to_string().contains("plan authority"));
+        let mint = transfer_status["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["kind"] == "mint")
+            .unwrap();
+        let separate_input = json!({
+            "transferId": transfer,
+            "stepId": mint["step_id"],
+            "stepKind": "mint",
+            "bounds": h.compound_input(false, false)["bounds"]
+        });
+        let broadcasts = h.chain.lock().unwrap().broadcasts.clone();
+        for request in [
+            BrokerRequest::Preview {
+                operation: "bridge.transfer".into(),
+                input: separate_input.clone(),
+            },
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "accidental-separate-mint".into(),
+                    operation: "bridge.transfer".into(),
+                    input: separate_input,
+                    run_id: None,
+                },
+            },
+        ] {
+            let response = Box::pin(h.runtime.handle(request)).await;
+            assert!(
+                !response.ok,
+                "Separate compound stage must redirect before approval"
+            );
+            let error = response.error.unwrap();
+            assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+            assert_eq!(error.details.unwrap()["operation_id"], id);
+            assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+            assert_eq!(h.chain.lock().unwrap().broadcasts, broadcasts);
+        }
         let waiting = h
             .call(
                 args(&["status", &id, "--json"]),

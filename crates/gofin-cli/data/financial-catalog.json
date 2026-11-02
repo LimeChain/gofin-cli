@@ -29160,6 +29160,7 @@
         }
       },
       "command_line_example": "gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'",
+      "compound_owned_stage": "A stage owned by an approved bridge.execute action cannot be previewed or executed as a new standalone action. Inspect the original operation with status and follow its returned continuation or reauthorization arguments.",
       "financial_authorization": "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages.",
       "observer_only_chains": [
         {

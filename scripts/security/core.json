@@ -141,7 +141,8 @@
       "preapproval_failure_overrides_unsubmitted_prepared_transfer_observation",
       "rejected_revised_preapproval_replays_its_successor_without_prompt",
       "transmitted_rejection_requires_new_approval",
-      "mutation_baseline_is_broker_captured_and_survives_adapter_refresh"
+      "mutation_baseline_is_broker_captured_and_survives_adapter_refresh",
+      "compound_bridge_lookup_preserves_terminal_owner_and_rejects_ambiguity"
     ]
   },
   {

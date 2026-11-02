@@ -866,7 +866,7 @@ impl BridgeAdapter {
             );
         }
         Ok(
-            json!({"provider":"cctp","settled":false,"status":"mint_ready","requested_mode":saved.quote.cctp.as_ref().map(|m|m.transfer_mode),"executed_finality":message.finality_threshold_executed,"next_action":"Preview and explicitly execute the saved mint stage under current plan authority."}),
+            json!({"provider":"cctp","settled":false,"status":"mint_ready","requested_mode":saved.quote.cctp.as_ref().map(|m|m.transfer_mode),"executed_finality":message.finality_threshold_executed,"next_action":"Preview and execute the saved mint stage with native action approval."}),
         )
     }
 }

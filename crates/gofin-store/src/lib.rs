@@ -3780,6 +3780,7 @@ impl Store {
         }
         let path = match binding_pointer {
             "/preview/binding/order_key" => "$.preview.binding.order_key",
+            "/preview/binding/transfer_id" => "$.preview.binding.transfer_id",
             "/preview/binding/funding_binding/operation_id" => {
                 "$.preview.binding.funding_binding.operation_id"
             }

@@ -2970,7 +2970,7 @@ impl BridgeAdapter {
                 .map_err(store_error)?
                 .ok_or_else(internal_error)?;
         }
-        let provider_status = if matches!(
+        let mut provider_status = if matches!(
             transfer.state,
             BridgeTransferState::InTransit
                 | BridgeTransferState::DestinationPending
@@ -3026,13 +3026,33 @@ impl BridgeAdapter {
             .as_ref()
             .and_then(|status| status["next_action"].as_str())
             .unwrap_or(&next_action);
+        // A compound action owns its saved transfer. Its status supplies the
+        // current continuation token and determines whether authority remains
+        // usable; a transfer read must not direct the caller to a new write.
+        let owner = engine.compound_bridge_action_for_transfer(&transfer.id)?;
+        let (next_action, operation_next_action) = match owner {
+            Some(owner) => {
+                let guidance = format!(
+                    "Inspect the original bridge action {} with gofin status {} --json and follow its returned next action.",
+                    owner.id, owner.id
+                );
+                if let Some(status) = provider_status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("next_action".into(), json!(guidance));
+                }
+                (
+                    guidance,
+                    Some(json!({"command":"status","arguments":{"operation_id":owner.id}})),
+                )
+            }
+            None => (next_action.to_owned(), None),
+        };
         let saved = self.saved_quote(&transfer)?;
         let settlement_policy = self.settlement_policy(
             bridge_source_chain_id(&saved.quote.intent),
             saved.quote.intent.destination_chain_id,
         );
         Ok(
-            json!({"transfer_id":transfer.id,"state":transfer.state,"grant_id":transfer.grant_id,"steps":transfer.steps,"transit":transfer.transit,"provider_status":provider_status,"settlement":bridge_settlement_status_summary(&transfer),"settlement_policy":settlement_policy,"next_action":next_action}),
+            json!({"transfer_id":transfer.id,"state":transfer.state,"grant_id":transfer.grant_id,"steps":transfer.steps,"transit":transfer.transit,"provider_status":provider_status,"settlement":bridge_settlement_status_summary(&transfer),"settlement_policy":settlement_policy,"next_action":next_action,"operation_next_action":operation_next_action}),
         )
     }
 

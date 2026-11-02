@@ -1182,6 +1182,9 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             definition.semantics["financial_authorization"] = json!(
                 "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages."
             );
+            definition.semantics["compound_owned_stage"] = json!(
+                "A stage owned by an approved bridge.execute action cannot be previewed or executed as a new standalone action. Inspect the original operation with status and follow its returned continuation or reauthorization arguments."
+            );
         }
         "hyperliquid.orders.twap" => {
             definition.semantics["fees"] =

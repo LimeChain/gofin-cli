@@ -522,6 +522,121 @@ fn record(
 }
 
 #[tokio::test]
+async fn compound_bridge_lookup_preserves_terminal_owner_and_rejects_ambiguity() {
+    let engine = build_engine(vec![observer("bridge.transfer", vec![], vec![])]);
+    let mut candidate = prepared();
+    candidate.operation = "bridge.execute".into();
+    candidate.binding = json!({"compound_bridge":true,"transfer_id":"transfer-1"});
+    let mut action = record(candidate, None);
+    action.status = Status::Expired;
+    action.approval = Some(gofin_domain::ApprovalAudit {
+        source: None,
+        yolo_provenance: None,
+        mechanism: "synthetic".into(),
+        binding_hash: "hash".into(),
+        challenge_nonce: "nonce".into(),
+        approved_at: now(),
+        expires_at: now(),
+    });
+    let insert = |action: &OperationRecord| {
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &action.id,
+                &action.request_id,
+                &action.fingerprint,
+                &action.operation,
+                None,
+                "expired",
+                &to_value(action).unwrap(),
+                &now(),
+            )
+            .unwrap();
+    };
+    insert(&action);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let input = json!({"transferId":"transfer-1","stepId":"mint"});
+    let error = engine.preview("bridge.transfer", &input).await.unwrap_err();
+    assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+    assert_eq!(error.details.as_ref().unwrap()["operation_id"], action.id);
+    let error = engine
+        .execute(OperationRequest {
+            request_id: "new-child".into(),
+            operation: "bridge.transfer".into(),
+            input,
+            run_id: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+    assert!(
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .by_request("new-child")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .compound_bridge_action_for_transfer("other")
+            .unwrap()
+            .is_none()
+    );
+    let mut unapproved = action.clone();
+    unapproved.id = "unapproved".into();
+    unapproved.request_id = "unapproved-request".into();
+    unapproved.fingerprint = "unapproved-fingerprint".into();
+    unapproved.approval = None;
+    insert(&unapproved);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let mut unrelated = action.clone();
+    unrelated.id = "unrelated".into();
+    unrelated.request_id = "unrelated-request".into();
+    unrelated.fingerprint = "unrelated-fingerprint".into();
+    unrelated.preview.as_mut().unwrap().binding["compound_bridge"] = json!(false);
+    insert(&unrelated);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let mut duplicate = action;
+    duplicate.id = "duplicate".into();
+    duplicate.request_id = "duplicate-request".into();
+    duplicate.fingerprint = "duplicate-fingerprint".into();
+    duplicate.status = Status::Completed;
+    insert(&duplicate);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap_err()
+            .code,
+        "BRIDGE_ACTION_OWNER_AMBIGUOUS"
+    );
+}
+
+#[tokio::test]
 async fn observer_failure_keeps_safe_cause_without_private_transport_details() {
     let source = Arc::new(PositionObserver {
         resource: resource(),

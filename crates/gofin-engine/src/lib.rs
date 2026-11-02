@@ -647,6 +647,7 @@ impl Engine {
                 "Use the read or configuration command for this operation.",
             ));
         }
+        self.reject_owned_bridge_transfer(operation, input)?;
         let context = self.preparation_context(run_id)?;
         gofin_domain::execution_progress::emit(gofin_domain::execution_progress::Stage::Preparing);
         let linked = self.amendment_preparation_context(input)?;
@@ -1348,6 +1349,7 @@ impl Engine {
             let original: OperationRecord = from_value(existing.record)?;
             return self.status(&original.id, true).await;
         }
+        self.reject_owned_bridge_transfer(&request.operation, &request.input)?;
         if definition.semantics["plan_only"] == true
             && !(request.operation == "bridge.execute" && request.input.get("intent").is_some())
         {
@@ -3082,6 +3084,70 @@ impl Engine {
             .into_iter()
             .map(from_value)
             .collect()
+    }
+
+    /// Find the approved compound action that owns a saved bridge transfer.
+    /// Terminal and expired actions remain owners for durable recovery.
+    pub fn compound_bridge_action_for_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<OperationRecord>> {
+        if transfer_id.trim().is_empty() {
+            return Err(GoFinError::validation("Bridge transfer ID is required."));
+        }
+        let candidates = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .operations_by_prepared_binding(
+                "bridge.execute",
+                "/preview/binding/transfer_id",
+                &json!(transfer_id),
+            )
+            .map_err(map_store)?;
+        let mut owner = None;
+        for candidate in candidates {
+            if candidate.pointer("/preview/binding/compound_bridge") != Some(&Value::Bool(true))
+                || candidate.get("approval").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let record: OperationRecord = from_value(candidate)?;
+            if owner.is_some() {
+                return Err(GoFinError::new(
+                    "BRIDGE_ACTION_OWNER_AMBIGUOUS",
+                    "reconciliation",
+                    "Multiple approved bridge actions own this transfer.",
+                    "Keep the transfer unresolved and inspect the original action records.",
+                ));
+            }
+            owner = Some(record);
+        }
+        Ok(owner)
+    }
+
+    fn reject_owned_bridge_transfer(&self, operation: &str, input: &Value) -> Result<()> {
+        if operation != "bridge.transfer" {
+            return Ok(());
+        }
+        let Some(transfer_id) = input.get("transferId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if transfer_id.trim().is_empty() {
+            return Ok(());
+        }
+        if let Some(owner) = self.compound_bridge_action_for_transfer(transfer_id)? {
+            return Err(GoFinError::new(
+                "BRIDGE_COMPOUND_ACTION_OWNED",
+                "validation",
+                "This transfer belongs to an existing approved bridge action.",
+                "Follow the original action's status and continue its recovery.",
+            ).with_details(json!({
+                "operation_id": owner.id,
+                "next_action": {"code":"observe","command":"status","arguments":{"operation_id":owner.id}}
+            })));
+        }
+        Ok(())
     }
 
     fn bind_bridge_approved_scope(
