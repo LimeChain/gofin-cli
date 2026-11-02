@@ -147,6 +147,45 @@ impl EthereumAdapter {
         let w = self.resolve(&r, true)?;
         let owner = address(&w.address)?;
         self.runtime.assert_chain().await?;
+        // Supply observations share one canonical block and one short-lived cache.
+        // Simulation and dispatch continue to use the original live runtime.
+        let capture = if operation == "aave.supply" {
+            let block = gofin_evm::rpc_u64(
+                &self
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?;
+            let params = json!([gofin_evm::block_tag(Some(block)), false]);
+            let header = self
+                .runtime
+                .rpc
+                .request("eth_getBlockByNumber", params)
+                .await?;
+            gofin_evm::hash(header["hash"].as_str().unwrap_or(""))?;
+            require(
+                gofin_evm::rpc_u64(&header["number"])? == block,
+                "AAVE_READ_CHANGED",
+                "Preparation block identity differs.",
+            )?;
+            let mut reader = self.clone();
+            reader.runtime = Arc::new(EvmRuntime::new(
+                Arc::new(snapshot::SnapshotRpc::preparation(
+                    self.runtime.rpc.clone(),
+                    block,
+                )),
+                self.config.chain_id,
+                None,
+            ));
+            Some((reader, block, header))
+        } else {
+            None
+        };
+        let state = capture
+            .as_ref()
+            .map(|(reader, _, _)| reader)
+            .unwrap_or(self);
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
         } else if matches!(
@@ -157,7 +196,7 @@ impl EthereumAdapter {
         } else {
             r.token.as_deref().expect("schema").to_owned()
         };
-        let token = self.token(&token_ref, None).await?;
+        let token = state.token(&token_ref, None).await?;
         let all_amount = r.amount.as_deref() == Some("all");
         let repay_all = operation == "aave.repay" && all_amount;
         let withdraw_all = operation == "aave.withdraw" && all_amount;
@@ -986,18 +1025,18 @@ impl EthereumAdapter {
                 }
             }
             _ => {
-                let reserve = self.reserve(&token.reference, None).await?;
+                let reserve = state.reserve(&token.reference, None).await?;
                 require(
                     reserve.active && !reserve.paused,
                     "RESERVE_UNAVAILABLE",
                     "Aave reserve must be active and unpaused.",
                 )?;
-                let user = self.user_reserve(&token, owner, None).await?;
-                let pool = address(&self.aave()?.pool)?;
+                let user = state.user_reserve(&token, owner, None).await?;
+                let pool = address(&state.aave()?.pool)?;
                 to = pool;
-                b.aave_emode = Some(quantity(self.aave_mode(owner, None).await?));
-                b.pool = Some(self.aave()?.pool.clone());
-                b.spender = Some(self.aave()?.pool.clone());
+                b.aave_emode = Some(quantity(state.aave_mode(owner, None).await?));
+                b.pool = Some(state.aave()?.pool.clone());
+                b.spender = Some(state.aave()?.pool.clone());
                 b.a_token = Some(reserve.a_token.clone());
                 b.debt_token = Some(reserve.variable_debt_token.clone());
                 b.supplied_before = Some(user.supplied.clone());
@@ -1006,54 +1045,60 @@ impl EthereumAdapter {
                 let asset = address(&token.reference)?;
                 if matches!(operation, "aave.supply" | "aave.withdraw") {
                     require(
-                        self.runtime
+                        state
+                            .runtime
                             .call(
                                 address(&reserve.a_token)?,
                                 &AToken::ATOKEN_REVISIONCall {},
                                 None,
                             )
                             .await?
-                            == self.supply_revision(),
+                            == state.supply_revision(),
                         "ATOKEN_REVISION_UNSUPPORTED",
                         "Selected supply writes require reviewed aToken revision 5 backing math.",
                     )?;
                 }
                 if matches!(operation, "aave.borrow" | "aave.repay") {
                     require(
-                        self.runtime
+                        state
+                            .runtime
                             .call(
                                 address(&reserve.variable_debt_token)?,
                                 &AToken::DEBT_TOKEN_REVISIONCall {},
                                 None,
                             )
                             .await?
-                            == self.debt_revision(),
+                            == state.debt_revision(),
                         "DEBT_REVISION_UNSUPPORTED",
                         "Selected debt writes require the selected reviewed debt token backing math.",
                     )?;
                 }
-                self.verify_receipt_identity(&token, &reserve, None).await?;
+                state
+                    .verify_receipt_identity(&token, &reserve, None)
+                    .await?;
                 b.supply_anchor = Some(
-                    self.context_anchor(
-                        context,
-                        &token,
-                        owner,
-                        address(&reserve.a_token)?,
-                        PositionKind::Supply,
-                        original.is_none(),
-                    )
-                    .await?,
+                    state
+                        .context_anchor(
+                            context,
+                            &token,
+                            owner,
+                            address(&reserve.a_token)?,
+                            PositionKind::Supply,
+                            original.is_none(),
+                        )
+                        .await?,
                 );
                 b.debt_anchor = Some(
-                    self.context_anchor(
-                        context,
-                        &token,
-                        owner,
-                        address(&reserve.variable_debt_token)?,
-                        PositionKind::VariableDebt,
-                        original.is_none(),
-                    )
-                    .await?,
+                    state
+                        .context_anchor(
+                            context,
+                            &token,
+                            owner,
+                            address(&reserve.variable_debt_token)?,
+                            PositionKind::VariableDebt,
+                            original.is_none(),
+                        )
+                        .await?,
                 );
                 if original.is_none() {
                     let relevant = match operation {
@@ -1079,7 +1124,8 @@ impl EthereumAdapter {
                         .scaled_receipt
                         .as_ref()
                         == Some(&quantity(
-                            self.runtime
+                            state
+                                .runtime
                                 .call(
                                     address(&reserve.a_token)?,
                                     &AToken::scaledBalanceOfCall { user: owner },
@@ -1096,8 +1142,9 @@ impl EthereumAdapter {
                     "POSITION_PRINCIPAL_CHANGED",
                     "Current scaled principal differs from broker-proved prior anchor.",
                 )?;
-                let supply_position = position(&self.aave()?.pool, &token.reference, "supply");
-                let debt_position = position(&self.aave()?.pool, &token.reference, "variable-debt");
+                let supply_position = position(&state.aave()?.pool, &token.reference, "supply");
+                let debt_position =
+                    position(&state.aave()?.pool, &token.reference, "variable-debt");
                 match operation {
                     "aave.supply" => {
                         require(
@@ -1113,7 +1160,7 @@ impl EthereumAdapter {
                         )?;
                         require(
                             {
-                                let allowance = self.allowance(&token, owner, pool, None).await?;
+                                let allowance = state.allowance(&token, owner, pool, None).await?;
                                 allowance >= qty && allowance < U256::MAX
                             },
                             "ALLOWANCE_INSUFFICIENT",
@@ -1121,15 +1168,17 @@ impl EthereumAdapter {
                         )?;
                         let a_token = address(&reserve.a_token)?;
                         require(
-                            self.runtime
+                            state
+                                .runtime
                                 .call(a_token, &AToken::ATOKEN_REVISIONCall {}, None)
                                 .await?
-                                == self.supply_revision(),
+                                == state.supply_revision(),
                             "ATOKEN_REVISION_UNSUPPORTED",
                             "Exact supply backing proof supports the selected reviewed aToken revision.",
                         )?;
                         b.scaled_before = Some(quantity(
-                            self.runtime
+                            state
+                                .runtime
                                 .call(a_token, &AToken::scaledBalanceOfCall { user: owner }, None)
                                 .await?,
                         ));
@@ -1183,7 +1232,8 @@ impl EthereumAdapter {
                             .await?;
                         let rounding_limit = aave::math::borrow_rounding_limit(debt_index)?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
-                        self.aave_borrow_restrictions(owner, &token, add(qty, rounding_limit)?)
+                        state
+                            .aave_borrow_restrictions(owner, &token, add(qty, rounding_limit)?)
                             .await?;
                         let (collateral_base, debt, projected) = self
                             .aave_health_projection(
@@ -1194,7 +1244,7 @@ impl EthereumAdapter {
                                 add(qty, rounding_limit)?,
                             )
                             .await?;
-                        self.aave_debt_limits(&r, collateral_base, debt)?;
+                        state.aave_debt_limits(&r, collateral_base, debt)?;
                         let added = debt.saturating_sub(account.totalDebtBase);
                         let minimum = exact(r.min_health_factor.as_deref().expect("schema"), 18)?;
                         require(
@@ -1242,7 +1292,7 @@ impl EthereumAdapter {
                             "NO_VARIABLE_DEBT",
                             "No variable debt exists for this reserve.",
                         )?;
-                        let allowance = self.allowance(&token, owner, pool, None).await?;
+                        let allowance = state.allowance(&token, owner, pool, None).await?;
                         require(
                             allowance < U256::MAX
                                 && allowance >= if repay_all { debt } else { qty },
@@ -1307,13 +1357,14 @@ impl EthereumAdapter {
                             None
                         };
                         if user.collateral_enabled {
-                            self.aave_removal_risk(
-                                owner,
-                                &token,
-                                Some(if withdraw_all { claim } else { qty }),
-                                r.min_health_factor.as_deref(),
-                            )
-                            .await?;
+                            state
+                                .aave_removal_risk(
+                                    owner,
+                                    &token,
+                                    Some(if withdraw_all { claim } else { qty }),
+                                    r.min_health_factor.as_deref(),
+                                )
+                                .await?;
                         }
                         let recipient = address(r.recipient.as_deref().expect("schema"))?;
                         require(
@@ -1345,7 +1396,7 @@ impl EthereumAdapter {
                             }),
                         });
                         intent.expected.push(EffectConstraint::Credit {
-                            to: super::resource(self.config.chain_id, recipient),
+                            to: super::resource(state.config.chain_id, recipient),
                             asset: principal_asset.clone(),
                             minimum_credit: quantity(minimum),
                         });
@@ -1364,18 +1415,19 @@ impl EthereumAdapter {
                             "Reserve is ineligible for collateral use.",
                         )?;
                         if !enabled && user.collateral_enabled {
-                            self.aave_removal_risk(
-                                owner,
-                                &token,
-                                None,
-                                r.min_health_factor.as_deref(),
-                            )
-                            .await?;
+                            state
+                                .aave_removal_risk(
+                                    owner,
+                                    &token,
+                                    None,
+                                    r.min_health_factor.as_deref(),
+                                )
+                                .await?;
                         }
                         b.enabled = Some(enabled);
                         intent.expected.push(EffectConstraint::Authority {
                             resource: resource.clone(),
-                            authority: collateral(&self.aave()?.pool, &token.reference),
+                            authority: collateral(&state.aave()?.pool, &token.reference),
                             before: user.collateral_enabled.to_string(),
                             after: enabled.to_string(),
                         });
@@ -1467,9 +1519,24 @@ impl EthereumAdapter {
                 | "aave.repay"
         ) {
             require(
-                self.balance_of(&token, owner, None).await? >= qty,
+                state.balance_of(&token, owner, None).await? >= qty,
                 "INSUFFICIENT_BALANCE",
                 "Exact reserved principal exceeds spendable holdings.",
+            )?;
+        }
+        if let Some((_, block, header)) = &capture {
+            let after = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([gofin_evm::block_tag(Some(*block)), false]),
+                )
+                .await?;
+            require(
+                gofin_evm::rpc_u64(&after["number"])? == *block && after["hash"] == header["hash"],
+                "AAVE_READ_CHANGED",
+                "Preparation block became noncanonical.",
             )?;
         }
         let maximum_fee = exact(r.max_fee_eth.as_deref().expect("schema"), 18)?;

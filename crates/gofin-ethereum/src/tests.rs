@@ -8845,3 +8845,6 @@ async fn native_transfer_prepares_and_revalidates_without_usd_price() {
     let refreshed = adapter.revalidate(&prepared).await.unwrap();
     assert!(refreshed.valuation.is_none());
 }
+
+#[path = "aave_read_measurement.rs"]
+mod aave_read_measurement;

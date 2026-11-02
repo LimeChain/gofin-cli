@@ -17,6 +17,8 @@ pub(crate) struct SnapshotRpc {
     tag: String,
     permits: Semaphore,
     reads: Mutex<BTreeMap<String, ReadCell>>,
+    pin_latest: bool,
+    block: u64,
 }
 impl SnapshotRpc {
     pub(crate) fn new(inner: Arc<dyn EvmRpc>, block: u64, limit: usize) -> Self {
@@ -25,7 +27,14 @@ impl SnapshotRpc {
             tag: block_tag(Some(block)),
             permits: Semaphore::new(limit),
             reads: Mutex::new(BTreeMap::new()),
+            pin_latest: false,
+            block,
         }
+    }
+    pub(crate) fn preparation(inner: Arc<dyn EvmRpc>, block: u64) -> Self {
+        let mut rpc = Self::new(inner, block, SNAPSHOT_CONCURRENCY);
+        rpc.pin_latest = true;
+        rpc
     }
     fn pinned(&self, method: &str, params: &Value) -> bool {
         let index = match method {
@@ -63,6 +72,17 @@ impl EvmRpc for SnapshotRpc {
             "SNAPSHOT_READ_ONLY",
             "A snapshot can only call reviewed read methods.",
         )?;
+        let mut params = params;
+        if self.pin_latest {
+            if method == "eth_blockNumber" {
+                return Ok(json!(format!("{:#x}", self.block)));
+            }
+            if matches!(method, "eth_call" | "eth_getCode" | "eth_getBalance")
+                && params[1] == "latest"
+            {
+                params[1] = json!(self.tag);
+            }
+        }
         if !self.pinned(method, &params) {
             return self.fetch(method, params).await;
         }
@@ -599,6 +619,30 @@ mod tests {
             tokio::task::yield_now().await;
             Ok(json!("0x0"))
         }
+    }
+    #[tokio::test]
+    async fn preparation_cache_pins_latest_but_never_aliases_historical_or_pending_reads() {
+        let probe = Arc::new(ReadProbe::default());
+        let first = SnapshotRpc::preparation(probe.clone(), 20);
+        for tag in ["latest", "0x14", "0x13", "0x13", "pending", "pending"] {
+            first
+                .request(
+                    "eth_getBalance",
+                    json!(["0x0000000000000000000000000000000000000001", tag]),
+                )
+                .await
+                .unwrap();
+        }
+        // One current-block request, two historical requests, two pending requests.
+        assert_eq!(probe.0.load(Ordering::SeqCst), 5);
+        let next = SnapshotRpc::preparation(probe.clone(), 20);
+        next.request(
+            "eth_getBalance",
+            json!(["0x0000000000000000000000000000000000000001", "latest"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe.0.load(Ordering::SeqCst), 6);
     }
     #[tokio::test]
     async fn snapshot_cache_coalesces_only_exact_pinned_reads_and_rejects_writes_before_transport()

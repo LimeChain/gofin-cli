@@ -1174,3 +1174,321 @@ async fn retired_exact_supply_plan_is_rejected_before_dispatch() {
             .any(|method| method == "eth_sendRawTransaction")
     );
 }
+
+#[tokio::test]
+async fn supply_preparation_rpc_measurement() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let input = aave_input("aave.supply");
+    let first = a.prepare("aave.supply", &input).await.unwrap();
+    let cold = rpc.calls.lock().unwrap().len();
+    rpc.calls.lock().unwrap().clear();
+    a.prepare("aave.supply", &input).await.unwrap();
+    let warm = rpc.calls.lock().unwrap().len();
+    rpc.calls.lock().unwrap().clear();
+    a.revalidate(&first).await.unwrap();
+    let revalidate = rpc.calls.lock().unwrap().len();
+    let next = rpc.states.lock().unwrap().get(&20).unwrap().clone();
+    rpc.states.lock().unwrap().insert(21, next);
+    rpc.latest.store(21, std::sync::atomic::Ordering::SeqCst);
+    rpc.calls.lock().unwrap().clear();
+    a.revalidate(&first).await.unwrap();
+    let historical = rpc.calls.lock().unwrap().len();
+    eprintln!(
+        "supply downstream logical RPC calls: cold={cold}, warm={warm}, revalidate={revalidate}, historical_revalidate={historical}"
+    );
+}
+
+#[tokio::test]
+async fn supply_revalidation_observes_new_allowance_balance_and_reserve_state() {
+    for changed in ["allowance", "balance", "paused"] {
+        let rpc = Arc::new(Fixture::new());
+        let a = adapter(rpc.clone());
+        let prepared = a
+            .prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap();
+        match changed {
+            "allowance" => *rpc.allowance.lock().unwrap() = U256::ZERO,
+            "balance" => *rpc.cash_override.lock().unwrap() = Some(U256::ZERO),
+            "paused" => *rpc.paused.lock().unwrap() = true,
+            _ => unreachable!(),
+        }
+        let error = a.revalidate(&prepared).await.unwrap_err();
+        assert_eq!(
+            error.code,
+            match changed {
+                "allowance" => "ALLOWANCE_INSUFFICIENT",
+                "balance" => "INSUFFICIENT_BALANCE",
+                "paused" => "RESERVE_UNAVAILABLE",
+                _ => unreachable!(),
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn supply_preparation_rejects_reorg_after_observations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Reorg {
+        inner: Arc<Fixture>,
+        headers: AtomicUsize,
+    }
+    #[async_trait]
+    impl EvmRpc for Reorg {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let mut result = self.inner.request(method, params).await?;
+            if method == "eth_getBlockByNumber" && self.headers.fetch_add(1, Ordering::SeqCst) >= 2
+            {
+                result["hash"] = json!(format!("0x{}", "ff".repeat(32)));
+            }
+            Ok(result)
+        }
+    }
+    let rpc = Arc::new(Fixture::new());
+    let mut a = adapter(rpc.clone());
+    a.runtime = Arc::new(EvmRuntime::new(
+        Arc::new(Reorg {
+            inner: rpc,
+            headers: AtomicUsize::new(0),
+        }),
+        a.config.chain_id,
+        None,
+    ));
+    assert_eq!(
+        a.prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_READ_CHANGED"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supply_preparation_http_rpc_measurement() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Counted {
+        inner: gofin_evm::HttpRpc,
+        logical: AtomicUsize,
+    }
+    #[async_trait]
+    impl EvmRpc for Counted {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.logical.fetch_add(1, Ordering::SeqCst);
+            self.inner.request(method, params).await
+        }
+    }
+    let fixture = Arc::new(Fixture::new());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let worker_fixture = fixture.clone();
+    let handle = tokio::runtime::Handle::current();
+    let worker = std::thread::spawn(move || {
+        while !worker_stop.load(Ordering::Relaxed) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let (body_start, length) = loop {
+                let mut buffer = [0u8; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < body_start + length {
+                let mut buffer = [0u8; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            let request: Value =
+                serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
+            let result = handle
+                .block_on(worker_fixture.request(
+                    request["method"].as_str().unwrap(),
+                    request["params"].clone(),
+                ))
+                .unwrap();
+            let body = json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
+    let counted = Arc::new(Counted {
+        inner: gofin_evm::HttpRpc::isolated_localhost(url.clone(), 1).unwrap(),
+        logical: AtomicUsize::new(0),
+    });
+    let mut a = adapter(fixture.clone());
+    a.runtime = Arc::new(EvmRuntime::new(counted.clone(), 1, None));
+    let input = aave_input("aave.supply");
+    let first = a.prepare("aave.supply", &input).await.unwrap();
+    let cold = (
+        counted.logical.swap(0, Ordering::SeqCst),
+        fixture.calls.lock().unwrap().len(),
+    );
+    fixture.calls.lock().unwrap().clear();
+    a.prepare("aave.supply", &input).await.unwrap();
+    let warm = (
+        counted.logical.swap(0, Ordering::SeqCst),
+        fixture.calls.lock().unwrap().len(),
+    );
+    fixture.calls.lock().unwrap().clear();
+    a.revalidate(&first).await.unwrap();
+    let revalidate = (
+        counted.logical.swap(0, Ordering::SeqCst),
+        fixture.calls.lock().unwrap().len(),
+    );
+    let next = fixture.states.lock().unwrap().get(&20).unwrap().clone();
+    fixture.states.lock().unwrap().insert(21, next);
+    fixture.latest.store(21, Ordering::SeqCst);
+    fixture.calls.lock().unwrap().clear();
+    a.revalidate(&first).await.unwrap();
+    let historical = (
+        counted.logical.load(Ordering::SeqCst),
+        fixture.calls.lock().unwrap().len(),
+    );
+    fixture.latest.store(20, Ordering::SeqCst);
+    fixture.states.lock().unwrap().insert(
+        19,
+        AtBlock {
+            income: ray(),
+            debt_index: ray(),
+            ..Default::default()
+        },
+    );
+    for operation in ["aave.reserves", "aave.positions"] {
+        for scoped in [true, false] {
+            let counted = Arc::new(Counted {
+                inner: gofin_evm::HttpRpc::isolated_localhost(url.clone(), 1).unwrap(),
+                logical: AtomicUsize::new(0),
+            });
+            let mut a = adapter(fixture.clone());
+            a.runtime = Arc::new(EvmRuntime::new(counted.clone(), 1, None));
+            let mut input = json!({"wallet":"synthetic", "network":"evm", "chain_id":1});
+            if scoped {
+                input["tokens"] = json!([lower_address(addr(101))]);
+            }
+            let mut counts = Vec::new();
+            for historical in [false, false, true] {
+                if historical {
+                    input["block_number"] = json!(19);
+                }
+                fixture.calls.lock().unwrap().clear();
+                counted.logical.store(0, Ordering::SeqCst);
+                a.read(operation, &input).await.unwrap();
+                counts.push((
+                    counted.logical.load(Ordering::SeqCst),
+                    fixture.calls.lock().unwrap().len(),
+                ));
+            }
+            let expected = match (operation, scoped) {
+                ("aave.reserves", true) => vec![(34, 36), (34, 34), (33, 33)],
+                ("aave.reserves", false) => vec![(47, 49), (47, 47), (46, 46)],
+                ("aave.positions", true) => vec![(42, 44), (42, 42), (41, 41)],
+                ("aave.positions", false) => vec![(58, 60), (58, 58), (57, 57)],
+                _ => unreachable!(),
+            };
+            assert_eq!(counts, expected);
+            eprintln!("{operation} scoped={scoped} HTTP fixture (logical, physical): {counts:?}");
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+    assert_eq!(cold, (73, 75));
+    assert_eq!(warm, (73, 73));
+    assert_eq!(revalidate, (72, 72));
+    assert_eq!(historical, (78, 79));
+    eprintln!(
+        "supply HTTP fixture (logical, physical): cold={cold:?}, warm={warm:?}, revalidate={revalidate:?}, historical={historical:?}"
+    );
+}
+
+#[tokio::test]
+async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct MovingHead {
+        inner: Arc<Fixture>,
+        moved: AtomicBool,
+    }
+    #[async_trait]
+    impl EvmRpc for MovingHead {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_call" && !self.moved.swap(true, Ordering::SeqCst) {
+                self.inner.latest.store(21, Ordering::SeqCst);
+            }
+            self.inner.request(method, params).await
+        }
+    }
+    let rpc = Arc::new(Fixture::new());
+    let next = rpc.states.lock().unwrap().get(&20).unwrap().clone();
+    rpc.states.lock().unwrap().insert(21, next);
+    let mut a = adapter(rpc.clone());
+    a.runtime = Arc::new(EvmRuntime::new(
+        Arc::new(MovingHead {
+            inner: rpc.clone(),
+            moved: AtomicBool::new(false),
+        }),
+        1,
+        None,
+    ));
+    let first = a
+        .prepare("aave.supply", &aave_input("aave.supply"))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.binding["supply_anchor"]["evidence"]["block"],
+        json!(20)
+    );
+    let config_selector = hex_bytes(&DataProvider::getReserveConfigurationDataCall::SELECTOR);
+    let scaled_selector = hex_bytes(&AToken::scaledBalanceOfCall::SELECTOR);
+    {
+        let calls = rpc.call_requests.lock().unwrap();
+        for selector in [&config_selector, &scaled_selector] {
+            let selected: Vec<_> = calls
+                .iter()
+                .filter(|params| {
+                    params[0]["data"]
+                        .as_str()
+                        .is_some_and(|data| data.starts_with(selector))
+                })
+                .collect();
+            assert!(!selected.is_empty());
+            assert!(selected.iter().all(|params| params[1] == "0x14"));
+        }
+    }
+    rpc.call_requests.lock().unwrap().clear();
+    let refreshed = a.revalidate(&first).await.unwrap();
+    // Original evidence remains historical; current reserve is read at the new head.
+    assert_eq!(
+        refreshed.binding["supply_anchor"]["evidence"]["block"],
+        json!(20)
+    );
+    let calls = rpc.call_requests.lock().unwrap();
+    let selector = hex_bytes(&DataProvider::getReserveConfigurationDataCall::SELECTOR);
+    assert!(calls.iter().any(|params| {
+        params[0]["data"]
+            .as_str()
+            .is_some_and(|data| data.starts_with(&selector))
+            && params[1] == "0x15"
+    }));
+}
