@@ -411,7 +411,7 @@ impl KrakenProfile {
             selected + 1,
             account.name
         );
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
 }

@@ -1,8 +1,4 @@
 use async_trait::async_trait;
-use gofin_domain::financial_plans::{
-    FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-    FinancialPlanStepSpec, FinancialStepCompletion,
-};
 use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     Adapter, ApprovalAudit, AssetPrice, AuthorizationChallenge, GoFinError, OperationRequest,
@@ -368,6 +364,10 @@ async fn resting_partial_order_survives_restart_and_settles_only_new_fill_deltas
     });
     let partial = first_engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(partial.status, Status::Pending);
+    assert_eq!(
+        partial.effects.as_ref().unwrap().evidence["outcome_live_order"],
+        true
+    );
     let partial_sequence =
         partial.effects.as_ref().unwrap().evidence["settlement_progress"]["sequence"]
             .as_u64()
@@ -908,7 +908,7 @@ async fn fresh_capacity_revalidation_keeps_bindings_stable_when_still_sufficient
 }
 
 #[tokio::test]
-async fn lower_fresh_usd_quote_keeps_approved_ceiling_and_order_binding() {
+async fn lower_fresh_usd_estimate_preserves_order_binding() {
     let dir = tempfile::tempdir().unwrap();
     let venue = Arc::new(Venue::default());
     let price = Arc::new(AtomicU64::new(1_000_000));
@@ -947,13 +947,13 @@ async fn lower_fresh_usd_quote_keeps_approved_ceiling_and_order_binding() {
             .unwrap()
             .movement_usd_micros
             .as_str(),
-        "20000000",
-        "revalidation must retain the original cent-rounded approved ceiling"
+        "19900000",
+        "revalidation may refresh an advisory USD estimate"
     );
 }
 
 #[tokio::test]
-async fn higher_fresh_usd_quote_fails_before_dispatch() {
+async fn higher_fresh_usd_estimate_does_not_block_native_order() {
     let dir = tempfile::tempdir().unwrap();
     let venue = Arc::new(Venue::default());
     let price = Arc::new(AtomicU64::new(1_000_000));
@@ -980,9 +980,9 @@ async fn higher_fresh_usd_quote_fails_before_dispatch() {
         ))
         .await
         .unwrap();
-    assert_eq!(result.status, Status::Failed, "{result:#?}");
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 0);
-    assert!(result.submission.is_none());
+    assert_eq!(result.status, Status::Pending, "{result:#?}");
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
+    assert!(result.submission.is_some());
 }
 
 #[tokio::test]
@@ -1022,7 +1022,7 @@ async fn usd_ceiling_does_not_allow_position_anchor_changes() {
 }
 
 #[tokio::test]
-async fn newly_approved_ceiling_rounds_up_to_the_next_cent() {
+async fn native_order_usd_estimate_remains_precise() {
     let venue = Arc::new(Venue::default());
     let price = Arc::new(AtomicU64::new(1_000_001));
     let profile = HyperliquidProfile::new(
@@ -1052,8 +1052,8 @@ async fn newly_approved_ceiling_rounds_up_to_the_next_cent() {
             .unwrap()
             .movement_usd_micros
             .as_str(),
-        "20010000",
-        "the $20.00002 movement must be approved at the next cent, $20.01"
+        "20000020",
+        "the optional USD estimate retains its actual precision"
     );
 }
 
@@ -1610,7 +1610,7 @@ async fn matching_fill_with_wrong_side_or_market_cannot_settle() {
 }
 
 #[tokio::test]
-async fn changed_content_for_an_already_proved_fill_keeps_prior_effects_reserved() {
+async fn changed_content_for_an_already_proved_fill_keeps_prior_effects() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tampered-progress.sqlite");
     let venue = Arc::new(Venue::default());
@@ -1639,12 +1639,6 @@ async fn changed_content_for_an_already_proved_fill_keeps_prior_effects_reserved
     let accepted = engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(accepted.status, Status::Pending);
     let accepted_effects = accepted.effects.clone().unwrap();
-    let accepted_reservations = Store::open(&path)
-        .unwrap()
-        .reservations(&submitted.id)
-        .unwrap();
-    assert!(!accepted_reservations.is_empty());
-
     // The event identity is unchanged (same oid/tid/hash), but the venue row
     // now claims a different quantity. It cannot rewrite accepted progress.
     venue.fills.lock().unwrap()[0]["sz"] = json!("0.8");
@@ -1654,14 +1648,6 @@ async fn changed_content_for_an_already_proved_fill_keeps_prior_effects_reserved
     let tampered = engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(tampered.status, Status::Unknown);
     assert_eq!(tampered.effects.as_ref(), Some(&accepted_effects));
-    assert_eq!(
-        Store::open(&path)
-            .unwrap()
-            .reservations(&submitted.id)
-            .unwrap(),
-        accepted_reservations,
-        "tampered later evidence must retain the previously accepted reservation state"
-    );
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
 }
 
@@ -1682,197 +1668,6 @@ async fn confirmed_cancel_without_fills_is_failed_not_a_fabricated_fill() {
     let failed = engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(failed.status, Status::Failed);
     assert!(failed.effects.as_ref().unwrap().effects.is_empty());
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn exact_plan_orders_are_sequenced_and_revocation_still_allows_pending_reconciliation() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("plan.sqlite");
-    let venue = Arc::new(Venue::default());
-    let engine = engine(&path, venue.clone()).await;
-    let first_input = input("plan-order-1", "spot", "ETH/USDC", "1", "10");
-    let second_input = input("plan-order-2", "spot", "ETH/USDC", "1", "10");
-    let prepared = engine
-        .preview("hyperliquid.orders.place", &first_input)
-        .await
-        .unwrap();
-    let mut aggregate_debits = prepared.intent.debits.clone();
-    for debit in &mut aggregate_debits {
-        debit.amount.atoms = debit.amount.atoms.checked_add(&debit.amount.atoms).unwrap();
-    }
-    let exact_costs = prepared.intent.maximum_costs.clone();
-    let mut aggregate_costs = exact_costs.clone();
-    for cost in &mut aggregate_costs {
-        cost.amount.atoms = cost.amount.atoms.checked_add(&cost.amount.atoms).unwrap();
-    }
-    let possible_credits: Vec<_> = prepared
-        .intent
-        .expected
-        .iter()
-        .filter_map(|expected| match expected {
-            gofin_domain::EffectConstraint::Conversion {
-                resource, output, ..
-            } => Some(
-                gofin_domain::financial_plans::FinancialPlanFundingIdentity {
-                    resource: resource.clone(),
-                    asset: output.clone(),
-                },
-            ),
-            _ => None,
-        })
-        .collect();
-    let exact_scope = json!({
-        "mode":"exact",
-        "maximum_debits":prepared.intent.debits,
-        "maximum_costs":exact_costs,
-        "possible_credits":possible_credits
-    });
-    let step = |step_id: &str, input: Value| FinancialPlanStepSpec {
-        action_deadline_seconds: None,
-        step_id: step_id.into(),
-        operation: "hyperliquid.orders.place".into(),
-        input,
-        permitted_variations: exact_scope.clone(),
-        completion: FinancialStepCompletion {
-            principal_spend: None,
-            minimum_net_receipt: None,
-            operation_succeeded: true,
-        },
-        funding_dependencies: vec![],
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "two bounded synthetic orders".into(),
-        summary: None,
-        steps: vec![
-            step("first", first_input.clone()),
-            step("second", second_input.clone()),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: aggregate_debits,
-            maximum_costs: aggregate_costs,
-        },
-    };
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "plan-authorization".into(),
-        plan,
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let mut automatic = authorization.clone();
-    automatic.valid_for_seconds = None;
-    assert_eq!(
-        engine
-            .preview_financial_plan(automatic.clone())
-            .await
-            .unwrap_err()
-            .code,
-        "PLAN_DURATION_REQUIRED",
-        "resting orders need an explicit horizon"
-    );
-    for step in &mut automatic.plan.steps {
-        step.input["time_in_force"] = json!("ioc");
-    }
-    assert_eq!(
-        engine
-            .preview_financial_plan(automatic)
-            .await
-            .unwrap()
-            .valid_for_seconds,
-        900,
-        "two immediate trades plus minimum headroom"
-    );
-    let mut longer = authorization.clone();
-    longer.valid_for_seconds = Some(3600);
-    assert_eq!(
-        engine
-            .preview_financial_plan(longer)
-            .await
-            .unwrap()
-            .valid_for_seconds,
-        3600,
-        "explicit resting-order horizon remains authoritative"
-    );
-    authorization.expected_review_hash = Some(
-        engine
-            .preview_financial_plan(authorization.clone())
-            .await
-            .unwrap()
-            .review_hash,
-    );
-    let approved = engine
-        .authorize_financial_plan(authorization)
-        .await
-        .unwrap();
-    let first = engine
-        .execute_financial_plan_step(
-            &approved.plan_id,
-            "first",
-            OperationRequest {
-                request_id: "plan-first-attempt".into(),
-                operation: "hyperliquid.orders.place".into(),
-                input: first_input,
-                run_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.status, Status::Pending);
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
-
-    let second = engine
-        .execute_financial_plan_step(
-            &approved.plan_id,
-            "second",
-            OperationRequest {
-                request_id: "plan-second-too-early".into(),
-                operation: "hyperliquid.orders.place".into(),
-                input: second_input,
-                run_id: None,
-            },
-        )
-        .await;
-    assert!(
-        second.is_err(),
-        "the next exact plan step waits for verified completion"
-    );
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
-
-    engine
-        .revoke_financial_plan(&approved.plan_id)
-        .await
-        .unwrap();
-    let oid = venue.orders.lock().unwrap().values().next().unwrap()["order"]["order"]["oid"]
-        .as_u64()
-        .unwrap();
-    venue
-        .fills
-        .lock()
-        .unwrap()
-        .push(fill(oid, 41, "@0", "B", "1", "10"));
-    venue.orders.lock().unwrap().values_mut().for_each(|row| {
-        row["order"]["order"]["sz"] = json!("0");
-        row["order"]["status"] = json!("filled");
-    });
-    let reconciled = engine.status(&first.id, true).await.unwrap();
-    assert_eq!(reconciled.status, Status::Completed);
-    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
-
-    let after_revoke = engine
-        .execute_financial_plan_step(
-            &approved.plan_id,
-            "second",
-            OperationRequest {
-                request_id: "plan-second-after-revoke".into(),
-                operation: "hyperliquid.orders.place".into(),
-                input: input("plan-order-2", "spot", "ETH/USDC", "1", "10"),
-                run_id: None,
-            },
-        )
-        .await;
-    assert!(after_revoke.is_err());
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
 }
 
@@ -2015,13 +1810,21 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
         let reconciled = resumed.status(&submitted.id, true).await.unwrap();
         assert_eq!(
             reconciled.status,
-            if completes {
-                Status::Completed
-            } else {
-                Status::Pending
-            },
+            Status::Completed,
             "{side} {fill_price} fee={fee}: {reconciled:#?}"
         );
+        let attention = reconciled
+            .last_reconciliation_evidence
+            .as_ref()
+            .and_then(|v| v.get("outcome_attention"));
+        if completes {
+            assert!(
+                attention.is_none(),
+                "favorable price remains within directional bounds"
+            );
+        } else {
+            assert_eq!(attention.unwrap()["kind"], "discrepancy");
+        }
         let retried = resumed.execute(request).await.unwrap();
         assert_eq!(retried.id, submitted.id);
         assert_eq!(
@@ -2033,7 +1836,7 @@ async fn improved_close_fills_settle_after_restart_and_keep_notional_and_fee_lim
 }
 
 #[tokio::test]
-async fn spot_orders_preserve_two_sided_price_and_fee_valuation_contract() {
+async fn spot_orders_report_filled_price_outside_approved_native_bounds() {
     let dir = tempfile::tempdir().unwrap();
     let venue = Arc::new(Venue::default());
     let engine = engine(&dir.path().join("spot-compatibility.sqlite"), venue.clone()).await;
@@ -2065,13 +1868,38 @@ async fn spot_orders_preserve_two_sided_price_and_fee_valuation_contract() {
         row["order"]["status"] = json!("filled");
     }
     let reconciled = engine.status(&submitted.id, true).await.unwrap();
-    assert_eq!(reconciled.status, Status::Pending);
-    assert!(
-        reconciled
-            .error
-            .unwrap()
-            .message
-            .contains("outside the approved bounds")
+    assert_eq!(reconciled.status, Status::Completed);
+    assert_eq!(
+        engine.operation_view(&reconciled).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
     );
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
+}
+
+struct UnavailablePrices;
+#[async_trait]
+impl HyperliquidPrices for UnavailablePrices {
+    async fn usdc_price(&self) -> Result<AssetPrice, GoFinError> {
+        Err(GoFinError::validation("Synthetic price outage"))
+    }
+}
+
+#[tokio::test]
+async fn native_order_dispatches_when_usd_estimate_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = Arc::new(Venue::default());
+    let engine = engine_with(
+        &dir.path().join("orders.sqlite"),
+        venue.clone(),
+        Arc::new(UnavailablePrices),
+        Arc::new(Approval),
+    )
+    .await;
+    let result = engine
+        .execute(request("no-usd", "perpetual", "BTC/USDC:USDC", "1", "10"))
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Pending, "{result:?}");
+    assert!(result.preview.unwrap().valuation.is_none());
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
 }

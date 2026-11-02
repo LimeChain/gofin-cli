@@ -114,18 +114,13 @@ async fn tiny_deposit_price_drift_keeps_original_inner_and_outer_authority() {
     let approved = adapter.prepare("kraken.deposit", &input).await.unwrap();
     let inner = decode_binding(&approved.binding).unwrap().inner;
     let key = gofin_domain::value_bounds::KEY;
-    assert_eq!(approved.binding[key]["movement_usd_micros"], "100980000");
-    assert_eq!(inner.binding[key]["movement_usd_micros"], "100980000");
-    assert!(approved.summary.contains("1% pricing buffer"));
-    assert_eq!(inner.summary.matches("USD ceilings:").count(), 1);
+    assert!(approved.binding.get(key).is_none());
+    assert!(inner.binding.get(key).is_none());
     prices.usdc_micros.store(999_804, Ordering::SeqCst);
     let refreshed = adapter.revalidate(&approved).await.unwrap();
     assert_eq!(refreshed.binding, approved.binding);
     assert_eq!(refreshed.intent, approved.intent);
-    assert_eq!(
-        refreshed.valuation.as_ref().unwrap().movement_usd_micros,
-        approved.valuation.as_ref().unwrap().movement_usd_micros
-    );
+    assert_ne!(refreshed.valuation.as_ref().unwrap().movement_usd_micros, approved.valuation.as_ref().unwrap().movement_usd_micros);
     assert!(venue.rpc.submitted_hash.lock().unwrap().is_none());
 }
 #[tokio::test]
@@ -133,6 +128,10 @@ async fn legacy_deposit_ceiling_is_not_widened_and_actual_buffer_excess_still_re
     let (adapter, _, prices, input) = fixture();
     let approved = adapter.prepare("kraken.deposit", &input).await.unwrap();
     let mut legacy = approved.clone();
+    let mut inner = decode_binding(&legacy.binding).unwrap();
+    gofin_domain::value_bounds::bind(&mut inner.inner);
+    legacy.binding = serde_json::to_value(&inner).unwrap();
+    gofin_domain::value_bounds::bind(&mut legacy);
     let key = gofin_domain::value_bounds::KEY;
     legacy.binding[key]["movement_usd_micros"] = json!("99980000");
     legacy.valuation.as_mut().unwrap().movement_usd_micros = Quantity::from_u64(99_980_000);
@@ -152,15 +151,16 @@ async fn legacy_deposit_ceiling_is_not_widened_and_actual_buffer_excess_still_re
     );
     assert_eq!(legacy, original);
     prices.usdc_micros.store(1_020_000, Ordering::SeqCst);
-    assert_eq!(
-        adapter.revalidate(&approved).await.unwrap_err().code,
-        "VALUE_BOUND_EXCEEDED"
-    );
+    assert!(adapter.revalidate(&approved).await.is_ok());
 }
 #[tokio::test]
 async fn legacy_outer_deposit_ceiling_is_not_widened_with_buffered_inner() {
     let (adapter, venue, prices, input) = fixture();
     let mut legacy = adapter.prepare("kraken.deposit", &input).await.unwrap();
+    let mut inner = decode_binding(&legacy.binding).unwrap();
+    gofin_domain::value_bounds::bind_with_price_buffer(&mut inner.inner).unwrap();
+    legacy.binding = serde_json::to_value(&inner).unwrap();
+    gofin_domain::value_bounds::bind(&mut legacy);
     let key = gofin_domain::value_bounds::KEY;
     assert_eq!(
         legacy.binding["inner"]["binding"][key]["movement_usd_micros"],
@@ -186,7 +186,8 @@ async fn legacy_outer_deposit_ceiling_is_not_widened_with_buffered_inner() {
 #[tokio::test]
 async fn deposit_price_reserve_cannot_authorize_changed_asset_identity() {
     let (adapter, venue, _, input) = fixture();
-    let approved = adapter.prepare("kraken.deposit", &input).await.unwrap();
+    let mut approved = adapter.prepare("kraken.deposit", &input).await.unwrap();
+    gofin_domain::value_bounds::bind(&mut approved);
     venue.wrong_network.store(true, Ordering::SeqCst);
     // The synthetic USDC route fixes its network, so assert the independent
     // original price identity guard directly on this real prepared candidate.

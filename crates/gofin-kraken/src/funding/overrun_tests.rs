@@ -25,6 +25,8 @@ struct Venue {
     writes: AtomicUsize,
     ambiguous: AtomicBool,
     bounded_fees: AtomicBool,
+    preparations: AtomicUsize,
+    admission_change: AtomicUsize,
 }
 fn address() -> Value {
     json!({"crypto":{"address":"0x1111111111111111111111111111111111111111"}})
@@ -55,6 +57,8 @@ impl Venue {
             writes: AtomicUsize::new(0),
             ambiguous: AtomicBool::new(false),
             bounded_fees: AtomicBool::new(false),
+            preparations: AtomicUsize::new(0),
+            admission_change: AtomicUsize::new(0),
         })
     }
     fn active(&self) -> bool {
@@ -148,8 +152,9 @@ impl KrakenTransport for Venue {
         } else {
             "0.101"
         };
-        let data = match e {
+        let mut data = match e {
             E::KrakenPrivatePostGetApiKeyInfo => {
+                self.preparations.fetch_add(1, Ordering::SeqCst);
                 json!({"result":{"permissions":["query-funds","query-ledger","earn-funds","withdraw-funds","add-funds"]}})
             }
             E::KrakenPublicGetAssets => {
@@ -220,6 +225,19 @@ impl KrakenTransport for Venue {
             }
             _ => panic!("Unexpected synthetic native funding request {e:?}"),
         };
+        if self.preparations.load(Ordering::SeqCst) > 1 {
+            match (self.admission_change.load(Ordering::SeqCst), e) {
+                (1, E::KrakenFundingGetFundingV1FeesMethodId) => {
+                    data["fee"]["amount"] = json!("0.002");
+                    data["net_amount"]["amount"] = json!("0.099");
+                }
+                (2, E::KrakenFundingGetFundingV1Addresses) => {
+                    data["addresses"][0]["address_details"]["crypto"]["address"] =
+                        json!("0x2222222222222222222222222222222222222222");
+                }
+                _ => {}
+            }
+        }
         Ok(KrakenResponse::Json(data))
     }
 }
@@ -322,42 +340,31 @@ async fn funding_setup_earn_and_withdrawal_overruns_persist_exact_cost_without_r
         let req = request(family);
         let original_input = req.input.clone();
         let result = running.execute(req).await.unwrap();
+        let expected = match family {
+            Family::Claim | Family::Allocate | Family::Deallocate => Status::Completed,
+            Family::Legacy | Family::Current | Family::Separate => Status::Completed,
+            Family::Failed => Status::Failed,
+            Family::Joint => unreachable!(),
+        };
         assert_eq!(
-            result.status,
-            Status::Unknown,
+            result.status, expected,
             "family={family:?}, {:?}",
             result.error
         );
-        assert!(result.effects.is_none());
         assert_eq!(result.preview.as_ref().unwrap().input, original_input);
-        let store = gofin_store::Store::open(&path).unwrap();
-        assert_eq!(
-            store.unresolved_consumption_usd(&result.id).unwrap(),
-            Some("2000000".into())
-        );
-        assert!(store.reservation_count(&result.id).unwrap() > 0);
-        let proof = store
-            .unresolved_consumption_proof(&result.id)
-            .unwrap()
-            .unwrap();
+        let proof = result.effects.as_ref().expect("correlated native effects");
         assert_eq!(proof.submission, result.submission.clone().unwrap());
-        assert_eq!(proof.costs.len(), 1);
-        assert!(
-            matches!(&proof.costs[0],FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.002")
+        assert!(proof.effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.002")));
+        assert!(proof.evidence.is_object());
+        assert_eq!(
+            running.operation_view(&result).unwrap()["outcome"]["attention"]["kind"],
+            "discrepancy"
         );
-        assert_eq!(proof.evidence["proofEvents"].as_array().unwrap().len(), 1);
-        drop(store);
         drop(running);
         let restarted = engine(&path, venue.clone());
         let duplicate = restarted.status(&result.id, true).await.unwrap();
-        assert_eq!(duplicate.status, Status::Unknown);
-        assert!(duplicate.effects.is_none());
-        let store = gofin_store::Store::open(&path).unwrap();
-        assert_eq!(
-            store.unresolved_consumption_usd(&result.id).unwrap(),
-            Some("2000000".into())
-        );
-        assert!(store.reservation_count(&result.id).unwrap() > 0);
+        assert_eq!(duplicate.status, expected);
+        assert!(duplicate.effects.is_some());
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     }
 }
@@ -402,38 +409,26 @@ async fn earn_joint_only_cap_violation_retains_zero_extra_watermark_and_both_pro
     let venue = Venue::new(Family::Joint);
     let running = engine(&path, venue.clone());
     let result = running.execute(request(Family::Joint)).await.unwrap();
-    assert_eq!(result.status, Status::Unknown, "{:?}", result.error);
-    assert!(result.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
+    assert_eq!(result.status, Status::Completed, "{:?}", result.error);
+    let proof = result.effects.as_ref().expect("correlated earn effects");
+    let costs: Vec<_> = proof
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect, FinancialEffect::Cost { .. }))
+        .collect();
+    assert_eq!(costs.len(), 2);
+    assert!(costs.iter().all(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.00075")));
     assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("0".into())
+        running.operation_view(&result).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
     );
-    let proof = store
-        .unresolved_consumption_proof(&result.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        proof.reason,
-        gofin_domain::unresolved_consumption::ConsumptionReason::ProvenUnsettledCost
-    );
-    assert_eq!(proof.costs.len(), 2);
-    assert!(proof.costs.iter().all(|effect|matches!(effect,FinancialEffect::Cost{amount,..}if amount.atoms.to_decimal(36)=="0.00075")));
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
-    drop(store);
     drop(running);
     let recovered = engine(&path, venue.clone())
         .status(&result.id, true)
         .await
         .unwrap();
-    assert_eq!(recovered.status, Status::Unknown);
-    assert!(recovered.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&result.id).unwrap(),
-        Some("0".into())
-    );
-    assert!(store.reservation_count(&result.id).unwrap() > 0);
+    assert_eq!(recovered.status, Status::Completed);
+    assert!(recovered.effects.is_some());
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
 }
 struct RisingQuotes(AtomicUsize);
@@ -454,7 +449,7 @@ impl gofin_pricing::UsdPriceSource for RisingQuotes {
     }
 }
 #[tokio::test]
-async fn funding_quote_refresh_above_frozen_usd_ceiling_aborts_before_native_dispatch() {
+async fn funding_quote_refresh_does_not_block_native_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let venue = Venue::new(Family::Claim);
     let profile = KrakenProfile::new(KrakenProduct::Spot, vec![account()], venue.clone())
@@ -472,10 +467,9 @@ async fn funding_quote_refresh_above_frozen_usd_ceiling_aborts_before_native_dis
     )
     .unwrap();
     let result = engine.execute(request(Family::Claim)).await.unwrap();
-    assert_eq!(result.status, Status::Failed, "{:?}", result.error);
-    assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
-    assert!(result.submission.is_none());
-    assert_eq!(result.error.as_ref().unwrap().code, "VALUE_BOUND_EXCEEDED");
+    assert_eq!(result.status, Status::Completed, "{:?}", result.error);
+    assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
+    assert!(result.submission.is_some());
 }
 
 #[tokio::test]
@@ -593,99 +587,6 @@ async fn bounded_earn_allocation_and_deallocation_engine_settle_cash_position_an
     }
 }
 #[tokio::test]
-async fn exact_named_earn_deallocation_plan_keeps_declared_gross_movement_and_net_receipt() {
-    use gofin_domain::financial_plans::*;
-    for goal in ["0.09975", "0.1"] {
-        let dir = tempfile::tempdir().unwrap();
-        let venue = Venue::new(Family::Deallocate);
-        venue.bounded_fees.store(true, Ordering::SeqCst);
-        let path = dir.path().join("SYNTHETIC-plan.sqlite3");
-        let running = engine(&path, venue.clone());
-        let req = request(Family::Deallocate);
-        let prepared = running.preview(&req.operation, &req.input).await.unwrap();
-        let asset = prepared.intent.maximum_costs[0].amount.asset.clone();
-        let spec = FinancialPlanSpec {
-            summary: None,
-            version: 1,
-            name: "Synthetic exact Earn deallocation".into(),
-            steps: vec![FinancialPlanStepSpec {
-                step_id: "deallocate".into(),
-                operation: req.operation.clone(),
-                input: req.input.clone(),
-                permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":[{"resource":account().resource,"asset":asset}]}),
-                completion: FinancialStepCompletion {
-                    principal_spend: None,
-                    minimum_net_receipt: Some(ResourceAmount {
-                        resource: account().resource,
-                        amount: Amount {
-                            asset: asset.clone(),
-                            atoms: Quantity::from_decimal(goal, 36).unwrap(),
-                        },
-                    }),
-                    operation_succeeded: true,
-                },
-                funding_dependencies: vec![],
-                action_deadline_seconds: None,
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: prepared.intent.debits.clone(),
-                maximum_costs: prepared.intent.maximum_costs.clone(),
-            },
-        };
-        let consent = running
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "SYNTHETIC-Earn-plan".into(),
-                plan: spec,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            })
-            .await
-            .unwrap();
-        let result = running
-            .execute_financial_plan_step(&consent.plan_id, "deallocate", req.clone())
-            .await
-            .unwrap();
-        assert_eq!(result.status, Status::Completed, "{:?}", result.error);
-        let original_effects = result.effects.clone();
-        let prepared = result.preview.as_ref().unwrap();
-        assert_eq!(prepared.binding[PLAN_METADATA_KEY]["exact_input"], true);
-        assert!(
-            prepared.valuation.as_ref().unwrap().movement_usd_micros
-                >= Quantity::from_u64(200000000)
-        );
-        let status = running
-            .financial_plan_status(&consent.plan_id)
-            .await
-            .unwrap();
-        assert_eq!(status.usage.consumed_costs.len(), 2);
-        assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            status.steps[0].state,
-            if goal == "0.09975" {
-                FinancialPlanStepProgressState::Completed
-            } else {
-                FinancialPlanStepProgressState::Blocked
-            }
-        );
-        drop(running);
-        let restarted = engine(&path, venue.clone());
-        let recovered = restarted.status(&result.id, true).await.unwrap();
-        assert_eq!(recovered.effects, original_effects);
-        let mut second = req;
-        second.request_id = "SYNTHETIC-distinct-second-noncash-attempt".into();
-        assert!(
-            restarted
-                .execute_financial_plan_step(&consent.plan_id, "deallocate", second)
-                .await
-                .is_err(),
-            "completed or substantively spent exact noncash source cannot execute again under this consent"
-        );
-        assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[tokio::test]
 async fn funding_amount_fee_recipient_and_native_quote_token_cannot_retarget_original_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("SYNTHETIC-bound-input.sqlite3");
@@ -695,7 +596,7 @@ async fn funding_amount_fee_recipient_and_native_quote_token_cannot_retarget_ori
     original.input["fee"] =
         json!({"fee_included":true,"quoted_fee":{"token":"SYNTHETIC-quote-original"}});
     let settled = running.execute(original.clone()).await.unwrap();
-    assert_eq!(settled.status, Status::Unknown, "{:?}", settled.error);
+    assert_eq!(settled.status, Status::Completed, "{:?}", settled.error);
     assert_eq!(
         settled.submission.as_ref().unwrap().data["binding"]["parameters"]["fee"]["quoted_fee"]["token"],
         "SYNTHETIC-quote-original"
@@ -779,4 +680,62 @@ async fn current_fixed_net_fee_headroom_is_reserved_and_final_increase_settles_o
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
         assert!(result.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms==Quantity::from_decimal("0.002",36).unwrap())));
     }
+}
+
+#[tokio::test]
+async fn funding_v1_admission_reuse_preserves_fresh_fee_and_recipient_checks() {
+    for (change, expected) in [(1, "KRAKEN_FEE_LIMIT"), (2, "PREVIEW_CHANGED")] {
+        let dir = tempfile::tempdir().unwrap();
+        let venue = Venue::new(Family::Current);
+        venue.admission_change.store(change, Ordering::SeqCst);
+        let result = engine(
+            &dir.path().join("SYNTHETIC-admission.sqlite3"),
+            venue.clone(),
+        )
+        .execute(request(Family::Current))
+        .await
+        .unwrap();
+        assert_eq!(result.error.as_ref().unwrap().code, expected);
+        assert!(result.approval.is_some());
+        assert!(result.submission.is_none());
+        assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
+        // Initial preparation + locked admission refresh. A bypass of the final
+        // check would submit changed economics or a changed saved recipient.
+        assert_eq!(venue.preparations.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn only_funding_v1_withdrawal_opts_into_pre_admission_reuse() {
+    use gofin_domain::Adapter;
+    let venue = Venue::new(Family::Current);
+    let adapter = ExchangeAdapter::new(
+        KrakenProfile::new(KrakenProduct::Spot, vec![account()], venue)
+            .unwrap()
+            .with_prices(Arc::new(Quotes)),
+    );
+    let req = request(Family::Current);
+    let prepared = adapter.prepare(&req.operation, &req.input).await.unwrap();
+    assert_eq!(
+        adapter.pre_admission_reuse_window(&prepared),
+        Some(std::time::Duration::from_secs(90))
+    );
+    assert!(adapter.preparation_reuse_window(&prepared).is_none());
+    for operation in [
+        E::KrakenPrivatePostWithdraw,
+        E::KrakenFundingPutFundingV1DepositAddress,
+        E::KrakenPrivatePostEarnAllocate,
+        E::KrakenPrivatePostAddOrder,
+    ] {
+        let mut other = prepared.clone();
+        other.operation = operation.operation().into();
+        assert!(adapter.pre_admission_reuse_window(&other).is_none());
+    }
+    let mut missing_evidence = prepared;
+    missing_evidence.binding["funding"] = Value::Null;
+    assert!(
+        adapter
+            .pre_admission_reuse_window(&missing_evidence)
+            .is_none()
+    );
 }

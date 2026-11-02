@@ -249,14 +249,14 @@ pub fn bridge_profile() -> Value {
             {"chain_id":8453,"name":"Base","role":"read_only_protocol_order_observer","wallet_authority":false}
         ],
         "assets": "EVM native ETH and exact ERC-20 contracts with RPC-verified precision; Relay also supports native SOL and exact SPL/Token-2022 mints verified by the Solana runtime when an executable quote exists; Base canonical ERC-20s require verified bridge pairs; CCTP Solana accepts native USDC only",
-        "writes": "provider-reviewed deposits and finite token approvals; Relay Solana source transactions require complete frozen-transaction validation and currently accept direct transfers only; Base canonical withdrawals include separately authorized proof and finalization; no agent-supplied calldata",
-        "relay_solana": {"chain_id":792703809,"network":"solana:mainnet-beta","directions":"to and from reviewed EVM networks","recipient":"exact user-selected base58 address; destination wallet enrollment optional","native_mint_input":null,"token_mint_input":"exact base58 mint","availability":"requires an executable Relay quote, independent GoFin asset and transaction verification, and a fresh independent USD price for GoFin financial policy; unpriced mints fail closed"},
+        "writes": "provider-reviewed deposits and finite token approvals; Relay Solana source transactions require complete frozen-transaction validation and currently accept direct transfers only; compound Base canonical withdrawals include reviewed proof and finalization stages; no agent-supplied calldata",
+        "relay_solana": {"chain_id":792703809,"network":"solana:mainnet-beta","directions":"to and from reviewed EVM networks","recipient":"exact user-selected base58 address; destination wallet enrollment optional","native_mint_input":null,"token_mint_input":"exact base58 mint","availability":"requires an executable Relay quote, independent asset and transaction verification, and approved native bounds; optional USD estimates may be unavailable"},
         "quotes": "quotes report individual provider coverage, not a market-wide comparison or financial authorization",
         "input_schemas": {
             "bridge.routes": serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeRoutesInput)).expect("schema serializes"),
             "bridge.recovery": serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeStatusInput)).expect("schema serializes"),
-            "bridge.quotes": serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeQuoteInput)).expect("schema serializes"),
-            "bridge.transfer": serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeTransferInput)).expect("schema serializes"),
+            "bridge.quotes": gofin_bridge::native_bridge_input_schema(serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeQuoteInput)).expect("schema serializes")),
+            "bridge.transfer": gofin_bridge::native_bridge_input_schema(serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeTransferInput)).expect("schema serializes")),
             "bridge.status": serde_json::to_value(schemars::schema_for!(gofin_bridge::BridgeStatusInput)).expect("schema serializes")
         }
     })
@@ -264,13 +264,30 @@ pub fn bridge_profile() -> Value {
 
 /// Machine execution policy shared by offline discovery and callers.
 pub fn machine_contract() -> Value {
-    let mut contract = json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"GoFinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact approval, existing bounded/plan authority, or explicitly enabled protected Yolo. With Yolo off, creating bounded authority requires fresh macOS Touch ID; --json never prompts in the terminal. Yolo replaces financial approval only; limits, validation and explicit step requests remain required. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"gofin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"gofin authorizations cancel ID prevents future dispatch without Touch ID","status":"gofin authorizations status ID reconciles durable attempts"},"named_financial_plans":{"timing":gofin_domain::plan_timing::discovery(),"default_duration":"calculated sequential budget","preview":"gofin plans preview --input PLAN_JSON is read-only and returns a review_hash","authorization":"gofin plans authorize --from-preview PREVIEW_JSON --id REQUEST_ID carries reviewed input, lifetime, replacement and hash; fresh broker review must match before Touch ID","step_execution":"gofin execute OP --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID explicitly submits one eligible step","dry_run":"gofin execute OP --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run refreshes evidence and reserves/submits nothing","replacement":"--replaces-attempt identifies only an unsubmitted plan candidate","status":"gofin plans status PLAN_ID reconciles but never executes","revocation":"gofin plans cancel PLAN_ID blocks future dispatch without cancelling submitted venue orders","generated_input_fields":"Only exact JSON pointers declared by the trusted operation definition may be assigned by GoFin per attempt; the reviewed template remains bound and terminal review labels generated fields.","authority":"one plan revision authority; attempts retain their own IDs; no child grants"}});
+    let mut contract = json!({
+        "version":1,"flag":"--json","stdout":"one JSON value on success or error",
+        "stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,
+        "verbose":"ignored","exit_status":{"success":0,"error":1},
+        "error_envelope":{"ok":false,"error":"GoFinError"},
+        "human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.",
+        "financial_writes":"One logical action under native economic approval or protected Yolo. Repeating the execute request observes its original identity and never starts another execution.",
+        "approval_terms":{"enforced":"Independently checked before dispatch","estimate":"Context only","after_execution":"Observed breach is a discrepancy; execution remains executed"},
+        "outcome":{"version":1,"schema":schema::<gofin_domain::outcome::OperationOutcome>(),
+            "additive":true,"top_level_submission":"The immutable submission identity, unchanged",
+            "replay_safe":"Proof against duplicate execution; never grants approval",
+            "observation":"status ID is bounded and read-only; --wait SECONDS polls until phase changes or time expires",
+            "open":"operations --open includes unresolved refunds even when phase is failed",
+            "continue":"operations continue ID --token TOKEN resumes only declared, approved stages; use returned next_action arguments",
+            "reauthorize":"operations reauthorize ID --token TOKEN --input JSON explicitly reviews replacement terms for unfinished work when returned by next_action; completed stages remain immutable",
+            "foreground":"No background runner. Disconnect prevents new stage admission; admitted immutable submissions may finish dispatch."},
+        "retired":["personal USD limits","balance reservations","named plans","bounded grants","human outcome overrides"]
+    });
     contract["yolo"] = json!({
         "default":"off",
         "status":"gofin yolo status --json; authoritative broker read without sudo",
         "management":"gofin yolo on/off require verified human Terminal and fresh sudo; JSON hands off before sudo or input",
         "approval":"On requires the full danger warning and explicit single-key y/Y confirmation without Enter; neither on nor off requires Touch ID",
-        "financial_authority":"Standalone writes, boundary and plan creation/revision, and explicitly requested steps; all limits and validation remain enforced",
+        "financial_authority":"Native terms of each chosen action; no personal USD limits. Signed payload validation and independent authority checks remain enforced",
         "disable":"Stops unadmitted Yolo work and invalidates unused Yolo authority permanently; admitted identities may finish dispatch and reconcile"
     });
     contract["streaming"] = json!({
@@ -281,11 +298,11 @@ pub fn machine_contract() -> Value {
         "progress_schema":{"type":"object","required":["type","stage"],"properties":{"type":{"const":"progress"},"stage":{"enum":["connecting","preparing","refreshing_candidate","awaiting_approval","revalidating","submitting","verifying"]},"context":{"type":"object"}}},
         "result_schema":{"type":"object","required":["type","result"],"properties":{"type":{"const":"result"},"result":{"description":"Unchanged command output schema"},"context":{"type":"object"}}},
         "error_schema":{"type":"object","required":["type","error"],"properties":{"type":{"const":"error"},"error":schema::<GoFinError>(),"context":{"type":"object"}}},
-        "context":"Command plus available operation, request_id, plan_id, step_id or operation_id. Parse/startup errors may omit context. Newly assigned operation IDs are in the final result.",
+        "context":"Command plus available operation, request_id or operation_id. Parse/startup errors may omit context. Newly assigned operation IDs are in the final result.",
         "stages":"connecting is a local transport observation; other stages are reported by the broker. Progress is best effort and can be dropped for slow readers; it grants no authority and proves no settlement.",
-        "completion":"The terminal event ends this command, not necessarily the financial action. Inspect result.status; pending/unknown require status reconciliation of the original operation. Durable plan steps may remain not_started during preparation before an attempt is recorded.",
-        "interruption":"Closing the output does not cancel or replay a financial action. If the terminal event is missing, recover the same request/operation identity through operations and status.",
-        "example":"gofin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json --stream"
+        "completion":"The terminal event ends this invocation. Inspect result.outcome and its next_action for observation or continuation of the original action.",
+        "interruption":"Disconnect prevents new stage admissions. Already admitted immutable submissions may finish. Observe the original operation; never repeat successful stages.",
+        "example":"gofin execute OPERATION --input INPUT_JSON --id ACTION_ID --json --stream"
     });
     contract
 }
@@ -346,23 +363,6 @@ fn default_boundary_duration() -> String {
     "10m".into()
 }
 
-fn synthetic_financial_plan_example() -> Value {
-    json!({
-        "version":1,
-        "name":"Fund Savings on Ethereum",
-        "summary":"Send 0.01 ETH from main-wallet to the reviewed recipient; network fees up to 0.001 ETH.",
-        "steps":[{
-            "step_id":"transfer",
-            "operation":"wallet.transfer",
-            "input":{"request_id":"SYNTHETIC-plan-step-1","wallet":"main-wallet","network":"evm","chain_id":1,"max_fee_eth":"0.001","token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},
-            "permitted_variations":{"mode":"exact","maximum_debits":[{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[{"location":{"kind":"cash","resource":"ethereum:1:0x0000000000000000000000000000000000000002"},"amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"1000000000000000"},"treatment":"additional_debit"}],"possible_credits":[]},
-            "completion":{"operation_succeeded":true,"principal_spend":{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}},
-            "funding_dependencies":[]
-        }],
-        "aggregate_bounds":{"maximum_debits":[{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[{"location":{"kind":"cash","resource":"ethereum:1:0x0000000000000000000000000000000000000002"},"amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"1000000000000000"},"treatment":"additional_debit"}]}
-    })
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BoundaryExecuteInput {
@@ -412,6 +412,34 @@ pub struct PlanStepExecuteInput {
 #[serde(deny_unknown_fields)]
 pub struct IdInput {
     pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatusInput {
+    pub id: String,
+    pub wait: Option<u64>,
+    pub side: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationsInput {
+    #[serde(default)]
+    pub open: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueInput {
+    pub id: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReauthorizeInput {
+    pub id: String,
+    pub token: String,
+    pub input: Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -820,6 +848,36 @@ pub fn schema<T: JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("static schema serialization")
 }
 
+/// Public projection is additive; the persisted operation record remains unchanged.
+pub fn operation_view_schema() -> Value {
+    let mut record = schema::<gofin_domain::OperationRecord>();
+    let mut outcome = schema::<gofin_domain::outcome::OperationOutcome>();
+    if let Some(Value::Object(definitions)) =
+        outcome.as_object_mut().and_then(|o| o.remove("$defs"))
+        && let Some(target) = record.get_mut("$defs").and_then(Value::as_object_mut)
+    {
+        for (name, value) in &definitions {
+            if let Some(existing) = target.get(name) {
+                assert_eq!(existing, value, "shared outcome schema definition differs");
+            } else {
+                target.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(object) = outcome.as_object_mut() {
+        object.remove("$schema");
+    }
+    record["properties"]["outcome"] = outcome;
+    record["properties"]["human_dismissed"] = json!({"type":"boolean","description":"Human label only; does not change financial evidence or replay safety."});
+    if let Some(required) = record["required"].as_array_mut() {
+        required.push(json!("outcome"));
+    }
+    // Versioned observations and stage details are additive presentation fields.
+    record["additionalProperties"] = json!(true);
+    record["title"] = json!("OperationView");
+    record
+}
+
 fn definition<T: JsonSchema>(
     name: &str,
     description: &str,
@@ -851,9 +909,9 @@ pub fn operation_definitions() -> Vec<Definition> {
         "remote_trust":"The human must control the SSH client. GoFin verifies server-side session and sudo provenance, not the remote operator or whether sudo policy required a password. Agent-accessible root and passwordless elevation are outside the isolation guarantee.",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
-        "scope":"Setup, policy set, connection add/generate/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
+        "scope":"Setup, connection add/generate/update/remove, nonfinancial dismissal and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
         "configuration_approval":"Fresh system sudo plus exact protected terminal confirmation; no Touch ID is requested. Configuration approval grants no financial authority.",
-        "financial_approval":"With protected Yolo off, standalone financial writes require fresh exact approval and creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. Explicitly enabled Yolo supplies typed financial authority while retaining all limits and validation. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
+        "financial_approval":"With protected Yolo off, actions require native intent approval. Compound stages share reviewed terms and an explicit deadline. Enabled Yolo supplies typed financial authority bounded by each action’s terms; no personal USD limits apply. Authority, native bounds and payload identity are checked at every admission."
     });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
@@ -862,7 +920,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "human_action":"Run this command yourself in Apple Terminal or a human-operated macOS system OpenSSH session. Never enter keys through an agent tool or chat.",
         "platform":"macOS protected enrollment in Apple Terminal or macOS system OpenSSH; no GUI login or Touch ID is required; unavailable providers fail closed",
         "configuration_authorization":"Fresh sudo and protected terminal confirmation approve the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
-        "financial_authorization":"Enrollment and daemon startup grant no financial authority. With protected Yolo off, standalone writes require fresh exact approval and supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Explicitly enabled Yolo is the sole automatic production financial source. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
+        "financial_authorization":"Enrollment and daemon startup grant no financial authority. Actions use native intent approval or explicitly enabled protected Yolo. Compound stages remain within the original reviewed terms and deadline; every admission independently validates authority and its exact payload.",
         "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and protected review stages appear on stderr.",
@@ -893,7 +951,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
-        "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
+        "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing or stale optional estimates remain unavailable; protocol-required quotes have separate typed prerequisites."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap quotes and swaps use the fixed keyless GoFin Uniswap API provider on Ethereum, Base, Arbitrum and Robinhood Chain, with best-price AMM or UniswapX routing selected from available liquidity. Financial bounds are enforced against quote metadata; transaction payload construction is trusted to the provider. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Morpho V2 discovery, ERC-20 vault deposits, standard withdrawals and Merkl claims are available on Ethereum and Base; V1 vaults are excluded. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["per-provider mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"rpc_policy":{"reads":"Four ordered reviewed keyless providers (Solana public RPC, PublicNode, OnFinality, Solana Tracker) with failover, per-provider health and a twenty-second transport-read budget.","submission":"One provider per financial dispatch; uncertain outcomes reconcile the original signature without automatic retransmission.","diagnostics":"doctor reports sanitized observed pool health without new RPC probes.","upgrades":"Reviewed defaults apply to existing installations without credential or pending-operation migration."},"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
@@ -961,8 +1019,8 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({
                 "input_validation":"operation-specific bundled schema",
                 "service_required":true,
-                "fresh_approval":"broker enforced per write",
-                "retry":"reuse the same --id for this logical request; reconcile uncertain submissions before starting a new action",
+                "fresh_approval":"Native economic approval per logical action, independently checked at each admission",
+                "retry":"Repeating the same --id observes the original action. Use broker-issued continuation or reauthorization arguments for unfinished work.",
                 "command_line_template":"gofin execute OPERATION --input JSON --id REQUEST_ID --json",
                 "command_line_example":"gofin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --json",
                 "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--dry-run","--json","--stream"],
@@ -972,66 +1030,13 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
-        definition::<BoundaryAuthorizationInput>(
-            "authorizations.authorize",
-            "Grant time-limited cumulative authority for a supported financial intent after fresh human approval.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            json!({"operation":"binance.spot-order","id":"synthetic-intent-001","input":{"side":"SELL","symbol":"BTCUSDT","quantity":"0.01"},"bounds":{"target_quantity":"0.01","max_quantity":"0.01","min_price":"60000","max_fees":{"USDT":"1"}},"valid_for":"10m"}),
-            json!({
-                "command_line_template":"gofin authorizations authorize OPERATION --id INTENT_ID --input JSON --bounds JSON [--valid-for 10m] [--replaces AUTHORIZATION_ID]",
-                "requires_fresh_human_approval":true,
-                "approval_popup":"The protected broker requests fresh macOS Touch ID and displays the operation, permitted variations, cumulative limits and consent duration.",
-                "human_terminal_review":true,
-                "machine_output":"Structured authorization result; no terminal prompts, animation, color or chatter. Required macOS Touch ID approval still applies.",
-                "default_valid_for_seconds":600,
-                "valid_for":"Starts after successful approval; separate from biometric challenge timeout and quote freshness.",
-                "identity":"--id is the stable logical intent identity; replacing authority retains the intent and achieved effects.",
-                "bounds":"Operation-specific fixed identity fields, allowed candidate variations, cumulative debit and fee caps; inspect the operation definition for actual supported coverage.",
-                "replacement":"Changing bounds or expiry requires fresh approval and --replaces; remaining authority is preserved, spent effects cannot be reset.",
-                "administrative_operations":"Financial authorizations cannot authorize connection management or policy changes."
-            }),
-        ),
-        definition::<BoundaryExecuteInput>(
-            "execute.boundary",
-            "Evaluate or execute one candidate under existing time-limited cumulative authorization.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            json!({"operation":"binance.spot-order","input":{"side":"SELL","symbol":"BTCUSDT","quantity":"0.01"},"authorization":"opaque-authorization-id","id":"synthetic-attempt-001"}),
-            json!({
-                "command_line_template":"gofin execute OPERATION --input JSON --id ATTEMPT_ID --authorization AUTHORIZATION_ID [--dry-run]",
-                "dry_run":"With --dry-run, evaluates fresh evidence and remaining authority without submission or consumption; --id is optional and unused.",
-                "execution":"--id identifies one exact attempt; duplicate retries recover that attempt. No automatic resubmission occurs.",
-                "approval":"Uses the existing authorization. No second Touch ID challenge is requested for an in-bounds candidate.",
-                "fresh_evidence":"Pricing and venue evidence retain their independent freshness rules; refreshing evidence does not renew consent.",
-                "recovery":"On response loss, reconcile with gofin authorizations status AUTHORIZATION_ID before creating another attempt.",
-                "candidate_replacement":"Pass --replaces-attempt OLD_OPERATION_UUID with --authorization to atomically cancel and replace only an unsubmitted active candidate. Submitted or uncertain attempts cannot be replaced. This does not change authorization bounds or expiry; use authorizations authorize --replaces for fresh approval when those change. With --dry-run it only previews and does not replace.",
-                "out_of_bounds":"Structured violation identifies the bound, approved value, candidate value and whether replacement approval or reconciliation is needed."
-            }),
-        ),
-        definition::<IdInput>(
-            "authorizations.status",
-            "Read and reconcile durable progress, remaining authority and attempts for one bounded authorization.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"id":"opaque-authorization-id"}),
-            json!({"command_line_example":"gofin authorizations status opaque-authorization-id --json","reconciliation":"Observes attempts and never creates a new financial action.","expiry":"Expiry or revocation blocks future dispatch but allows observation and reconciliation."}),
-        ),
-        definition::<IdInput>(
-            "authorizations.cancel",
-            "Revoke future dispatch under one bounded authorization without Touch ID.",
-            OperationKind::Configuration,
-            ExecutionActor::AgentInvocable,
-            json!({"id":"opaque-authorization-id"}),
-            json!({"command_line_example":"gofin authorizations cancel opaque-authorization-id --json","touch_id":false,"submitted_attempts":"Cancellation does not cancel an already submitted venue order; reconcile it with authorizations status."}),
-        ),
         definition::<ReservationOperationInput>(
             "operations.recovery",
             "Explain the original operation's blockers and supported recovery actions without changing it.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({"operation_id":"original-operation-id"}),
-            json!({"command_line_template":"gofin operations recovery OPERATION_ID --json","read_only":true,"returns":"Original status, human disposition when present, plan authority and concrete actions with evidence or Touch ID requirements. No replay, hold release or approval occurs."}),
+            json!({"command_line_template":"gofin operations recovery OPERATION_ID --json","read_only":true,"returns":"Original outcome, human labels and structured observation or continuation guidance. No dispatch or approval occurs."}),
         ),
         definition::<OperationReceiptRecoveryInput>(
             "operations.recover",
@@ -1040,78 +1045,6 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::AgentReadable,
             json!({"operation_id":"original-operation-id","reference":{"kind":"venue_reference","reference":"original-venue-reference"}}),
             json!({"command_line_template":"gofin operations recover OPERATION_ID --input REFERENCE_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::RecoveryReference>(),"authority":"Read-only evidence recovery; caller references are selectors, not proof. The adapter must correlate original submission, destination, asset and receipt. Unsupported or inconsistent references return recovery guidance; never submit a replacement financial action."}),
-        ),
-        definition::<OperationResolutionPreviewInput>(
-            "operations.resolve-preview",
-            "Review a human-attested outcome, actual amounts and effects on the original plan and reservations.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"operation_id":"original-operation-id","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
-            json!({"command_line_template":"gofin operations resolve-preview OPERATION_ID --input ATTESTATION_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"read_only":true,"returns":"Exact original identity, attested amounts, reservation and plan impact, unresolved risks and review_hash. This does not accept or verify the outcome."}),
-        ),
-        definition::<OperationResolveInput>(
-            "operations.force-resolve",
-            "Accept an exact reviewed historical outcome with fresh Touch ID, even when external verification is unavailable.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            json!({"operation_id":"original-operation-id","request_id":"resolution-request-id","review_hash":"hash-from-preview","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
-            json!({"command_line_template":"gofin operations force-resolve OPERATION_ID --input ATTESTATION_JSON --id REQUEST_ID --review-hash HASH --json --stream","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"requires_fresh_touch_id":true,"yolo_bypass":false,"provenance":"Human-confirmed disposition and proceeds stay distinct from externally verified effects. Original submission and evidence remain available for later reconciliation.","authority":"Accepts the exact historical outcome and reviewed accounting/hold changes only. It never resubmits, renews expired plans or enlarges future spending limits. Downstream spending requires sufficient active authority and current available balances.","recovery":"After response loss repeat the same request ID, attestation and review hash. A changed review requires fresh approval. Inspect operations recovery for supported scope and blockers."}),
-        ),
-        definition::<ReservationOperationInput>(
-            "reservations.preview",
-            "Review an unresolved operation's exclusive account locks and continuing financial risk.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"operation_id":"original-operation-id"}),
-            json!({"command_line_template":"gofin reservations preview OPERATION_ID [--json]","read_only":true,"returns":"Exact immutable submission identity, account resources, released and retained reservation rows, warning and review_hash. Nothing is released."}),
-        ),
-        definition::<ReservationReleaseInput>(
-            "reservations.release",
-            "Release reviewed account and cash reservations with fresh Touch ID while preserving the unresolved original action.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            json!({"operation_id":"original-operation-id","request_id":"release-request-id","review_hash":"hash-from-preview"}),
-            json!({"command_line_template":"gofin reservations release OPERATION_ID --id REQUEST_ID --review-hash HASH [--json --stream]","requires_fresh_touch_id":true,"yolo_bypass":false,"authority":"This dedicated command cannot use existing plan or boundary authority. It does not authorize a new trade or change financial limits.","effect":"Overrides only the exact reviewed account locks and cash principal/fee reservation rows. Original status, submission identity, plan usage and financial allocation charges remain. Later writes still require fresh balance evidence and their own sufficient authority.","risk":"The original action may still execute; reusing released funds can create overlapping financial exposure. Empty history is not proof of failure. Only the human may accept this uncertainty through fresh biometric approval.","recovery":"Repeat the same command with the same request ID and review hash after response loss. A changed snapshot requires a fresh review; no uncertain financial action is replayed."}),
-        ),
-        definition::<FinancialPlanSpec>(
-            "plans.preview",
-            "Regenerate a read-only review of exact-input scopes for registered financial and read operations.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            synthetic_financial_plan_example(),
-            json!({"command_line_template":"gofin plans preview --input PLAN_JSON [--valid-for 45m] [--replaces REVISION_ID] [--json]","read_only":true,"timing":gofin_domain::plan_timing::discovery(),"returns":"Canonical review_hash, validation metadata (authorization_scope structurally_validated; execution_readiness deferred), ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"validation":"Permission accounting and duration checks precede live feasibility checks. Independent accounting failures are collected in error.details.validation_errors with step, scope, exact asset/location/treatment and required versus declared atoms; missing matching caps are null. Correct the intended scope or budget before repeating preview.","scope_selection":"Choose the operation's discovered plan_authorization mode. When requires_adapter_scope is true use its plan_permission bounds; otherwise generic exact-input mode is available independently of any optional specialized adapter permission. For exact input, set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; GoFin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
-        ),
-        definition::<FinancialPlanSpec>(
-            "plans.authorize",
-            "Create or replace one immutable named plan revision after fresh human approval.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            synthetic_financial_plan_example(),
-            json!({"command_line_template":"gofin plans authorize --from-preview PREVIEW_JSON --id REQUEST_ID [--json]","manual_command_line_template":"gofin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 45m] [--replaces REVISION_ID] [--review-hash HASH] [--json]","from_preview":"Complete plans preview JSON supplies the plan, resolved lifetime, replaces_revision_id and review_hash together. Mutually exclusive with --input, --valid-for, --replaces and --review-hash. The broker independently regenerates and compares the review before approval.","preview_json_schema":schema::<gofin_domain::financial_plans::FinancialPlanReview>(),"requires_fresh_touch_id":true,"requires_fresh_touch_id_scope":"Default Yolo-off behavior; explicitly enabled protected Yolo can supply financial authority instead.","approval_text":{"name":"Short intent-led label, at most 80 Unicode characters.","summary":"Optional caller-authored financial sentence that complements the name, shown in full in terminal review and Touch ID. Use one trimmed line; name plus summary at most 140 Unicode characters; no controls or bidirectional formatting. Both are included in the binding, but only structured plan scopes grant authority."},"review":"Terminal displays the complete named revision before approval. Trusted broker_generated_attempt_input_fields are shown as GoFin-assigned per attempt; the original input template remains bound. Generic exact-input scopes bind the operation schema and protected connection identities but defer live balance, market, fee and simulation checks to each concrete attempt. An explicit --review-hash must match freshly generated review material before Touch ID.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"idempotency":"Reuse --id after response loss to recover the original request; review_hash is excluded from request identity.","duration":"Starts after successful bound authorization (Touch ID by default, protected Yolo when explicitly enabled); omission calculates sequential allowances plus headroom. Explicit constraints are preserved; adapter limits remain enforced.","timing":gofin_domain::plan_timing::discovery(),"authorization_request_schema":schema::<gofin_domain::financial_plans::FinancialPlanAuthorizationRequest>(),"completion":"Verified operation success is required; optional spend and net-receipt targets are also enforced.","revision":"A replacement preserves started/completed step identity, order, fixed scope, targets and carried-forward usage; only the unstarted suffix can change."}),
-        ),
-        definition::<PlanStepExecuteInput>(
-            "execute.plan-step",
-            "Preview or explicitly submit one eligible step under the active named plan revision.",
-            OperationKind::Write,
-            ExecutionActor::AgentInvocable,
-            json!({"operation":"aave.withdraw","input":{"request_id":"SYNTHETIC-plan-attempt-1","wallet":"main-wallet","network":"evm","chain_id":1,"max_fee_eth":"0.001","token":"0x0000000000000000000000000000000000000010","amount":"all","max_amount":"1","recipient":"0x0000000000000000000000000000000000000001"},"plan":"opaque-plan-id","step":"withdraw","id":"synthetic-attempt-001"}),
-            json!({"command_line_template":"gofin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID [--dry-run] [--replaces-attempt ATTEMPT_ID]","selectors":"--plan and --authorization are mutually exclusive. --step requires --plan.","execution":"Only the first incomplete step can run. Every candidate refreshes balances, prices, fees, market/protocol metadata, protected policy and applicable simulations.","funding":"A dependent step needs verified net proceeds from its declared producing step and current available balance.","retry":"Duplicate IDs recover their original attempt. Freshness or transport errors report reconciliation_required, reauthorization_required and new_attempt_required in details. A failed unsubmitted attempt needs a new ID, but an active plan can cover a fresh candidate within its existing limits without another Touch ID prompt. Uncertain submissions require gofin plans status PLAN_ID reconciliation before another attempt.","replacement":"Only explicitly named unsubmitted candidates can be replaced; submitted or uncertain attempts cannot be replaced."}),
-        ),
-        definition::<IdInput>(
-            "plans.status",
-            "Read authorization state and sequential execution progress; reconciliation never executes a step.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"id":"opaque-plan-id"}),
-            json!({"command_line_example":"gofin plans status opaque-plan-id --json","returns":"Authorization state, revision, attempts, reservations, verified consumption and proceeds, remaining authority, next eligible step and blockers."}),
-        ),
-        definition::<IdInput>(
-            "plans.cancel",
-            "Revoke future dispatch under a named plan without Touch ID.",
-            OperationKind::Configuration,
-            ExecutionActor::AgentInvocable,
-            json!({"id":"opaque-plan-id"}),
-            json!({"command_line_example":"gofin plans cancel opaque-plan-id --json","touch_id":false,"submitted_attempts":"Revocation does not cancel venue orders already submitted; status can continue reconciliation."}),
         ),
         definition::<IdInput>(
             "status",
@@ -1170,9 +1103,9 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "secret_input":"none",
                 "release_selection":"Latest completed GoFin release (stable, beta or RC) by publication time from the public Pages latest-beta.json feed; no version override or automatic downgrade",
                 "verification":"HTTPS release download, outer checksum manifest, bundle manifest, release identity and existing protected runtime checks",
-                "preserves":["connections","credentials","financial policy and limits","financial history","pending operation identities","reservations"],
-                "journal_schema":"Installed journal and incoming runtime schema must match exactly; newer and older schemas are refused and require a separately reviewed migration",
-                "recovery":"Retains a runtime-only backup. Ordinary failure restores the prior verified runtime and service state when possible; uncertain restoration leaves the service detached for manual inspection. Power loss or forced kill can leave locks and backups requiring manual inspection; automatic rollback is not guaranteed. No financial operation is replayed.",
+                "preserves":["connections","credentials","historical settings","financial history","pending operation identities","historical approval bindings"],
+                "journal_schema":"Versioned transactional migration preserves original IDs and evidence. Protected update review discloses retired limits and acknowledges preservation of enabled Yolo; unsupported schemas fail closed.",
+                "recovery":"Retains a verified forward-recovery bundle and durable update markers. Interrupted replacement resumes without resetting history or replaying actions; old binaries are not restored after the new schema may have been opened.",
                 "older_installation":"If gofin update is unavailable, use reviewed local make update from an updated source checkout once; the curl bootstrap refuses existing installations",
                 "automatic_installation":false,
                 "notification":"The installed CLI may show a cached newer-release notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
@@ -1265,11 +1198,11 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.on",
-            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
+            "Enable agent-submitted financial actions under their native terms after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. Funds may be lost within configured caps."}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. No personal USD limits apply; each action is bounded by its submitted native terms. Funds may be lost."}),
         ),
         definition::<EmptyArgs>(
             "yolo.off",
@@ -1278,14 +1211,6 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::HumanInteractive,
             json!({}),
             json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":false,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":false,"command_line_examples":["gofin yolo off"],"effect":"Blocks new Yolo admissions; already admitted work may finish."}),
-        ),
-        definition::<PolicySetArgs>(
-            "policy.set",
-            "Atomically change financial limits and an optional unpriced exchange exception after fresh sudo and exact protected terminal confirmation.",
-            OperationKind::Configuration,
-            ExecutionActor::HumanInteractive,
-            json!({"max_movement_usd":"1000","max_run_allocation_usd":"5000"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Fresh sudo and exact protected terminal confirmation","warning":gofin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"gofin policy show --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",
@@ -1313,7 +1238,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "daemon.stop",
-            "Stop gracefully and remain stopped until explicit start, preserving submitted identities and reservations.",
+            "Stop gracefully and remain stopped until explicit start, preserving submitted identities and historical evidence.",
             OperationKind::Lifecycle,
             ExecutionActor::AgentInvocable,
             json!({}),
@@ -1526,6 +1451,83 @@ pub fn operation_definitions() -> Vec<Definition> {
             item.output_schema = schema::<gofin_domain::OperationRecord>();
         }
     }
+    definitions.retain(|item| {
+        !item.name.starts_with("plans.")
+            && !item.name.starts_with("authorizations.")
+            && !item.name.starts_with("reservations.")
+            && !matches!(
+                item.name.as_str(),
+                "policy.set"
+                    | "execute.boundary"
+                    | "execute.plan-step"
+                    | "operations.force-resolve"
+                    | "operations.resolve-preview"
+            )
+    });
+    for item in &mut definitions {
+        match item.name.as_str() {
+            "status" => {
+                item.input_schema = schema::<StatusInput>();
+                item.output_schema = operation_view_schema();
+                item.semantics = json!({"read_only":true,"bounded":true,"wait":"Poll until phase changes or wait expires", "side":"source or destination, using persisted transfer identities","outcome":schema::<gofin_domain::outcome::OperationOutcome>()});
+            }
+            "operations" => {
+                item.input_schema = schema::<OperationsInput>();
+                let mut operation = operation_view_schema();
+                let definitions = operation
+                    .as_object_mut()
+                    .and_then(|o| o.remove("$defs"))
+                    .unwrap_or_else(|| json!({}));
+                item.output_schema = json!({"type":"array","items":operation,"$defs":definitions});
+                item.semantics = json!({"read_only":true,"open":"Include unfinished outcomes and unresolved transfers, excluding human-dismissed records"});
+            }
+            "execute" => {
+                if let Some(semantics) = item.semantics.as_object_mut() {
+                    semantics.remove("allocation_scope");
+                }
+                item.semantics["dry_run"] = json!({"flag":"--dry-run","financial_movement":false,"financial_authorization":false,"journal_write":false,"execution":"Remove --dry-run and supply --id to request native economic approval. The broker validates every exact candidate independently."});
+            }
+            "setup" => {
+                if let Some(semantics) = item.semantics.as_object_mut() {
+                    semantics.remove("financial_limits");
+                }
+            }
+            "policy.show" => {
+                item.description = "Inspect retired personal policy settings.".into();
+                item.output_schema = json!({"type":"object","required":["retired","personal_limits_enforced","retired_settings"]});
+                item.semantics =
+                    json!({"read_only":true,"retired":true,"financial_movement":false});
+            }
+            "yolo.on" => {
+                item.description = "Enable agent financial actions under their chosen native terms; no personal USD limits.".into();
+            }
+            _ => {}
+        }
+    }
+    definitions.push(definition::<IdInput>("operations.dismiss",
+        "Human-only dismissal label for an unconfirmed operation; no financial facts change.",
+        OperationKind::Configuration, ExecutionActor::HumanInteractive,
+        json!({"id":"original-operation-id"}),
+        json!({"human_terminal_required":true,"financial_movement":false,"replay_safe_unchanged":true,
+            "command_line_template":"gofin operations dismiss ID"})));
+    definitions.push(definition::<ContinueInput>("operations.continue",
+        "Resume ready approved stages of the original action with a broker-issued token.",
+        OperationKind::Write, ExecutionActor::AgentInvocable,
+        json!({"id":"original-operation-id","token":"broker-issued-token"}),
+        json!({"idempotent":true,"same_identity":true,"command_line_template":"gofin operations continue ID --token TOKEN --json","authority":"Original native terms and explicit compound deadline; submitted failed stages are never automatically retried"})));
+    definitions.push(definition::<ReauthorizeInput>("operations.reauthorize",
+        "Approve explicit revised native terms for unfinished work on the original logical action; completed stages and spent fees remain recorded.",
+        OperationKind::Write, ExecutionActor::AgentInvocable,
+        json!({"id":"original-operation-id","token":"broker-issued-token","input":{}}),
+        json!({"idempotent":true,"same_identity":true,"fresh_review":true,"command_line_template":"gofin operations reauthorize ID --token TOKEN --input JSON --json","authority":"Explicit replacement native terms and deadline; completed stages cannot be re-granted"})));
+    for item in &mut definitions {
+        if matches!(
+            item.name.as_str(),
+            "operations.continue" | "operations.reauthorize"
+        ) {
+            item.output_schema = operation_view_schema();
+        }
+    }
     definitions
 }
 
@@ -1533,7 +1535,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
         "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","coinbaseexchange","coinbaseinternational","bybit"], "all_library_methods_exposed":false},
-        "gofin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT IOC/FOK orders; named plans bind exact input, schema and protected connection identity", "ioc_partial_fills":"Each attempt settles through the verified operation journal; plan completion requires its declared cumulative targets"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"explicit cross or isolated margin and leverage; one-way positions, automatic additions disabled", "configuration_changes":true,"funding":"explicit same-account USDT spot/futures transfers","concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved GoFin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
+        "gofin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"Native order modes bind input, schema and protected connection identity", "ioc_partial_fills":"Original order and fill evidence preserves executed amounts and the live remainder"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"explicit cross or isolated margin and leverage; one-way positions, automatic additions disabled", "configuration_changes":true,"funding":"explicit same-account USDT spot/futures transfers","concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved GoFin order; original identity persists through fill observation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"gofin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"gofin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
     });
@@ -1574,7 +1576,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "public_only":false,"account_enrollment":true,"writes":true,
         "authentication":["product-specific API key and Base64 HMAC secret"],
         "administration":"gofin configure; separate protected human configuration approval, never financial plans",
-        "financial_authorization":"Protected preview/execute/status; supported finite named plans, otherwise fresh exact approval",
+        "financial_authorization":"Protected preview/execute/status; native per-action approval or explicitly enabled protected Yolo",
         "exclusions":["WebSockets/token issuance","API-level 2FA","assignment-program enrollment"],
         "financial_limitations":["Tokenized base/rebased ticker denomination unproven","Attached conditional parent amendments unavailable at venue","Issued-child principal expansion beyond original generated-credit ceiling incomplete","VIP credit-line liability coverage incomplete"],
         "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
@@ -1594,7 +1596,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "public_only":false,"account_enrollment":true,"writes":true,"authentication":["cdp_ed25519","cdp_ecdsa"],
         "scope":"Typed App/Advanced REST reads and supported Advanced spot orders; native GET routes expose closed query subsets",
         "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot"]},
-        "financial_authorization":"Exact and bounded orders and sequential named plans; protected dispatch validation",
+        "financial_authorization":"Native per-action approval or protected Yolo; independent dispatch validation",
         "funding":"Base native USDC composite deposit requires verified existing address, original source receipt and correlated usable credit",
         "financial_limitations":["Attached and scaled order accounting incomplete","Full derivatives/loans/staking snapshots incomplete","Additional write families remain under implementation"],
         "verification":"Synthetic signing, financial and CLI/broker workflow fixtures; live-read evidence only; native approval unobserved"

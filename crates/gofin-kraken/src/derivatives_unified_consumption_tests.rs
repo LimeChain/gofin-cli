@@ -96,7 +96,7 @@ fn children(record: &OperationRecord) -> Vec<gofin_domain::compound_mutations::M
         .flat_map(|effect| match effect {
             FinancialEffect::GroupedSubmissionAmendments { proof } => proof.children.clone(),
             FinancialEffect::CompoundSubmissionMutations { children } => children.clone(),
-            other => panic!("Breached new-order scope must not book financial effects: {other:?}"),
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -192,7 +192,6 @@ async fn composed_overrun(grouped: bool, initially_corrupt: bool) {
             store.unresolved_consumption_usd(&mutation.id).unwrap(),
             None
         );
-        assert!(store.reservation_count(&mutation.id).unwrap() > 0);
         assert_eq!(
             running.status(&original.id, false).await.unwrap().effects,
             original_proofs
@@ -200,89 +199,45 @@ async fn composed_overrun(grouped: bool, initially_corrupt: bool) {
         venue.corrupt_booking.store(false, Ordering::SeqCst);
         mutation = running.status(&mutation.id, true).await.unwrap();
     }
-    assert_eq!(mutation.status, Status::Unknown, "{:?}", mutation.error);
+    assert_eq!(
+        mutation.status,
+        if grouped {
+            Status::Pending
+        } else {
+            Status::Completed
+        },
+        "{:?}",
+        mutation.error
+    );
     assert_eq!(children(&mutation).len(), 1);
-    let preview = mutation.preview.as_ref().unwrap();
-    let new_scope: gofin_domain::amendments::AmendmentScope =
-        serde_json::from_value(preview.binding["mutationNewWriteScope"].clone()).unwrap();
+    let effects = mutation.effects.as_ref().expect("correlated effects");
+    assert!(effects.effects.iter().any(|effect|matches!(effect, FinancialEffect::Cost{amount,category,..} if category=="krakenfutures_commission" && amount.atoms.to_decimal(36)=="1.5")));
+    let partition = &effects.evidence["newFinancialScope"];
     assert_eq!(
-        new_scope
-            .intent
-            .maximum_costs
-            .iter()
-            .find(|bound| bound.treatment == gofin_domain::CostTreatment::AdditionalDebit)
-            .unwrap()
-            .amount
-            .atoms
-            .to_decimal(36),
-        "1"
+        partition["scope"],
+        mutation.preview.as_ref().unwrap().binding["mutationNewWriteScope"]
     );
-    assert_eq!(preview.input["maximumFees"]["USD"], "2");
-    let first_markers = children(&mutation);
-    let first_events = mutation.effects.as_ref().unwrap().evidence["proofEvents"]
-        .as_array()
-        .unwrap()
-        .clone();
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&mutation.id).unwrap(),
-        Some("500000".into())
-    );
-    assert!(store.reservation_count(&mutation.id).unwrap() > 0);
-    let consumption = store
-        .unresolved_consumption_proof(&mutation.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        consumption.scope,
-        gofin_domain::unresolved_consumption::ConsumptionScope::NewMutationFinancialScope
-    );
-    assert!(consumption.costs.iter().any(|effect|matches!(effect, FinancialEffect::Cost{amount,category,..} if category=="krakenfutures_commission" && amount.atoms.to_decimal(36)=="1.5")));
     assert!(
-        consumption.evidence["proofEvents"]
+        partition["effects"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|event| event.to_string().contains("NEW-BOOKING"))
+            .any(|effect| effect["kind"] == "cost")
+    );
+    assert_eq!(
+        running.operation_view(&mutation).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
     );
     assert_eq!(
         running.status(&original.id, false).await.unwrap().effects,
         original_proofs
     );
-    drop(store);
+    let id = mutation.id.clone();
     drop(running);
-    venue
-        .inner
-        .inner
-        .second_visible
-        .store(true, Ordering::SeqCst);
     let running = engine(&path, venue.clone());
-    let recovered = running.status(&mutation.id, true).await.unwrap();
-    assert_eq!(recovered.status, Status::Unknown, "{:?}", recovered.error);
-    let recovered_markers = children(&recovered);
-    assert_eq!(recovered_markers.len(), if grouped { 2 } else { 1 });
-    for marker in first_markers {
-        assert!(recovered_markers.contains(&marker));
-    }
-    for event in first_events {
-        assert!(
-            recovered.effects.as_ref().unwrap().evidence["proofEvents"]
-                .as_array()
-                .unwrap()
-                .contains(&event)
-        );
-    }
-    assert_eq!(running.execute(request).await.unwrap().id, mutation.id);
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&mutation.id).unwrap(),
-        Some("500000".into())
-    );
-    assert!(store.reservation_count(&mutation.id).unwrap() > 0);
-    assert_eq!(
-        running.status(&original.id, false).await.unwrap().effects,
-        original_proofs
-    );
+    let recovered = running.status(&id, true).await.unwrap();
+    assert!(recovered.effects.is_some());
+    assert_eq!(running.execute(request).await.unwrap().id, id);
     assert_eq!(*venue.inner.inner.edit_dispatches.lock().unwrap(), 1);
     assert_eq!(*venue.inner.inner.inner.dispatches.lock().unwrap(), 1);
 }

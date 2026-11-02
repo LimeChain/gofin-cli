@@ -102,6 +102,116 @@ pub(super) fn persist_link_tx(tx: &Transaction<'_>, id: &str, record: &Value) ->
     Ok(())
 }
 impl Store {
+    /// Commit a complete grouped native mutation and revisions without touching
+    /// historical reservations or valuation accounting.
+    pub fn record_grouped_amendment_revisions(
+        &mut self,
+        settlement: &Settlement,
+        expected: &Value,
+        settled_groups: &[GroupedSettlement],
+        at: &str,
+    ) -> Result<()> {
+        if settlement.run_id.is_some()
+            || settlement.run_record.is_some()
+            || settlement.terminal_record["status"] != "completed"
+            || settlement.terminal_record["id"] != settlement.operation_id
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let proof: gofin_domain::VerifiedEffects =
+            serde_json::from_value(settlement.proof.clone())?;
+        if gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+            != Some(proof.proof_digest.as_str())
+            || settlement.terminal_record["effects"] != settlement.proof
+            || serde_json::to_value(&proof.effects)? != settlement.effects
+            || serde_json::to_value(&proof.submission)? != expected["submission"]
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = amendments::get_operation_record_tx(&tx, &settlement.operation_id)?;
+        if current != *expected {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let mut before = current.clone();
+        let mut after = settlement.terminal_record.clone();
+        for key in [
+            "status",
+            "effects",
+            "last_reconciliation_evidence",
+            "updated_at",
+            "error",
+        ] {
+            before
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+            after
+                .as_object_mut()
+                .ok_or(StoreError::SubmissionConflict)?
+                .remove(key);
+        }
+        if before != after {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let declared = groups(&current)?;
+        if declared.len() != settled_groups.len()
+            || declared.iter().any(|g| {
+                settled_groups
+                    .iter()
+                    .filter(|x| x.original_id == g.operation_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        for group in &declared {
+            let original = amendments::get_operation_record_tx(&tx, &group.operation_id)?;
+            let supplied = settled_groups
+                .iter()
+                .find(|x| x.original_id == group.operation_id)
+                .ok_or(StoreError::SubmissionConflict)?;
+            if original != supplied.expected_original
+                || original["submission"] != serde_json::to_value(&group.submission)?
+                || group.original_scope.intent.locks
+                    != serde_json::from_value::<Vec<gofin_domain::ResourceId>>(
+                        original["preview"]["intent"]["locks"].clone(),
+                    )?
+            {
+                return Err(StoreError::SubmissionConflict);
+            }
+        }
+        persist_link_tx(&tx, &settlement.operation_id, &current)?;
+        for group in settled_groups {
+            commit_group_tx(
+                &tx,
+                &settlement.operation_id,
+                expected,
+                &settlement.terminal_record,
+                &settlement.proof,
+                &settlement.effects,
+                group,
+                false,
+            )?;
+        }
+        let incomplete:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM grouped_amendment_children WHERE amendment_operation_id=?1 AND proof_json IS NULL)",[&settlement.operation_id],|r|r.get(0))?;
+        if incomplete {
+            return Err(StoreError::SubmissionConflict);
+        }
+        tx.execute(
+            "UPDATE operations SET status='completed',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![
+                settlement.operation_id,
+                settlement.terminal_record.to_string(),
+                at
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn persist_grouped_amendment_reservation(
         &mut self,
         id: &str,
@@ -136,7 +246,7 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        commit_group_tx(&tx, id, expected, record, proof, effects, group)?;
+        commit_group_tx(&tx, id, expected, record, proof, effects, group, true)?;
         progress::commit_progress_tx(&tx, id, expected, record, proof, effects, at)?;
         tx.commit()?;
         Ok(())
@@ -162,6 +272,7 @@ impl Store {
             &settlement.proof,
             &settlement.effects,
             group,
+            true,
         )?;
         let unresolved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM grouped_amendment_children WHERE amendment_operation_id=?1 AND proof_json IS NULL)",[&settlement.operation_id],|r|r.get(0))?;
         if unresolved {
@@ -182,6 +293,10 @@ fn replace_reservations(tx: &Transaction<'_>, id: &str, rows: &[ReservationRow])
     }
     Ok(())
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Atomic validation needs the original record, proof, outcome and accounting mode."
+)]
 pub(super) fn commit_group_tx(
     tx: &Transaction<'_>,
     id: &str,
@@ -190,6 +305,7 @@ pub(super) fn commit_group_tx(
     proof: &Value,
     effects: &Value,
     settled: &GroupedSettlement,
+    accounting: bool,
 ) -> Result<()> {
     let current = amendments::get_operation_record_tx(tx, id)?;
     if current != *expected {
@@ -275,8 +391,9 @@ pub(super) fn commit_group_tx(
     }
 
     if original != settled.expected_original
-        || compound_amendments::reservation_rows_tx(tx, &group.operation_id)?
-            != settled.expected_original_reservations
+        || (accounting
+            && compound_amendments::reservation_rows_tx(tx, &group.operation_id)?
+                != settled.expected_original_reservations)
         || original["submission"] != serde_json::to_value(&group.submission)?
         || !matches!(
             json_string(&original, "status"),
@@ -361,12 +478,16 @@ pub(super) fn commit_group_tx(
         if changed {
             let ordinal = amendments::next_revision_tx(tx, &group.operation_id)?;
             tx.execute("INSERT INTO grouped_amendment_revisions(amendment_operation_id,original_operation_id,revision,revision_json,proof_json) VALUES(?1,?2,?3,?4,?5)",params![id,group.operation_id,ordinal,serde_json::to_string(revision)?,serde_json::to_string(outcomes)?])?;
-            replace_reservations(tx, &group.operation_id, &settled.original_reservations)?;
+            if accounting {
+                replace_reservations(tx, &group.operation_id, &settled.original_reservations)?;
+            }
         }
     } else if !accepted.is_empty() {
         return Err(StoreError::SubmissionConflict);
     }
-    replace_reservations(tx, id, &settled.remaining_reservations)?;
+    if accounting {
+        replace_reservations(tx, id, &settled.remaining_reservations)?;
+    }
     Ok(())
 }
 #[cfg(test)]

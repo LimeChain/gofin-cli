@@ -578,7 +578,7 @@ mod tests {
             block_number: 10,
             confirmations: 5,
             success: true,
-            fee: U256::ZERO,
+            fee: Some(U256::ZERO),
             receipt: json!({"transactionHash":hash,"logs":logs}),
         }
     }

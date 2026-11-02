@@ -1,0 +1,1473 @@
+[
+  {
+    "id": "outcome.a19.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Kraken partial-fill cancellation retains exact fills across restart while same- and different-account orders proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a19.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a19.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "partial_kraken_cancellation_retains_fills_without_blocking_other_orders"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a6.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Kraken spot orders on the same and another account advance while the first accepted controlled response stalls; pinned CCXT transport is separately tested for independent responses and durable nonces.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a6.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a6.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "stalled_kraken_order_does_not_block_independent_cli_orders"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a13.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Kraken lost-response order absent from bounded venue history remains uncertain and replay-unsafe across restart while independent orders proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a13.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a13.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_kraken_order_stays_uncertain_without_replay"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a13.binance",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Binance spot order lost response and absent lookup remain replay-unsafe across restart while independent transfers advance.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a13.binance.json"
+    },
+    "evidence": "{artifacts}/outcome.a13.binance.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "missing_binance_order_remains_uncertain_across_restart",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a13",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI missing-order observations on Binance, Kraken, Coinbase and Hyperliquid remain uncertain and replay-unsafe without documented definitive nonexecution; independent same- and different-account actions proceed. The definitive inside-window branch is unsupported.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a13.json",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-a13-cli"
+    },
+    "evidence": "{artifacts}/outcome.a13.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-coinbase-build",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-a13-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a13.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_kraken_order_stays_uncertain_without_replay"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a13.binance.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "missing_binance_order_remains_uncertain_across_restart",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a13.coinbase.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_plan_workflow",
+          "--quiet",
+          "missing_coinbase_order_stays_uncertain_across_restart",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a13.hyperliquid.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "--quiet",
+          "missing_hyperliquid_order_stays_uncertain_without_replay",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a13",
+        "{artifacts}/outcome.a13.json",
+        "{artifacts}/outcome.a13.kraken.json",
+        "{artifacts}/outcome.a13.binance.json",
+        "{artifacts}/outcome.a13.coinbase.json",
+        "{artifacts}/outcome.a13.hyperliquid.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.coinbase-unresolved",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI failed Coinbase send retains unresolved refund tracking through restart while same/different portfolio trades proceed; advises consulting the Coinbase App without inventing a refund or UI approval state.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.coinbase-unresolved.json"
+    },
+    "evidence": "{artifacts}/outcome.coinbase-unresolved.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_withdrawal",
+          "--quiet"
+        ],
+        "expected_tests": 7
+      }
+    ]
+  },
+  {
+    "id": "outcome.a14",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real Binance CLI filled and unfilled orders use correlated evidence despite unrelated balance activity; same- and different-account probes proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a14.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a14"
+    },
+    "evidence": "{artifacts}/outcome.a14.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "binance_spot_deposit_trade_withdraw_via_cli",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a19",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Binance and Kraken partial-fill cancellations retain original fills and identities while both same-account and different-account probes proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli"
+    },
+    "evidence": "{artifacts}/outcome.a19.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a19.binance.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a19.binance",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "binance_spot_deposit_trade_withdraw_via_cli",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a19.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "partial_kraken_cancellation_retains_fills_without_blocking_other_orders"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a19",
+        "{artifacts}/outcome.a19.json",
+        "{artifacts}/outcome.a19.binance.json",
+        "{artifacts}/outcome.a19.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a16",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Binance withdrawal awaiting email confirmation keeps original identity and gives Binance App/email instructions while same/different-account transfers proceed. Coinbase-specific flags are not claimed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a16.json"
+    },
+    "evidence": "{artifacts}/outcome.a16.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "email_confirmation_keeps_original",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a13.coinbase",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI coinbase missing-order lookup remains uncertain and replay-unsafe after restart; same- and different-account probes proceed. This exercises conservative unknown, not a definitive nonexecution guarantee.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-a13-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a13.coinbase.json"
+    },
+    "evidence": "{artifacts}/outcome.a13.coinbase.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-a13-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_plan_workflow",
+          "--quiet",
+          "missing_coinbase_order_stays_uncertain_across_restart",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a13.hyperliquid",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI hyperliquid missing-order lookup remains uncertain and replay-unsafe after restart; same- and different-account probes proceed. This exercises conservative unknown, not a definitive nonexecution guarantee.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-a13-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a13.hyperliquid.json"
+    },
+    "evidence": "{artifacts}/outcome.a13.hyperliquid.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/hyperliquid-a13-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "--quiet",
+          "missing_hyperliquid_order_stays_uncertain_without_replay",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a9.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Kraken order with an expired candidate is freshly prepared within the original native approval, without reapproval or replay; same- and different-account orders proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a9.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a9.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "expired_kraken_candidate_refreshes_with_one_approval"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a15.binance.unconfirmed",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI Binance failed withdrawal remains source_pending without correlated refund evidence through restart while same- and different-account transfers proceed; this does not prove a returned refund.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a15.binance.unconfirmed.json"
+    },
+    "evidence": "{artifacts}/outcome.a15.binance.unconfirmed.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "failed_withdrawal_remains_unresolved_without_correlated_refund_and_does_not_block_other_actions",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a15.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI failed Kraken withdrawal stays open until a unique original-linked principal refund is observed; exact fee remains spent, repeats and restart never dispatch again, and same/different accounts proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a15.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a15.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_plan_workflow",
+          "--quiet",
+          "failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_other_actions",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a15.hyperliquid.unconfirmed",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI accepted Hyperliquid withdrawal without correlated ledger remains unknown and replay-unsafe while same- and different-account actions proceed; no refund is asserted.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a15.hyperliquid.unconfirmed.json"
+    },
+    "evidence": "{artifacts}/outcome.a15.hyperliquid.unconfirmed.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "--quiet",
+          "hyperliquid_withdrawal_without_correlated_ledger_stays_unconfirmed",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a15",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Kraken correlated refund is proven; Binance and Hyperliquid remain unconfirmed where supported observations lack refund evidence. Same- and different-account probes continue. Coinbase refund proof is waived by user.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli"
+    },
+    "evidence": "{artifacts}/outcome.a15.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a15.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_plan_workflow",
+          "--quiet",
+          "failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_other_actions",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a15.binance.unconfirmed.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "failed_withdrawal_remains_unresolved_without_correlated_refund_and_does_not_block_other_actions",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a15.hyperliquid.unconfirmed.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "--quiet",
+          "hyperliquid_withdrawal_without_correlated_ledger_stays_unconfirmed",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a15",
+        "{artifacts}/outcome.a15.json",
+        "{artifacts}/outcome.a15.kraken.json",
+        "{artifacts}/outcome.a15.binance.unconfirmed.json",
+        "{artifacts}/outcome.a15.hyperliquid.unconfirmed.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a17.binance",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A Binance withdrawal remains uncorrelated while independently observed wallet funds support a new signed deposit and unrelated same/different-account operations.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a17.binance.json"
+    },
+    "evidence": "{artifacts}/outcome.a17.binance.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "available_wallet_funds_can_fund_a_new_action_while_withdrawal_correlation_is_unconfirmed",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a1.binance",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Unavailable USD estimate is disclosed and a native transfer executes.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a1.binance.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a1.binance"
+    },
+    "evidence": "{artifacts}/outcome.a1.binance.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "native_exchange_transfer_completes_without_usd_and_does_not_block_probes",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a7.binance",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A verified native transfer completes with partial USD reporting.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a7.binance.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a7.binance"
+    },
+    "evidence": "{artifacts}/outcome.a7.binance.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "native_exchange_transfer_completes_without_usd_and_does_not_block_probes",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a2.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A provider-accepted order with lost response is reconciled once.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a2.kraken.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a2.kraken"
+    },
+    "evidence": "{artifacts}/outcome.a2.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "accepted_order_lost_response_reconciles_without_replay_or_observation_approval",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a3.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A pending order publishes polling guidance and leaves unrelated activity available.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a3.kraken.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a3.kraken"
+    },
+    "evidence": "{artifacts}/outcome.a3.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "pending_exchange_order_polls_with_guidance_and_does_not_block_other_actions",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a22.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "An uncertain same-kind Kraken order is shown with amounts on a later approval.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a22.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a22.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "uncertain_exchange_order_is_shown_on_later_same_account_approval",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a5.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A malformed exchange history row remains unsafe while unrelated orders proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a5.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a5.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "malformed_exchange_history_is_isolated_from_new_orders",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a23.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "An exchange order reaches its horizon via an injected clock; dismissal never makes it replay safe.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a23.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a23.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "human_dismissed_exchange_order_remains_unsafe_to_replay",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a4.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "An uncertain order permits reads and unrelated same/different-account orders; duplicate request keeps its original submission. Configuration and upgrade coverage is separate.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a4.kraken.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a4.kraken"
+    },
+    "evidence": "{artifacts}/outcome.a4.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_kraken_order_stays_uncertain_without_replay",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a20.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "The public CLI disconnects during preparation, approval, post-acceptance and post-confirmation reporting; restart preserves original identity with measured same/different-account probes.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a20.kraken.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a20.kraken"
+    },
+    "evidence": "{artifacts}/outcome.a20.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "exchange_cli_disconnect_restart_preserves_each_admission_boundary",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a1.kraken",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Missing required Kraken market metadata stops preparation before approval and submission; same/different-account orders proceed after service recovery.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a1.kraken.json"
+    },
+    "evidence": "{artifacts}/outcome.a1.kraken.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_exchange_market_metadata_stops_before_approval_and_submission",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  }
+]

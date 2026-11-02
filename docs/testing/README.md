@@ -4,6 +4,9 @@ Use this guide to select evidence for the change being made. It is not a release
 
 ## Positive acceptance scenarios
 
+The full-profile `outcome` group covers A1–A26 of the execution simplification contract. Missing registrations fail the group; they are never marked passed by component tests. Each acceptance scenario uses the real CLI, broker, engine and adapter against a controlled external transport. Record approvals, exact provider submissions per stage, developer interventions, remaining uncertainty and admission probes on the same and another account. The four-action workflow has four logical actions and approvals; provider submission counts follow its actual stages. A13 tests conservative unconfirmed order lookups, not a venue guarantee that absence proves nonexecution. A15 proves Kraken's correlated refund; Binance and Hyperliquid remain unconfirmed when their supported observations cannot prove a refund. The user waived the Coinbase-specific refund and UI-approval cases and requested Coinbase App guidance. A passing qualified aggregate does not erase those evidence limits.
+
+
 The acceptance suite exercises the public CLI, broker and real adapters against
 owned Anvil/Surfpool environments or controlled exchange/bridge transports.
 Use Surfpool for new Solana scenarios. A mock supplies external service behavior;
@@ -14,10 +17,45 @@ settlement implementation.
 make test-e2e-list
 make test-e2e E2E_ARGS='--scenario cli.discovery'
 make test-e2e E2E_ARGS='--group papertrade'
-make test-e2e
+make test-e2e E2E_ARGS='--profile ci'
+make test-e2e # Full coverage remains the local default.
 make test-security
 make test
 ```
+
+Normal branch and main pushes use the explicit **CI profile** in
+`scripts/e2e/ci.json`: 61 scenarios across the same seven groups. The **full
+profile** retains all registered scenarios and remains the default for local
+`make test-e2e`. Release validation explicitly requests `full`. To run full
+coverage on a branch without publishing, manually dispatch the Automated
+financial regressions workflow with `e2e_profile=full`:
+
+```sh
+gh workflow run test.yml --ref YOUR_BRANCH -f e2e_profile=full
+make test-e2e-list E2E_ARGS='--profile ci'
+```
+
+The CI profile keeps all core, exchange, bridge and Papertrade scenarios; all
+four EVM AMM paths plus representative Ethereum Aave/Morpho markets; Jupiter
+swap, perpetual and quote-expiry paths; and 28 outcome cases covering recovery,
+concurrency, continuation, native bounds, migration, Yolo and uncertain venue
+observations. Outcome aggregates already execute their venue leaves, so those
+leaves are not selected a second time in CI.
+
+Additional Aave markets/chains, Morpho Base, JLP, Meteora and Kamino validators
+remain in full coverage. The owned Surfpool blockhash-expiry case runs in CI. Their
+absence from a passing CI-profile run is not evidence that those scenarios ran.
+Critical security negatives remain unchanged. A24 retains CLI/store/configuration
+migration checks; full protected-update interruption tests run once in the
+lifecycle job. A26 retains CLI approval-cancellation checks; native presentation
+runs once in the security job. Release validation retains both separate suites.
+
+The outcome CI job needs Anvil and the owned Surfpool expiry-proof build; the Solana CI job still
+uses Surfpool for the representative Jupiter swap. Job names, artifacts and
+reports identify the profile. Profile definitions reject unknown, duplicate,
+misgrouped or empty selections, and explicitly requesting a scenario outside
+`ci` is an error. Use `--profile full` for that scenario. Run
+`python3 scripts/test-e2e-profiles.py` for selection and reporting checks.
 
 `scripts/e2e/required.json` defines required scenario IDs by group. Executable
 definitions live in `scripts/e2e/*-scenarios.json`. A focused `--scenario` run
@@ -27,6 +65,11 @@ ignored tests are failures, never passes. `test-e2e-list`
 explicitly identifies scenarios that remain unimplemented. An incomplete matrix
 cannot pass CI. `make test` runs the positive scenarios and the explicitly
 retained security-negative cases; it no longer runs every Rust unit test.
+
+For the current Kraken Funding API withdrawal/return flow, run
+`make test-e2e E2E_ARGS='--scenario kraken-funding-v1'`. This focused CLI
+rehearsal verifies included fees, exact ERC20 receipt, usable return credit and
+the standalone preparation-reuse contract; the legacy spot lifecycle remains separate.
 
 Each financial lifecycle must assert observable outcomes: exact balances and
 fees, settled receipts, position/debt/share changes, distinct durable submission
@@ -46,20 +89,19 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
 | Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
-| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each included router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
+| EVM AMMs | Seed liquidity or use a forked pool and verify bounded input/output and finalized balances; do not retest pool mathematics. Sushi/Ramses fork scenarios run four dependent A↔B swaps using verified proceeds, with restart after the second swap; API AMM fixtures retain their separate round trips. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
 | Morpho V2 | Ethereum and Base vault deposit, observe shares, partial withdrawal and redeem remainder. Verify actual assets/shares and receipts. |
-| Jupiter | Meta `/order`→`/execute` swaps in both directions; separate perpetual open/close and JLP mint/burn scenarios. |
+| Jupiter | Four dependent Meta `/order`→`/execute` swaps with only the first input funded and finalized intermediate balances verified; separate perpetual open/close and JLP mint/burn scenarios. |
 | Meteora | DLMM and DAMM v2 position open/add, swap both directions, collect fees, remove liquidity and close; verify token balances and closed position. |
 | Kamino | KLend supply/borrow/SPL transfer-and-return/repay/withdraw; separate lending-vault and liquidity-vault deposit/withdraw lifecycles. |
 | Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |
 | Papertrade | Fund/register, open long, trigger liquidation in fixture, claim that position's PAPER award, stake and claim positive internal trading-USDC. Separate ordinary long/close lifecycle. |
-| Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
+| Cross-provider workflow | Close a Hyperliquid position, withdraw collateral, bridge and swap as four logical actions and approvals, with exact provider submissions counted per stage. |
 
-PancakeSwap V3 is excluded from the required E2E matrix. Its Arbitrum fork
-roundtrip was removed after the initial fee-tier-500 quote returned
-`QUOTE_UNAVAILABLE`; this leaves its public CLI roundtrip unverified by this
-matrix. Product support, discovery and security checks remain in place.
+PancakeSwap V3 is excluded from the required E2E matrix. Its separate owned
+Arbitrum fork rehearsal covers the permit-signed swap and a Sushi return; that
+fixture is not a required-matrix pass or live settlement evidence.
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
 unsupported institutional funding APIs, and CCTP on Robinhood are not made
@@ -97,7 +139,7 @@ fix allows switching to an official binary. Run
 
 ### Reusing E2E evidence after merge
 
-Branch pushes run the complete acceptance suite. On the first `main` push run,
+Branch pushes run the CI acceptance profile. On the first `main` push run,
 CI may reuse a successful same-repository branch-push run from the last 24 hours
 when its entire Git tree is identical to the merged tree. Comparing file trees
 allows merge/squash commit identities to differ while still requiring identical
@@ -105,14 +147,15 @@ source, workflows, tests and dependency lockfiles. A branch that was tested
 against older main content will not match if merging changes the resulting tree.
 
 The lookup checks GitHub's workflow and attempt-specific job records, including
-every group from `scripts/e2e/required.json`, the actual scenario execution steps
+every CI-profile group from `scripts/e2e/ci.json`, the profile-qualified job names and actual scenario execution steps
 and the core mutation checks. It links the reused run in the job summary. It
 does not trust a cached success file or infer success from a PR being merged.
 Missing, failed, stale or unavailable evidence runs the suite normally. The
 required `rust (macos-latest)` check accepts an E2E skip only after this verified
 lookup succeeds; the other checks still have to pass.
 
-Manual dispatch, reruns and release verification always execute fresh E2Es.
+Manual dispatch and reruns always execute fresh E2Es for the selected profile.
+Release verification always executes the full profile and never reuses a CI-profile result.
 The bounded lookup examines up to 100 successful runs; a miss is harmless and
 falls back to execution. Run `python3 scripts/test-ci-e2e-reuse.py` for the
 synthetic evidence and required-gate regression checks.
@@ -275,8 +318,8 @@ source hashes and command logs in the same ignored evidence directory.
 
 Replace positive unit checks once their public behavior is covered by a passing
 scenario. Retain focused negative tests at security boundaries: authority and
-intent binding, revocation, duplicate spending and replay, reservations and
-uncertain outcomes, unverified settlement evidence, exact financial limits,
+intent binding, revocation, duplicate execution and replay,
+uncertain outcomes, unverified settlement evidence, exact native bounds,
 credential isolation and preservation of protected state during migration.
 Do not retain generic formatting or happy-path adapter unit tests merely to
 maintain a test count, or remove a security rejection because a positive flow
@@ -324,7 +367,7 @@ Start with a regression that reproduces the changed behavior, then run the affec
 | --- | --- | --- |
 | Documentation or skills only | Resolve changed links/anchors, check commands against their definitions, validate changed skills, `git diff --check` | Run embedded scripts with synthetic inputs if their behavior changed; no Rust rebuild for prose changes. |
 | CLI parsing, presentation or discovery | Affected CLI/discovery/presentation tests; `make test-ui` for the combined surface | Relevant PTY, redirected, no-color, JSON, cancellation and expiry paths. Regenerate with `make catalog` when financial definitions change, and verify the resulting diff. |
-| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover standalone approval separately from named plans, along with zero/nonzero budgets, fee and asset variants, and malformed-binding rejection. No biometric prompt is needed for contract tests. |
+| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover compact standalone and compound prompts, rejection of malformed structured terms, absence of automatic fee/deadline/classification text, asset variants and advisory history. The CCTP regression must require financial review construction and verify one approval across allowance, burn and mint, including idempotent continuation. No biometric prompt is needed for contract tests. |
 | One adapter, pricing or network behavior | Relevant `cargo test --locked -p <crate>` target/filter and affected broker integration tests | Exercise real adapter preparation through the engine and settlement boundary. Use an owned fork if deployed contract behavior matters. |
 | Engine, store, shared types or authorization | Tests in affected crates and representative consuming adapters/broker workflows | Cover financial limits, exact approvals, duplicates, uncertainty, restart and migrations as affected. Use `make test-integration` for the combined broker/store/authorization and lifecycle surface. |
 | Development environment lifecycle | Individual affected Python suite in `scripts/`; `make test-dev-env` for combined ownership/recovery/routing checks | Use temporary state roots and synthetic credentials, including tests of live-mode composition. No real import or funded operation is required. |
@@ -385,8 +428,8 @@ that obtains the binding from the real Rust producer and passes it to the real
 Swift presentation function. Assert the material amounts and limits, not only a
 nonempty string. Retain malformed and mismatched fixtures to verify rejection;
 never replace a failing exact review with a permissive generic fallback.
-Standalone approval and named-plan approval use different presentation paths
-and need separate coverage when affected.
+Standalone and compound native terms need coverage from their real producers,
+including explicit deadlines and action-wide fee caps.
 
 `make test-native-approval` runs the full Swift presentation suite, generates and
 consumes the Rust manual-resolution fixture and every action from the Rust approval
@@ -404,7 +447,7 @@ metadata and checks that revalidation neither refetches nor changes the approved
 name. Missing metadata and mismatched mint/decimals retain the identity fallback.
 
 Producer-to-Swift checks also run in the existing Coinbase, Binance, Kamino and
-bridge broker fixtures, including standalone, plan and reusable-boundary paths,
+bridge broker fixtures, including standalone and compound paths,
 and in the Ethereum Aave borrowing and Papertrade workflow fixtures. These use real
 preparation against synthetic transports, the production canonical review envelope
 and the compiled Swift renderer. Additional synthetic Perps contract tests cover
@@ -423,19 +466,11 @@ Use the worktree-owned [development environment](development-environments.md) fo
 
 `make test-dev-env` covers synthetic lifecycle, actual development runtime, ownership, recovery and routing fixtures without Anvil. `make test-integration` includes that target, so do not run both unchanged back to back. Most individual regression suites can run without a persistent development broker.
 
-`make test-full-plan-rehearsal` runs one ten-step plan through the public CLI,
-broker and real Kraken, Ethereum/Aave, bridge and Hyperliquid adapters, using local
-controlled transports and disposable credentials. It covers a Kraken sale and
-withdrawal, wrapping and finite approval, Aave supply and bounded borrowing,
-one adapter-scoped `bridge.execute` step funded by the prior borrow (with separate
-saved-quote approval and deposit children), destination settlement, then Hyperliquid
-funding, isolated leverage and an order under one approval. Variants reconcile an accepted Kraken
-order after response loss without resubmission, or retain the original unknown
-submission and block downstream work when history remains inconclusive. The test
-checks debt, allowance consumption, gas, destination credit and duplicate handling;
-it also rejects a perpetual order's fictitious principal funding during full-plan
-review, before approval or writes, while retaining valid fee-funded execution.
-This is synthetic workflow evidence, not a fork, live trade or native approval test.
+Named-plan and reusable-boundary creation are retired. Replace their workflow
+coverage with separately approved actions using original-identity status and
+continuation between dependent stages. The required four-action workflow counts
+four logical actions and four approvals; provider submissions are counted per
+stage, including any prerequisite allowance or bridge finalization.
 
 `make test-coinbase` includes public-CLI deposit and sale-funded withdrawal
 recovery scenarios using the actual Coinbase transport against local HTTP.
@@ -469,11 +504,11 @@ For Kamino, `cargo test --locked -p gofin-kamino` exercises native protocol
 decoding, controlled RPC preparation, custody and adapter lifecycle assertions.
 `make test-kamino-rehearsal` uses the public CLI, broker, real Jupiter/Kamino
 adapters and Solana receipt runtime with synthetic transports and an injected
-Kamino protocol graph. It covers separate named-plan steps, variable proceeds,
+Kamino protocol graph. It covers separately approved actions, variable proceeds,
 residuals, later-step failure and restart recovery; it does not prove deployed
 program behavior. Both vault families also exercise expired submitted attempts
 against two owned HTTP RPC fixtures: incomplete or single-source history keeps
-the reservation, corroborated complete block coverage permits a failed settlement
+the original outcome uncertain; corroborated complete block coverage permits a failed settlement
 with zero effects, and restart or repeated status never broadcasts again.
 The lending and liquidity scripts named
 `scripts/verify-kamino-*-validator.py` prepare ignored public account clones with
@@ -497,12 +532,12 @@ human approval evidence.
 
 ## Complete workflow rehearsal
 
-For execution-path changes, verify the affected scenario across the boundaries it crosses: public CLI → broker → engine authority/reservations → real adapter preparation → controlled transport → reconciliation and durable settlement. Use isolated credentials, temporary journals and a fixture authorizer while retaining production financial logic. Fix or extend the relevant harness when coverage is missing; a generic synthetic write or a preview cannot establish adapter workflow correctness.
+For execution-path changes, verify the affected scenario across the boundaries it crosses: public CLI → broker → engine native authority and durable admission → real adapter preparation → controlled transport → reconciliation and durable settlement. Use isolated credentials, temporary journals and a fixture authorizer while retaining production financial logic. Fix or extend the relevant harness when coverage is missing; a generic synthetic write or a preview cannot establish adapter workflow correctness.
 
-Match the intended standalone, boundary or named-plan mode. A future-funded step must execute after verified predecessor credit; a plan preview or successful standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
+Match the intended standalone or compound mode. A dependent compound stage must execute after its declared prerequisite is verified; a preview or unrelated standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
 
 For Meteora, `make test-meteora-rehearsal` covers the synthetic public-CLI swap
-and named-plan authority/recovery fixture. `make test-meteora-validator`
+and native action authority/recovery fixture. `make test-meteora-validator`
 exercises adapter instruction and proof behavior on cloned local programs;
 `make test-meteora-cli-validator` exercises the complete public CLI, broker,
 engine and settlement path on those programs using pinned patched Surfpool.
@@ -511,14 +546,14 @@ the required acceptance matrix. Both use synthetic clone fixtures and never use
 live signing credentials or submit to the public RPC.
 
 For Papertrade, `make test-papertrade-rehearsal` builds the identity-matched
-development CLI and runs named-plan quota, BTC/ETH long/short open-and-close,
+development CLI and runs native action approval, BTC/ETH long/short open-and-close,
 staking/reward claim, position-scoped liquidation observation, and funding
 scenarios through the parser, socket transport, broker, engine and adapter.
 Controlled transport fixtures compose the actual funding planner and protected
 host for Core deposit, Core-credit withdrawal, and HyperEVM withdrawal stage
 one; they verify canonical evidence and that retries do not redispatch settled
-legs. The named-plan recovery path covers a lost Core response, a linked exact
-Noop child, parent reservation release, and a fresh same-step attempt. A lost
+legs. The recovery path covers a lost Core response and a linked exact
+Noop child; a new attempt needs proof against duplicate execution and fresh authority. A lost
 Noop response remains unresolved and cannot be replayed or replaced by a
 second child. The same target runs controlled `BrokerPapertradeRuntime`
 session-registration and withdrawal-continuation scenarios against synthetic
@@ -534,7 +569,7 @@ current liquidity, or native approval.
 | Outcomes | Full/partial/no fill, verified rejection or revert with costs, missing/conflicting proof. |
 | Recovery and authority | Response loss before/after dispatch, duplicates, restart, cancellation races, expiry/revocation and upgrades with pending records. |
 
-Specify expected financial effects independently of the accounting helper being tested. Assert actual fixture balances/positions/permissions, verified effects, journal identities, reservations and remaining authority. An uncertain submission must retain its identity and reservation without another dispatch. A reverted transaction may spend gas without producing the requested effect; verify both facts.
+Specify expected financial effects independently of the accounting helper being tested. Assert actual fixture balances/positions/permissions, verified effects, journal identities, actual stage costs and remaining native authority. An uncertain submission must retain its original identity without another dispatch. A reverted transaction may spend gas without producing the requested effect; verify both facts.
 
 Turn defects found during E2E or human testing into reproducible regressions at the failing component boundary. Re-run affected scenarios after fixes against the matching build; preserve settled steps when resuming live work. Do not weaken assertions, discard pending state or substitute authorization modes to obtain a pass. An unchanged passing suite need not run again without a concrete reason.
 
@@ -551,13 +586,12 @@ corrupt/unreadable state, migration and startup failures, atomic-save failures
 including interruption, concurrent enable/disable and authoritative reload.
 Hold attempts at pre-admission and post-admission barriers: disable must reject
 the former and preserve the latter's immutable identity and reconciliation.
-Off/on must never revive an earlier activation's grant or plan revision.
+Off/on must never revive an earlier activation's unused action authority.
 
-Cover standalone writes, boundary creation/replacement and execution, plan
-creation/revision and explicit sequential steps, cleanup and recovery writes.
-Assert policy and parameter-boundary rejection while active, exact audit source,
-revision and fresh per-attempt check times, duplicate prevention and uncertain
-submission reservations. Human authority and disposable development approval
+Cover standalone writes, compound stage admission and continuation, cleanup and
+recovery writes. Assert native-term rejection while active, exact audit source,
+revision and fresh per-attempt check times, duplicate prevention and preservation
+of uncertain submission identities. Human authority and disposable development approval
 remain distinguishable. Test terminal provenance, sudo failure, immediate
 single-key `y`/`Y` without Enter, Enter/invalid/no responses, EOF, cancellation,
 timeout, input flushing and restoration,

@@ -103,18 +103,34 @@ impl KrakenClient {
                 if job.reply.is_closed() { continue; }
                 let cost=job.endpoint.cost();
                 if job.endpoint.futures(){futures.throttle(&[ccxt::Value::Float(cost)]).await;}else{spot.throttle(&[ccxt::Value::Float(cost)]).await;}
-                let result=async {
+                let prepared=async {
                     let parameter_digest=hex::encode(Sha256::digest(serde_json::to_vec(&job.parameters).map_err(|_|failure(CcxtErrorKind::InvalidRequest))?));
-                    if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(local_no_dispatch(job.endpoint,&parameter_digest,"before_signing")); }
+                    if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(Err(local_no_dispatch(job.endpoint,&parameter_digest,"before_signing"))); }
                     let wire=match ccxt_request::request(job.endpoint,job.parameters,job.credentials.as_ref(),nonces.as_ref(),base.as_deref()).await {
                         Ok(wire) => wire,
                         // Signing and nonce preparation contain no network dispatch.
                         // Seal this positive local evidence instead of losing it in
                         // an ordinary error after the durable submission was saved.
-                        Err(_) if job.endpoint.mutating() => return Ok(local_signing_failure(job.endpoint,&parameter_digest)),
+                        Err(_) if job.endpoint.mutating() => return Ok(Err(local_signing_failure(job.endpoint,&parameter_digest))),
                         Err(error) => return Err(error),
                     };
                     // Recheck after signing/nonce commit and immediately before dispatch.
+                    if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(Err(local_no_dispatch(job.endpoint,&parameter_digest,"before_http_dispatch"))); }
+                    Ok(Ok((parameter_digest, wire)))
+                }.await;
+                let (parameter_digest, wire) = match prepared {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(rejection)) => { let _ = job.reply.send(Ok(rejection)); continue; }
+                    Err(error) => { let _ = job.reply.send(Err(error)); continue; }
+                };
+                let http = http.clone();
+                // The shared CCXT cores above serialize throttling and durable nonce
+                // allocation. Each response has its own error parser and storage.
+                tokio::spawn(async move {
+                    let result=async {
+                    let parser_config=ccxt::Value::from(serde_json::json!({"enableRateLimit":true,"verbose":false,"maxRetriesOnFailure":0}));
+                    let spot=ccxt::exchanges::kraken::KrakenCore::new(Some(parser_config.clone()));
+                    let futures=ccxt::exchanges::krakenfutures::KrakenfuturesCore::new(Some(parser_config));
                     if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(local_no_dispatch(job.endpoint,&parameter_digest,"before_http_dispatch")); }
                     let mut request=http.request(wire.method,&wire.url).headers(wire.headers);
                     if let Some(body)=wire.body { request=request.body(body); }
@@ -173,7 +189,9 @@ impl KrakenClient {
                     else if let Some(json)=parsed { Ok(KrakenResponse::Json(json)) }
                     else { Err(failure(CcxtErrorKind::InvalidResponse)) }
                 }.await;
-                let _=job.reply.send(result);
+                    let _=job.reply.send(result);
+                });
+                tokio::task::yield_now().await;
             }
         })).map_err(|_|failure(CcxtErrorKind::Unavailable))?;
         Ok(Self { sender })

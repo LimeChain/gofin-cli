@@ -2211,7 +2211,7 @@ pub async fn refresh(
         return Ok(Some(refresh_international_edit(profile, approved).await?));
     }
     if approved.operation == "coinbaseinternational.create-order" {
-        let mut fresh = prepare_international_order(profile, &approved.input, false).await?;
+        let fresh = prepare_international_order(profile, &approved.input, false).await?;
         let immutable = [
             "account",
             "portfolioId",
@@ -2234,7 +2234,6 @@ pub async fn refresh(
                 "International portfolio, instrument, fee cap or exact order body changed after approval.",
             ));
         }
-        gofin_domain::value_bounds::carry(approved, &mut fresh)?;
         return Ok(Some(fresh));
     }
     if approved.operation == "coinbaseexchange.cancel-order" {
@@ -2263,7 +2262,7 @@ pub async fn refresh(
     if approved.operation != "coinbaseexchange.create-order" {
         return Ok(None);
     }
-    let mut fresh = prepare_exchange_order(profile, &approved.input, false).await?;
+    let fresh = prepare_exchange_order(profile, &approved.input, false).await?;
     let immutable = [
         "account",
         "physicalIdentity",
@@ -2285,7 +2284,6 @@ pub async fn refresh(
             "Exchange product, account, fee bound, or exact order body changed after approval.",
         ));
     }
-    gofin_domain::value_bounds::carry(approved, &mut fresh)?;
     Ok(Some(fresh))
 }
 
@@ -3337,7 +3335,7 @@ async fn reconcile_exchange_order(
         event_digests,
         position_orders: vec![],
     };
-    let evidence = json!({"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"allFillsSettled":all_fills_settled,"withinAuthorizedBounds":within_bounds});
+    let evidence = json!({"outcome_live_order":matches!(status_text.as_str(), "open" | "active"),"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"allFillsSettled":all_fills_settled,"withinAuthorizedBounds":within_bounds});
     let mut verified = None;
     if !effects.is_empty() || status.terminal() {
         let mut bundle = VerifiedEffects {
@@ -3778,7 +3776,7 @@ async fn prepare_international_order(
     } else {
         vec![fee_bound.clone()]
     };
-    let valuation = profile.financial_valuation(&debits, &costs).await?;
+    let valuation = profile.financial_valuation(&debits, &costs).await.ok();
     let minimum_receive =
         Quantity::from_decimal(input["minimumReceive"].as_str().expect("validated"), 36)?;
     let output_floor = if side == "SELL" {
@@ -3786,8 +3784,7 @@ async fn prepare_international_order(
     } else {
         minimum_receive
     };
-    let mut prepared=PreparedOperation{operation:"coinbaseinternational.create-order".into(),input:input.clone(),binding:json!({"version":1,"provider":"coinbaseinternational","account":account.name,"resource":account.resource,"physicalIdentity":account.physical_identity,"portfolioId":portfolio,"clientOrderId":client_oid,"instrument":instrument_name,"instrumentId":instrument["instrument_id"],"instrumentUuid":instrument["instrument_uuid"],"baseAssetId":base_id,"quoteAssetId":quote_id,"baseAssetName":base,"quoteAssetName":quote,"side":side,"baseSize":size,"limitPrice":price,"timeInForce":time_in_force,"postOnly":post_only,"priceIncrement":price_increment,"feeRate":fee_rate,"estimatedFee":estimated_fee.to_decimal(36),"requestBodyExact":request_body}),summary:format!("Place Coinbase International {side} {base}/{quote} spot limit {time_in_force} order for {size} at {price}"),checks:vec![Check{name:"instrument_fees_balance".into(),status:CheckStatus::Passed,detail:"Exact spot instrument increments, current worst-case spot fee tier, and unencumbered enrolled-portfolio balance were checked locally; INTX exposes no verified native preview route.".into()}],warnings:vec!["Order acceptance is not settlement; native order state and complete fills must reconcile before treating balances as final.".into()],observed_at:gofin_domain::now(),expires_at:(chrono::Utc::now()+chrono::Duration::seconds(45)).to_rfc3339(),valuation:Some(valuation),intent:FinancialIntent{debits,maximum_costs:costs,expected:vec![EffectConstraint::Conversion{resource:account.resource.clone(),input:provider_asset(CoinbaseProduct::International, spend_asset),maximum_input:debit,output:provider_asset(CoinbaseProduct::International, if side=="BUY"{base_id}else{quote_id}),minimum_output:output_floor}],locks:vec![account.resource.clone()]},operation_version:1,action_deadline:None};
-    gofin_domain::value_bounds::bind(&mut prepared);
+    let prepared=PreparedOperation{operation:"coinbaseinternational.create-order".into(),input:input.clone(),binding:json!({"version":1,"provider":"coinbaseinternational","account":account.name,"resource":account.resource,"physicalIdentity":account.physical_identity,"portfolioId":portfolio,"clientOrderId":client_oid,"instrument":instrument_name,"instrumentId":instrument["instrument_id"],"instrumentUuid":instrument["instrument_uuid"],"baseAssetId":base_id,"quoteAssetId":quote_id,"baseAssetName":base,"quoteAssetName":quote,"side":side,"baseSize":size,"limitPrice":price,"timeInForce":time_in_force,"postOnly":post_only,"priceIncrement":price_increment,"feeRate":fee_rate,"estimatedFee":estimated_fee.to_decimal(36),"requestBodyExact":request_body}),summary:format!("Place Coinbase International {side} {base}/{quote} spot limit {time_in_force} order for {size} at {price}"),checks:vec![Check{name:"instrument_fees_balance".into(),status:CheckStatus::Passed,detail:"Exact spot instrument increments, current worst-case spot fee tier, and unencumbered enrolled-portfolio balance were checked locally; INTX exposes no verified native preview route.".into()}],warnings:vec!["Order acceptance is not settlement; native order state and complete fills must reconcile before treating balances as final.".into()],observed_at:gofin_domain::now(),expires_at:(chrono::Utc::now()+chrono::Duration::seconds(45)).to_rfc3339(),valuation,intent:FinancialIntent{debits,maximum_costs:costs,expected:vec![EffectConstraint::Conversion{resource:account.resource.clone(),input:provider_asset(CoinbaseProduct::International, spend_asset),maximum_input:debit,output:provider_asset(CoinbaseProduct::International, if side=="BUY"{base_id}else{quote_id}),minimum_output:output_floor}],locks:vec![account.resource.clone()]},operation_version:1,action_deadline:None};
     Ok(prepared)
 }
 
@@ -5427,7 +5424,7 @@ async fn reconcile_international_authoritative(
         event_digests,
         position_orders: vec![],
     };
-    let evidence = json!({"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"withinAuthorizedBounds":within});
+    let evidence = json!({"outcome_live_order":working,"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"withinAuthorizedBounds":within});
     let mut verified = None;
     if !effects.is_empty() || status.terminal() {
         let mut bundle = VerifiedEffects {
@@ -5743,9 +5740,9 @@ async fn prepare_exchange_order(
         },
     }];
     let costs = vec![cost];
-    let valuation = profile.financial_valuation(&debits, &costs).await?;
+    let valuation = profile.financial_valuation(&debits, &costs).await.ok();
     let now = gofin_domain::now();
-    let mut prepared = PreparedOperation {
+    let prepared = PreparedOperation {
         operation: "coinbaseexchange.create-order".into(),
         input: input.clone(),
         binding: json!({"version":1,"provider":"coinbaseexchange","account":account.name,"resource":account.resource,"physicalIdentity":account.physical_identity,"clientOrderId":client_oid,"productId":product_id,"baseCurrencyId":base,"quoteCurrencyId":quote,"baseSize":size,"limitPrice":price,"timeInForce":time_in_force,"feeRate":rate,"estimatedFee":fee.to_decimal(36),"requestBodyExact":exact_body}),
@@ -5754,7 +5751,7 @@ async fn prepare_exchange_order(
         warnings: vec!["Exchange has no native preview route; execution price is capped by the exact limit order, but fill and settlement require reconciliation.".into()],
         observed_at: now,
         expires_at: (chrono::Utc::now()+chrono::Duration::seconds(45)).to_rfc3339(),
-        valuation:Some(valuation),
+        valuation,
         intent: FinancialIntent {
             debits,
             maximum_costs: costs,
@@ -5764,7 +5761,6 @@ async fn prepare_exchange_order(
         operation_version:1,
         action_deadline:None,
     };
-    gofin_domain::value_bounds::bind(&mut prepared);
     Ok(prepared)
 }
 

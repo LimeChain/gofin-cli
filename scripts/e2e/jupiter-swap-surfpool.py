@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public Meta swap round trip against native Surfpool SPL accounts."""
+"""Four dependent public Meta swaps against native Surfpool SPL accounts."""
 import importlib.util
 import json
 import os
@@ -39,14 +39,19 @@ with native.Surfpool(state / 'execution', snapshot) as node:
     native.set_native_balance(node.rpc, maker, 1_000_000_000)
     accounts = {}
     balances = []
-    for owner, amount in ((maker, 100_000_000_000), (wallet, 100_000_000)):
+    for owner in (maker, wallet):
         for mint in (USDT, h.USDC):
+            amount = 100_000_000_000 if owner == maker else (1_000_000 if mint == USDT else 0)
             row = native.fund_token(node.rpc, owner, {'mint':mint,'token_program':TOKEN,'decimals':6}, amount)
             balances.append(row)
             accounts[(owner,mint)] = row['address']
     native.save(state / 'initial-balances.json', balances)
     name = f'jup-swap-{run_id}'
-    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=node.url,
+    import importlib.util
+    counter_spec = importlib.util.spec_from_file_location('rpc_counter', ROOT / 'scripts/e2e/rpc-counting-proxy.py')
+    counter_module = importlib.util.module_from_spec(counter_spec); counter_spec.loader.exec_module(counter_module)
+    counter = counter_module.CountingRpcProxy(node.url)
+    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=counter.url,
                GOFIN_METEORA_VALIDATOR_WALLET_KEY=str(wallet_key), GOFIN_SURFPOOL_ADVANCE='1', GOFIN_JUPITER_VALIDATOR='swap')
     h.ACTIVE_EVIDENCE = {'run_id': run_id}
     started = False
@@ -58,15 +63,36 @@ with native.Surfpool(state / 'execution', snapshot) as node:
     try:
         rows['start'] = h.start_environment(env, name); started = True
         before = read_balances(); rows['before'] = before
-        for label, source, destination, amount, minimum in [('forward',USDT,h.USDC,1000000,1000000), ('reverse',h.USDC,USDT,1000000,1000000)]:
+        amount = 1_000_000
+        previous = before
+        for index, (source, destination) in enumerate([(USDT,h.USDC), (h.USDC,USDT)] * 2):
+            label = f'swap-{index + 1}'
+            minimum = amount
             request = {'wallet':h.WALLET_ALIAS, 'network':'solana', 'cluster':'mainnet-beta', 'input_mint':source, 'output_mint':destination, 'amount_atoms':str(amount), 'minimum_output_atoms':str(minimum), 'maximum_slippage_bps':50, 'maximum_platform_fee_bps':0, 'maximum_network_fee_lamports':20000, 'maximum_account_funding_lamports':0}
             rows['operations'][label] = h.execute(env, name, 'jupiter.swap', request, label)
-            rows[label + '_balances'] = read_balances()
-        if rows['forward_balances'] != {'wallet_usdt':before['wallet_usdt']-1000000,'wallet_usdc':before['wallet_usdc']+1000000,'maker_usdt':before['maker_usdt']+1000000,'maker_usdc':before['maker_usdc']-1000000}:
-            raise AssertionError('Forward finalized SPL balances differ from the ordered amounts')
-        if rows['reverse_balances'] != before: raise AssertionError('Round trip did not restore all four SPL balances')
+            current = read_balances()
+            rows[label + '_balances'] = current
+            input_label, output_label = ('usdt','usdc') if source == USDT else ('usdc','usdt')
+            received = current[f'wallet_{output_label}'] - previous[f'wallet_{output_label}']
+            expected = dict(previous)
+            expected[f'wallet_{input_label}'] -= amount
+            expected[f'maker_{input_label}'] += amount
+            expected[f'wallet_{output_label}'] += amount
+            expected[f'maker_{output_label}'] -= amount
+            if current != expected or received <= 0:
+                raise AssertionError(f'{label} finalized SPL balances differ from the ordered amounts')
+            amount = received
+            previous = current
+        if previous != before: raise AssertionError('Four-swap sequence did not restore all four SPL balances')
+        if len({record['id'] for record in rows['operations'].values()}) != 4:
+            raise AssertionError('Dependent swaps reused an operation identity')
+        if len({json.dumps(record['submission'], sort_keys=True) for record in rows['operations'].values()}) != 4:
+            raise AssertionError('Dependent swaps reused a submission identity')
+        rows['swap_count'] = 4
+        h.emit_outcome_evidence('jupiter-swaps', h.ACTIVE_EVIDENCE.get('approval_nonces', []), counter.count)
         rows['result'] = 'passed'
     finally:
         if started: h.stop_environment(env, name)
+        counter.close()
         native.save(state / 'evidence.json', rows)
 print(json.dumps({'result':'passed','evidence':str((state/'evidence.json').relative_to(ROOT))}))

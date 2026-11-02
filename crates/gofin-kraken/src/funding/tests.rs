@@ -401,6 +401,37 @@ mod reconciliation {
         );
     }
     #[tokio::test]
+    async fn withdrawal_destination_uses_original_source_evidence_without_venue_reads() {
+        let (profile, fixture) = profile(vec![
+            (E::KrakenPrivatePostWithdrawStatus, status()),
+            (E::KrakenPrivatePostLedgers, ledger()),
+        ]);
+        let profile = profile.with_recipient_verifier(Arc::new(Receipt(Status::Completed)));
+        let mut binding = withdrawal(VerificationRequirement::DestinationReceipt);
+        binding.destination = Some(destination());
+        let submission = submission(json!({"account":account().name,"funding":binding}));
+        let mut record = record(
+            &submission,
+            Some(json!({"response":{"result":{"refid":"original-venue-id"}}})),
+        );
+        let source = profile
+            .observe_funding_side(&record, &submission, "source")
+            .await
+            .unwrap();
+        record.last_reconciliation_evidence = Some(source.reconciliation.unwrap().evidence);
+        assert!(fixture.0.lock().unwrap().is_empty());
+        let destination = profile
+            .observe_funding_side(&record, &submission, "destination")
+            .await
+            .unwrap();
+        assert!(fixture.0.lock().unwrap().is_empty());
+        assert_eq!(destination.metadata["status"], "completed");
+        let reconciliation = destination.reconciliation.unwrap();
+        assert_eq!(reconciliation.status, Status::Pending);
+        assert_eq!(reconciliation.evidence["outcome_transfer"], "credited");
+    }
+
+    #[tokio::test]
     async fn pending_recipient_receipt_does_not_create_any_terminal_effects() {
         let (p, _) = profile(vec![
             (E::KrakenPrivatePostWithdrawStatus, status()),
@@ -573,8 +604,13 @@ mod reconciliation {
                 .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
                 .await
                 .unwrap();
-            assert_eq!(r.status, Status::Unknown, "case {case}");
-            assert!(r.verified.is_none());
+            if case == 8 {
+                assert_eq!(r.status, Status::Completed);
+                assert!(r.verified.unwrap().effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost { amount, .. } if amount.atoms == Quantity::from_decimal("0.627", 36).unwrap())));
+            } else {
+                assert_eq!(r.status, Status::Unknown, "case {case}");
+                assert!(r.verified.is_none());
+            }
         }
     }
     #[test]
@@ -725,6 +761,26 @@ mod reconciliation {
         );
     }
     #[tokio::test]
+    async fn failed_withdrawal_waits_for_correlated_refund() {
+        let (b, h, response, mut principal, fee) = current_separate_fee(false);
+        principal["result"]["ledger"]
+            .as_object_mut()
+            .unwrap()
+            .remove("refund");
+        let (p, _) = profile(vec![
+            (E::KrakenFundingGetFundingV1Withdrawals, h),
+            (E::KrakenPrivatePostLedgers, principal),
+            (E::KrakenPrivatePostLedgers, fee),
+        ]);
+        let result = p
+            .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Failed);
+        assert_eq!(result.evidence["outcome_transfer"], "source_pending");
+        assert!(result.verified.is_none());
+    }
+    #[tokio::test]
     async fn failed_current_withdrawal_returns_principal_and_books_only_proven_fee_asset_cost() {
         for refunded in [false, true] {
             let (b, h, response, l, mut fee) = current_separate_fee(false);
@@ -741,10 +797,18 @@ mod reconciliation {
                 .await
                 .unwrap();
             assert_eq!(r.status, Status::Failed);
+            assert_eq!(r.evidence["outcome_transfer"], "returned_to_source");
             let effects = r.verified.unwrap().effects;
             assert!(
                 matches!(&effects[0],FinancialEffect::CashDebit{amount,..}if amount.asset.reference=="USDC"&&amount.atoms==Quantity::from_decimal(if refunded{"0.0001"}else{"0.001"},36).unwrap())
             );
+            assert!(effects.iter().any(|e| matches!(
+                e,
+                FinancialEffect::Cost {
+                    treatment: CostTreatment::AdditionalDebit,
+                    ..
+                }
+            )));
             assert!(
                 !effects
                     .iter()
@@ -994,7 +1058,7 @@ mod reconciliation {
                 "-0.001",
                 Status::Pending,
             ),
-            (Some(vec![]), "-0.002", Status::Unknown),
+            (Some(vec![]), "-0.002", Status::Completed),
             (Some(vec![]), "-0.0006", Status::Completed),
         ] {
             let (profile, _) = profile(vec![
@@ -1022,7 +1086,7 @@ mod reconciliation {
             let reconciled=profile.reconcile_funding(&record(&submission,Some(json!({"response":{"result":[{"address":"0x1111111111111111111111111111111111111111"}]}}))),&submission).await.unwrap();
             assert_eq!(reconciled.status, expected);
             if expected == Status::Completed {
-                assert!(reconciled.verified.unwrap().effects.iter().any(|effect| matches!(effect,FinancialEffect::Cost{amount,treatment:CostTreatment::AdditionalDebit,..}if amount.atoms==Quantity::from_decimal("0.0006",36).unwrap())));
+                assert!(reconciled.verified.unwrap().effects.iter().any(|effect| matches!(effect,FinancialEffect::Cost{amount,treatment:CostTreatment::AdditionalDebit,..}if amount.atoms==Quantity::from_decimal(charged.trim_start_matches('-'),36).unwrap())));
             } else {
                 assert!(reconciled.verified.is_none());
             }

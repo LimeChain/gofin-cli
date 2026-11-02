@@ -6,6 +6,10 @@ struct Client {
 }
 impl Client {
     async fn new(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path) -> Self {
+        Self::with_reporting_barrier(runtime, dir, None).await
+    }
+    #[allow(dead_code)]
+    async fn with_reporting_barrier(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path, barrier: Option<Arc<(std::sync::atomic::AtomicBool,std::sync::atomic::AtomicBool)>>) -> Self {
         use tokio::{
             io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
             net::UnixListener,
@@ -18,6 +22,7 @@ impl Client {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let runtime = r.clone();
+                let barrier = barrier.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -35,20 +40,38 @@ impl Client {
                     let input: Value = serde_json::from_str(&line).unwrap();
                     let request: BrokerRequest =
                         serde_json::from_value(input["request"].clone()).unwrap();
-                    // Match production's boxed request boundary on broker-sized
-                    // workers; this transport does not negotiate cancellable reads.
-                    let response = gofin_protocol::progress::observe(
-                        reader.get_mut(),
-                        input["progress"].as_bool().unwrap_or(false),
-                        runtime.handle_client_request(request, false),
-                    )
-                    .await;
+                    let financial = input["cancel_on_disconnect"].as_bool().unwrap_or(false)
+                        && matches!(
+                            request,
+                            BrokerRequest::Execute { .. }
+                                | BrokerRequest::ContinueOperation { .. }
+                                | BrokerRequest::ReauthorizeOperation { .. }
+                        );
+                    let response = if financial {
+                        gofin_protocol::progress::observe_financial_request(
+                            reader.get_mut(),
+                            input["progress"].as_bool().unwrap_or(false),
+                            false,
+                            Box::pin(runtime.handle_client_request(request, false)),
+                        )
+                        .await
+                    } else {
+                        gofin_protocol::progress::observe(
+                            reader.get_mut(),
+                            input["progress"].as_bool().unwrap_or(false),
+                            Box::pin(runtime.handle_client_request(request, false)),
+                        )
+                        .await
+                    };
+                    if response.result.as_ref().is_some_and(|value| value["status"] == "completed") && let Some(barrier) = barrier {
+                        barrier.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                        while !barrier.1.load(std::sync::atomic::Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+                    }
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
-                    reader
+                    let _ = reader
                         .get_mut()
                         .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
+                        .await;
                 });
             }
         });
@@ -87,7 +110,12 @@ impl Client {
             assert_eq!(output.status.success(), ok, "{value}");
             value
         } else {
-            let result = self.runtime.handle(request).await;
+            let invocation = gofin_domain::execution_progress::Invocation::new(
+                std::time::Duration::from_secs(300),
+            );
+            let result = invocation
+                .scope(Box::pin(self.runtime.handle(request)))
+                .await;
             assert_eq!(result.ok, ok, "{:?}", result.error);
             if ok {
                 result.result.unwrap()

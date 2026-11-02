@@ -103,6 +103,8 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
                     | "remove"
                     | "policy_set"
                     | "configure"
+                    | "runtime_update"
+                    | "operation_dismiss"
             )
         )
         && challenge.binding["financial_movement"] == false

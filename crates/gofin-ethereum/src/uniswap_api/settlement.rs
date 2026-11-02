@@ -346,7 +346,7 @@ impl EthereumAdapter {
                 "A reverted filler transaction cannot settle an order.",
             )?;
             verify_fill(&receipt, &b, &s.reference)?;
-            (receipt, U256::ZERO)
+            (receipt, Some(U256::ZERO))
         } else {
             require(
                 s.kind == "ethereum"
@@ -369,6 +369,14 @@ impl EthereumAdapter {
                 .receipt(s, &tx, self.config.confirmations)
                 .await?
             else {
+                if let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    self.runtime.finalized_nonce_replacement(s, &tx),
+                )
+                .await
+                {
+                    return Ok(proof);
+                }
                 return Ok(pending(s, json!({"reason":"transaction-pending"})));
             };
             if self.config.requires_rpc_finalized()
@@ -381,15 +389,10 @@ impl EthereumAdapter {
                 return Ok(pending(s, json!({"reason":"awaiting-finality"})));
             }
             let fee = receipt.fee;
-            require(
-                fee <= u256(&b.maximum_fee)?,
-                "FEE_LIMIT",
-                "Settled swap fee exceeds the approved bound.",
-            )?;
             (receipt, fee)
         };
         let mut effects = vec![];
-        if !fee.is_zero() {
+        if let Some(fee) = fee.filter(|fee| !fee.is_zero()) {
             effects.push(FinancialEffect::Cost {
                 location: AccountingLocation::Cash {
                     resource: b.resource.clone(),
@@ -404,7 +407,7 @@ impl EthereumAdapter {
                 s,
                 Status::Failed,
                 effects,
-                json!({"transaction_hash":format!("{:#x}",receipt.hash),"reverted":true,"fee_wei":quantity(fee)}),
+                json!({"transaction_hash":format!("{:#x}",receipt.hash),"reverted":true,"outcome_replay_safe":true,"fee_wei":fee.map(quantity),"outcome_reporting":if fee.is_some() {"complete"} else {"partial"}}),
             );
         }
         let owner = address(&b.owner)?;
@@ -453,11 +456,9 @@ impl EthereumAdapter {
         };
         let spent = sub(input_out, input_in)?;
         let received = sub(output_in, output_out)?;
-        require(
-            spent == u256(&b.units)? && received >= u256(&b.minimum_output)?,
-            "SWAP_SETTLEMENT_MISMATCH",
-            "Verified wallet transfers violate the approved exact input or output floor.",
-        )?;
+        let approved_input = u256(&b.units)?;
+        let approved_minimum = u256(&b.minimum_output)?;
+        let approved_fee = u256(&b.maximum_fee)?;
         effects.push(FinancialEffect::Conversion {
             resource: b.resource.clone(),
             spent: amount(&b.token, spent),
@@ -466,12 +467,14 @@ impl EthereumAdapter {
         if !self.inclusion_still_canonical(&receipt).await? {
             return Ok(pending(s, json!({"reason":"inclusion-changed"})));
         }
-        verified(
-            s,
-            Status::Completed,
-            effects,
-            json!({"provider":PROVIDER,"routing":b.quote.routing,"order_id":b.quote.order_hash,"transaction_hash":format!("{:#x}",receipt.hash),"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"input_atoms":quantity(spent),"output_atoms":quantity(received),"fee_wei":quantity(fee),"finality":self.config.finality_label()}),
-        )
+        let mut evidence = json!({"provider":PROVIDER,"routing":b.quote.routing,"order_id":b.quote.order_hash,"transaction_hash":format!("{:#x}",receipt.hash),"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"input_atoms":quantity(spent),"output_atoms":quantity(received),"fee_wei":fee.map(quantity),"outcome_reporting":if fee.is_some() {"complete"} else {"partial"},"finality":self.config.finality_label()});
+        if spent != approved_input
+            || received < approved_minimum
+            || fee.is_some_and(|fee| fee > approved_fee)
+        {
+            evidence["outcome_attention"] = json!({"kind":"discrepancy","actual":{"input_atoms":quantity(spent),"output_atoms":quantity(received),"fee_wei":fee.map(quantity)},"approved":{"input_atoms":quantity(approved_input),"minimum_output_atoms":quantity(approved_minimum),"maximum_fee_wei":quantity(approved_fee)}});
+        }
+        verified(s, Status::Completed, effects, evidence)
     }
 }
 fn verified(

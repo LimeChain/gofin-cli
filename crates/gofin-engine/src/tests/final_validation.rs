@@ -6,6 +6,7 @@ struct CountingAdapter {
     revalidations: AtomicUsize,
     submissions: AtomicUsize,
     change: bool,
+    change_account: bool,
     clock: Option<Arc<AdvancingClock>>,
 }
 #[async_trait]
@@ -18,13 +19,18 @@ impl Adapter for CountingAdapter {
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
         self.preparations.fetch_add(1, Ordering::SeqCst);
-        self.inner.prepare(operation, input).await
+        let mut prepared = self.inner.prepare(operation, input).await?;
+        prepared.binding["account"] = json!("protected-account-a");
+        Ok(prepared)
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         self.revalidations.fetch_add(1, Ordering::SeqCst);
         let mut fresh = prepared.clone();
         if self.change {
             fresh.binding["amount"] = json!("2");
+        }
+        if self.change_account {
+            fresh.binding["account"] = json!("protected-account-b");
         }
         Ok(fresh)
     }
@@ -62,6 +68,7 @@ async fn engine_hands_off_one_final_validation_only_after_binding_checks() {
             revalidations: AtomicUsize::new(0),
             submissions: AtomicUsize::new(0),
             change,
+            change_account: false,
             clock: None,
         });
         let engine = Engine::new(
@@ -79,13 +86,16 @@ async fn engine_hands_off_one_final_validation_only_after_binding_checks() {
         };
         let result = engine.execute(request.clone()).await.unwrap();
         assert_eq!(adapter.preparations.load(Ordering::SeqCst), 1);
-        assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            adapter.revalidations.load(Ordering::SeqCst),
+            if change { 1 } else { 2 }
+        );
         assert_eq!(
             adapter.submissions.load(Ordering::SeqCst),
             usize::from(!change)
         );
         if change {
-            assert_eq!(result.error.unwrap().code, "REQUEST_CHANGED");
+            assert_eq!(result.error.unwrap().code, "CANDIDATE_OUTSIDE_APPROVAL");
         } else {
             assert_eq!(result.status, Status::Pending);
             let _ = engine.execute(request).await.unwrap();
@@ -114,6 +124,7 @@ async fn transport_delay_rechecks_candidate_expiry_before_durable_submission() {
         revalidations: AtomicUsize::new(0),
         submissions: AtomicUsize::new(0),
         change: false,
+        change_account: false,
         clock: Some(clock.clone()),
     });
     let engine = Engine::new(
@@ -136,5 +147,38 @@ async fn transport_delay_rechecks_candidate_expiry_before_durable_submission() {
     assert_eq!(result.error.unwrap().code, "PREVIEW_EXPIRED");
     assert!(result.submission.is_none());
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn standalone_rejects_changed_protected_account_before_submission() {
+    let adapter = Arc::new(CountingAdapter {
+        inner: SyntheticAdapter::new(),
+        preparations: AtomicUsize::new(0),
+        revalidations: AtomicUsize::new(0),
+        submissions: AtomicUsize::new(0),
+        change: false,
+        change_account: true,
+        clock: None,
+    });
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(SyntheticAuthorizer),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let result = engine
+        .execute(OperationRequest {
+            request_id: "synthetic-changed-protected-account".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            run_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.error.unwrap().code, "CANDIDATE_OUTSIDE_APPROVAL");
+    assert!(result.submission.is_none());
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
 }

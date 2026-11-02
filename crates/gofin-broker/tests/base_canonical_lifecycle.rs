@@ -848,7 +848,7 @@ impl Harness {
                     .asset_id(),
                     kind: FeeKind::Gas,
                     maximum: Quantity::new("10000000000000000").unwrap(),
-                    maximum_usd_micros: Some(20_000_000),
+                    maximum_usd_micros: None,
                 })
                 .collect(),
             ..Default::default()
@@ -964,33 +964,6 @@ impl Harness {
             },
         }
     }
-    async fn authorize(
-        &self,
-        plan: FinancialPlanSpec,
-        seconds: u64,
-        replaces: Option<String>,
-        request_id: &str,
-    ) -> String {
-        let request = FinancialPlanAuthorizationRequest {
-            request_id: format!("review-{request_id}"),
-            plan: plan.clone(),
-            valid_for_seconds: Some(seconds),
-            replaces_revision_id: replaces.clone(),
-            expected_review_hash: None,
-        };
-        let review = self.engine.preview_financial_plan(request).await.unwrap();
-        self.engine
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: request_id.into(),
-                plan,
-                valid_for_seconds: Some(seconds),
-                replaces_revision_id: replaces,
-                expected_review_hash: Some(review.review_hash),
-            })
-            .await
-            .unwrap()
-            .plan_id
-    }
     async fn execute(
         &self,
         plan: &str,
@@ -1011,7 +984,21 @@ impl Harness {
             )
             .await
     }
-    async fn unresolved_with_retained_holds(
+    async fn execute_standalone(
+        &self,
+        input: &Value,
+        request: &str,
+    ) -> Result<gofin_domain::OperationRecord> {
+        self.engine
+            .execute(OperationRequest {
+                request_id: request.into(),
+                operation: "bridge.transfer".into(),
+                input: input.clone(),
+                run_id: None,
+            })
+            .await
+    }
+    async fn unresolved_with_original_identity(
         &self,
         operation: &gofin_domain::OperationRecord,
     ) -> gofin_domain::OperationRecord {
@@ -1021,12 +1008,6 @@ impl Harness {
         ));
         assert!(operation.submission.is_some());
         assert!(operation.effects.is_none());
-        let store = Store::open(self.temp.path().join("modeled-base.sqlite")).unwrap();
-        let held = store.reservations(&operation.id).unwrap();
-        assert!(
-            !held.is_empty(),
-            "Unresolved submission must retain its holds"
-        );
         let observed = self.engine.status(&operation.id, true).await.unwrap();
         assert!(matches!(
             observed.status,
@@ -1035,7 +1016,6 @@ impl Harness {
         assert_eq!(observed.id, operation.id);
         assert_eq!(observed.submission, operation.submission);
         assert!(observed.effects.is_none());
-        assert_eq!(store.reservations(&operation.id).unwrap(), held);
         observed
     }
     fn reveal_original(&self, chain: u64, operation: &gofin_domain::OperationRecord) {
@@ -1069,98 +1049,100 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn modeled_three_stage_plan_rejects_early_finalize_then_verifies_destination_once() {
+async fn standalone_base_withdrawal_advances_only_ready_stages() {
     let h = Harness::new();
-    let (transfer, _, inputs) = h.quote().await;
-    let plan = h
-        .authorize(h.plan(&inputs), 600, None, "authorize-model")
-        .await;
-    let early = h
-        .execute(&plan, 1, &inputs[1], "early-prove")
-        .await
-        .unwrap_err();
+    let (_, _, early_inputs) = h.quote().await;
     assert!(
-        [
-            "PLAN_STEP_NOT_ELIGIBLE",
-            "BRIDGE_SOURCE_PROOF_REQUIRED",
-            "FINANCIAL_PLAN_STEP_BLOCKED"
-        ]
-        .contains(&early.code.as_str()),
-        "Unexpected early rejection: {early:?}"
+        h.bridge
+            .prepare("bridge.transfer", &early_inputs[1])
+            .await
+            .is_err()
     );
-    let source = h
-        .settle(h.execute(&plan, 0, &inputs[0], "source").await.unwrap())
-        .await;
-    assert_eq!(
-        h.state.transfer(&transfer).unwrap().unwrap().state,
-        gofin_domain::BridgeTransferState::InTransit
+    let mut bounds = h.bounds();
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(1_000_000_000_000),
+        maximum: Quantity::from_u64(1_000_000_000_000),
+    });
+    bounds.maximum_source_debit = Some(Quantity::from_u64(1_000_000_000_000));
+    bounds.minimum_net_receipt = Some(
+        gofin_bridge::EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .amount(Quantity::from_u64(1_000_000_000_000)),
     );
-    let duplicate = h.execute(&plan, 0, &inputs[0], "source").await.unwrap();
-    assert_eq!(duplicate.id, source.id);
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
-    let proof = h
-        .settle(h.execute(&plan, 1, &inputs[1], "proof").await.unwrap())
-        .await;
-    assert_eq!(proof.operation, "bridge.transfer");
-    let after_proof = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert_eq!(
-        after_proof.steps[1].state,
-        gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed,
-        "Prove operation completed but plan progress is {:?}",
-        after_proof
-            .steps
-            .iter()
-            .map(|s| (&s.step_id, &s.state, &s.blockers))
-            .collect::<Vec<_>>()
-    );
-    let immature = h
-        .execute(&plan, 2, &inputs[2], "early-finalize")
-        .await
-        .unwrap_err();
-    assert_eq!(
-        immature.code,
-        "BRIDGE_FINALIZATION_PENDING",
-        "Model plan progress: {:?}",
-        after_proof
-            .steps
-            .iter()
-            .map(|s| (&s.step_id, &s.state, &s.blockers))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
-    h.chain.lock().unwrap().mature = true;
-    let finalization = h
-        .settle(h.execute(&plan, 2, &inputs[2], "finalize").await.unwrap())
-        .await;
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    let status = h
-        .bridge
-        .read("bridge.status", &json!({"transferId":transfer}))
+    let request = OperationRequest {
+        request_id: "base-standalone".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request.clone())))
         .await
         .unwrap();
-    assert_eq!(status["state"], "completed", "{status}");
-    let duplicate = h.execute(&plan, 2, &inputs[2], "finalize").await.unwrap();
-    assert_eq!(duplicate.id, finalization.id);
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 2);
-    let record = h.state.transfer(&transfer).unwrap().unwrap();
-    assert!(record.transit.is_none());
-    assert_eq!(record.settlement_proofs.len(), 1);
-    let plan_status = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert!(plan_status.steps.iter().all(
-        |s| s.state == gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed
-    ));
+    assert!(action.preview.is_some(), "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1, "{action:?}");
+    assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1, "{action:?}");
+    assert_eq!(
+        transfer.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    assert!(transfer.transit.is_some());
+    assert_eq!(
+        transfer.steps[1].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    assert_eq!(
+        transfer.steps[2].state,
+        gofin_domain::BridgeStepState::Unsubmitted
+    );
+    let view = h.engine.operation_view(&action).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .expect("continuation token");
+    h.chain.lock().unwrap().mature = true;
+    let completed = invocation
+        .scope(Box::pin(h.engine.continue_operation(&action.id, token)))
+        .await
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert!(
+        transfer
+            .steps
+            .iter()
+            .all(|step| step.state == gofin_domain::BridgeStepState::Settled),
+        "{completed:?} {transfer:?}"
+    );
+    let observed = Box::pin(h.engine.status(&action.id, true)).await.unwrap();
+    assert_eq!(
+        h.engine.operation_view(&observed).unwrap()["outcome"]["phase"],
+        "done"
+    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    let duplicate = Box::pin(h.engine.execute(request)).await.unwrap();
+    assert_eq!(duplicate.id, action.id);
+    assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
 }
 
 #[tokio::test]
 async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart() {
     let h = Harness::new();
     let (transfer, _, inputs) = h.quote().await;
-    let mut spec = h.plan(&inputs);
-    spec.steps[2].completion.minimum_net_receipt = None;
-    let plan = h.authorize(spec, 600, None, "authorize-loss-model").await;
     h.chain.lock().unwrap().lose_response = Some(8453);
     let source = h
-        .execute(&plan, 0, &inputs[0], "lost-source")
+        .execute_standalone(&inputs[0], "lost-source")
         .await
         .unwrap();
     assert!(matches!(
@@ -1168,9 +1150,9 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         Status::Unknown | Status::Submitted | Status::Pending
     ));
     assert!(source.submission.is_some());
-    let source = h.unresolved_with_retained_holds(&source).await;
+    let source = h.unresolved_with_original_identity(&source).await;
     let h = h.restart();
-    let source = h.unresolved_with_retained_holds(&source).await;
+    let source = h.unresolved_with_original_identity(&source).await;
     h.reveal_original(8453, &source);
     let source = h.settle(source).await;
     assert_eq!(
@@ -1179,22 +1161,25 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
     );
     assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
     h.chain.lock().unwrap().lose_response = Some(1);
-    let proof = h.execute(&plan, 1, &inputs[1], "lost-proof").await.unwrap();
-    let proof = h.unresolved_with_retained_holds(&proof).await;
+    let proof = h
+        .execute_standalone(&inputs[1], "lost-proof")
+        .await
+        .unwrap();
+    let proof = h.unresolved_with_original_identity(&proof).await;
     let h = h.restart();
-    let proof = h.unresolved_with_retained_holds(&proof).await;
+    let proof = h.unresolved_with_original_identity(&proof).await;
     h.reveal_original(1, &proof);
     let proof = h.settle(proof).await;
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
     h.chain.lock().unwrap().mature = true;
     h.chain.lock().unwrap().lose_response = Some(1);
     let finalization = h
-        .execute(&plan, 2, &inputs[2], "lost-finalize")
+        .execute_standalone(&inputs[2], "lost-finalize")
         .await
         .unwrap();
-    let finalization = h.unresolved_with_retained_holds(&finalization).await;
+    let finalization = h.unresolved_with_original_identity(&finalization).await;
     let h = h.restart();
-    let finalization = h.unresolved_with_retained_holds(&finalization).await;
+    let finalization = h.unresolved_with_original_identity(&finalization).await;
     h.reveal_original(1, &finalization);
     let finalization = h.settle(finalization).await;
     for (index, original, id) in [
@@ -1202,14 +1187,14 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         (1, proof, "lost-proof"),
         (2, finalization, "lost-finalize"),
     ] {
-        let duplicate = h.execute(&plan, index, &inputs[index], id).await.unwrap();
+        let duplicate = h.execute_standalone(&inputs[index], id).await.unwrap();
         assert_eq!(duplicate.id, original.id);
         assert_eq!(
             duplicate.submission.as_ref().unwrap().reference,
             original.submission.as_ref().unwrap().reference
         );
     }
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 3);
     assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 2);
     let status = h
@@ -1230,119 +1215,200 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
 }
 
 #[tokio::test]
-async fn modeled_expired_plan_keeps_source_identity_and_renews_same_parent_without_replay() {
+async fn failed_compound_base_finalize_reauthorizes_only_remaining_stage() {
     let h = Harness::new();
-    let (transfer, _, inputs) = h.quote().await;
-    let mut spec = h.plan(&inputs);
-    spec.steps[2].completion.minimum_net_receipt = None;
-    let plan = h
-        .authorize(spec.clone(), 1, None, "authorize-short-model")
-        .await;
-    let source = h
-        .settle(
-            h.execute(&plan, 0, &inputs[0], "short-source")
-                .await
-                .unwrap(),
-        )
-        .await;
-    let original_locator = h
-        .state
-        .transfer(&transfer)
-        .unwrap()
-        .unwrap()
-        .transit
-        .unwrap()
-        .destination_locator
-        .unwrap();
-    // This test observes actual authorization expiry; RPC clock controls never
-    // change the real GoFin authority clock or its durable consumed accounting.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    let h = h.restart();
-    let expired = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert_eq!(
-        expired.revision.status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
+    let mut bounds = h.bounds();
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(1_000_000_000_000),
+        maximum: Quantity::from_u64(1_000_000_000_000),
+    });
+    bounds.maximum_source_debit = Some(Quantity::from_u64(1_000_000_000_000));
+    bounds.minimum_net_receipt = Some(
+        gofin_bridge::EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .amount(Quantity::from_u64(1_000_000_000_000)),
     );
-    assert!(
-        h.execute(&plan, 1, &inputs[1], "expired-proof")
-            .await
-            .is_err()
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "base-failed-compound-final".into(),
+        operation: "bridge.execute".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(30));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let before = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        before.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    assert_eq!(
+        before.steps[1].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    {
+        let mut state = h.chain.lock().unwrap();
+        state.mature = true;
+        state.revert_next = Some(1);
+    }
+    let view = h.engine.operation_view(&action).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    let _ = invocation
+        .scope(Box::pin(h.engine.continue_operation(&action.id, token)))
+        .await
+        .unwrap();
+    let failed = h.engine.status(&action.id, true).await.unwrap();
+    let view = h.engine.operation_view(&failed).unwrap();
+    assert_eq!(
+        view["outcome"]["next_action"]["code"], "reauthorize",
+        "{view}"
     );
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     assert_eq!(
-        h.chain
-            .lock()
-            .unwrap()
-            .broadcasts
-            .get(&1)
-            .copied()
-            .unwrap_or(0),
-        0
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(8453, 1), (1, 2)])
     );
-    let renewed = h
-        .authorize(spec, 600, Some(expired.revision.revision_id), "renew-model")
-        .await;
-    assert_eq!(renewed, plan);
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
-    let current = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(
-        current
-            .transit
-            .as_ref()
-            .unwrap()
-            .destination_locator
-            .as_ref()
-            .unwrap(),
-        &original_locator
-    );
-    assert_eq!(
-        current.steps[0].operation_id.as_deref(),
-        Some(source.id.as_str())
-    );
-    h.settle(
-        h.execute(&plan, 1, &inputs[1], "renewed-proof")
-            .await
-            .unwrap(),
-    )
-    .await;
-    h.chain.lock().unwrap().mature = true;
-    h.settle(
-        h.execute(&plan, 2, &inputs[2], "renewed-finalize")
-            .await
-            .unwrap(),
-    )
-    .await;
-    let status = h
-        .bridge
-        .read("bridge.status", &json!({"transferId":transfer}))
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    let mut revised = input;
+    revised["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+    let result = invocation
+        .scope(Box::pin(
+            h.engine.reauthorize_operation(&action.id, token, revised),
+        ))
         .await
         .unwrap();
-    assert_eq!(status["state"], "completed");
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 2);
-    let status = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert_eq!(status.usage.consumed_debits.len(), 1);
+    assert_eq!(result["reauthorization"], "approved", "{result}");
+    let _ = h.engine.status(&action.id, true).await.unwrap();
+    let after = h.state.transfer(transfer_id).unwrap().unwrap();
     assert_eq!(
-        status.usage.consumed_debits[0].amount.atoms,
-        Quantity::from_u64(1_000_000_000_000)
+        after.state,
+        gofin_domain::BridgeTransferState::Completed,
+        "result={result} transfer={after:?}"
     );
+    assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
+    assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
+    assert!(!after.settlement_proofs.is_empty());
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(8453, 1), (1, 3)])
+    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn modeled_missing_destination_credit_never_completes_transfer_or_plan_receipt() {
+async fn expired_compound_base_action_reauthorizes_remaining_without_replay() {
+    let h = Harness::new();
+    let mut bounds = h.bounds();
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(1_000_000_000_000),
+        maximum: Quantity::from_u64(1_000_000_000_000),
+    });
+    bounds.maximum_source_debit = Some(Quantity::from_u64(1_000_000_000_000));
+    bounds.minimum_net_receipt = Some(
+        gofin_bridge::EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .amount(Quantity::from_u64(1_000_000_000_000)),
+    );
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 2,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "base-expiring".into(),
+        operation: "bridge.execute".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = h.state.transfer(&transfer_id).unwrap().unwrap();
+    assert!(before.transit.is_some());
+    assert_eq!(
+        before.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    let source_id = before.steps[0].operation_id.clone();
+    let locator = before.transit.as_ref().unwrap().destination_locator.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    let h = h.restart();
+    h.chain.lock().unwrap().mature = true;
+    let observed = h.engine.status(&action.id, true).await.unwrap();
+    let view = h.engine.operation_view(&observed).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("reauthorization token: {view}"));
+    let mut revised = input;
+    revised["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 600);
+    let result = invocation
+        .scope(Box::pin(
+            h.engine.reauthorize_operation(&action.id, token, revised),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result["reauthorization"], "approved", "{result}");
+    let after = h.state.transfer(&transfer_id).unwrap().unwrap();
+    assert_eq!(after.steps[0].operation_id, source_id);
+    assert!(
+        locator.is_some(),
+        "the original source proof binds the destination"
+    );
+    assert_eq!(after.state, gofin_domain::BridgeTransferState::Completed);
+    assert!(
+        after.transit.is_none(),
+        "verified destination credit clears transit"
+    );
+    assert!(
+        !after.settlement_proofs.is_empty(),
+        "destination proof remains durable"
+    );
+    assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
+    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 2);
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn modeled_missing_destination_credit_never_completes_transfer() {
     let h = Harness::new();
     let (transfer, _, inputs) = h.quote().await;
-    let plan = h
-        .authorize(h.plan(&inputs), 600, None, "authorize-missing-credit")
-        .await;
     h.settle(
-        h.execute(&plan, 0, &inputs[0], "missing-source")
+        h.execute_standalone(&inputs[0], "missing-source")
             .await
             .unwrap(),
     )
     .await;
     h.settle(
-        h.execute(&plan, 1, &inputs[1], "missing-proof")
+        h.execute_standalone(&inputs[1], "missing-proof")
             .await
             .unwrap(),
     )
@@ -1354,7 +1420,7 @@ async fn modeled_missing_destination_credit_never_completes_transfer_or_plan_rec
     }
     let finalization = h
         .settle(
-            h.execute(&plan, 2, &inputs[2], "missing-finalize")
+            h.execute_standalone(&inputs[2], "missing-finalize")
                 .await
                 .unwrap(),
         )
@@ -1376,18 +1442,13 @@ async fn modeled_missing_destination_credit_never_completes_transfer_or_plan_rec
     assert!(record.transit.is_some());
     assert!(record.settlement_proofs.is_empty());
     assert_ne!(record.state, gofin_domain::BridgeTransferState::Completed);
-    let status = h.engine.financial_plan_status(&plan).await.unwrap();
-    assert_ne!(
-        status.steps[2].state,
-        gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed
-    );
-    assert!(
-        h.execute(&plan, 2, &inputs[2], "second-financial-finalize")
-            .await
-            .is_err()
-    );
+    let duplicate = h
+        .execute_standalone(&inputs[2], "missing-finalize")
+        .await
+        .unwrap();
+    assert_eq!(duplicate.id, finalization.id);
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 2);
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -1479,63 +1540,85 @@ async fn modeled_deferred_receipt_cannot_widen_quantity_or_financial_identity() 
 }
 
 #[tokio::test]
-async fn modeled_cumulative_eth_stage_fees_block_an_unaffordable_frozen_final_before_signing() {
+async fn compound_base_fee_cap_blocks_unaffordable_final_stage() {
     let h = Harness::new();
-    let (_, _, inputs) = h.quote().await;
-    let plan = h
-        .authorize(h.plan(&inputs), 600, None, "authorize-cumulative")
-        .await;
-    h.settle(h.execute(&plan, 0, &inputs[0], "cap-source").await.unwrap())
-        .await;
-    h.settle(h.execute(&plan, 1, &inputs[1], "cap-proof").await.unwrap())
-        .await;
-    let usage = h.engine.financial_plan_status(&plan).await.unwrap().usage;
-    assert_eq!(usage.consumed_costs.len(), 2);
-    let eth_cost = usage
-        .consumed_costs
-        .iter()
-        .find(|c| c.amount.asset.network == "ethereum:1")
+    let mut bounds = h.bounds();
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(1_000_000_000_000),
+        maximum: Quantity::from_u64(1_000_000_000_000),
+    });
+    bounds.maximum_source_debit = Some(Quantity::from_u64(1_000_000_000_000));
+    bounds.minimum_net_receipt = Some(
+        gofin_bridge::EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .amount(Quantity::from_u64(1_000_000_000_000)),
+    );
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "base-cumulative-cap".into(),
+        operation: "bridge.execute".into(),
+        input,
+        run_id: None,
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
         .unwrap();
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = h.state.transfer(&transfer_id).unwrap().unwrap();
     assert_eq!(
-        eth_cost.amount.atoms,
-        Quantity::from_u64(30_000_000_000_000)
+        before.steps[1].state,
+        gofin_domain::BridgeStepState::Settled
     );
     {
         let mut state = h.chain.lock().unwrap();
         state.mature = true;
         state.eth_base_fee = Some(35_000_000_000);
     }
-    let blocked = h
-        .execute(&plan, 2, &inputs[2], "cap-final")
+    let view = h.engine.operation_view(&action).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    let blocked = invocation
+        .scope(Box::pin(h.engine.continue_operation(&action.id, token)))
         .await
         .unwrap_err();
     assert_eq!(blocked.code, "BRIDGE_CUMULATIVE_FEE_LIMIT");
+    let after = h.state.transfer(&transfer_id).unwrap().unwrap();
+    assert_eq!(
+        after.steps[2].state,
+        gofin_domain::BridgeStepState::Unsubmitted
+    );
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    let mut widened = inputs[2].clone();
-    widened["bounds"]["fee_caps"][1]["maximum"] = json!("20000000000000000");
-    assert!(h.execute(&plan, 2, &widened, "widen-final").await.is_err());
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
 }
 
 #[tokio::test]
-async fn modeled_invalidated_proof_explicit_recovery_renews_same_plan_and_preserves_spent_fees() {
+async fn standalone_base_invalidated_proof_recovery_preserves_source_and_gas_evidence() {
     let h = Harness::new();
     let (transfer, _, inputs) = h.quote().await;
-    let original_spec = h.plan(&inputs);
-    let plan = h
-        .authorize(original_spec.clone(), 600, None, "authorize-recovery")
-        .await;
     let source = h
         .settle(
-            h.execute(&plan, 0, &inputs[0], "recovery-source")
+            h.execute_standalone(&inputs[0], "recovery-source")
                 .await
                 .unwrap(),
         )
         .await;
     let old_proof = h
         .settle(
-            h.execute(&plan, 1, &inputs[1], "recovery-old-proof")
+            h.execute_standalone(&inputs[1], "recovery-old-proof")
                 .await
                 .unwrap(),
         )
@@ -1550,11 +1633,6 @@ async fn modeled_invalidated_proof_explicit_recovery_renews_same_plan_and_preser
         .destination_locator
         .unwrap();
     h.chain.lock().unwrap().invalidated = true;
-    let revoked = h.engine.revoke_financial_plan(&plan).await.unwrap();
-    assert_eq!(
-        revoked.revision.status,
-        gofin_domain::financial_plans::FinancialPlanAuthorizationStatus::Revoked
-    );
     let response = h
         .bridge
         .read("bridge.recovery", &json!({"transferId":transfer}))
@@ -1568,80 +1646,29 @@ async fn modeled_invalidated_proof_explicit_recovery_renews_same_plan_and_preser
         .unwrap();
     assert_eq!(repeated["created"], false);
     assert_eq!(repeated["steps"], response["steps"]);
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
     let links: Vec<BridgeStepLink> = serde_json::from_value(response["steps"].clone()).unwrap();
     assert_eq!(links.len(), 2);
-    let new_inputs=links.iter().map(|link|json!({"transferId":transfer,"stepId":link.step_id,"stepKind":link.kind,"bounds":h.bounds()})).collect::<Vec<_>>();
-    assert!(
-        h.execute(&plan, 3, &new_inputs[0], "unapproved-recovery")
-            .await
-            .is_err()
-    );
-    let exact = h
-        .engine
-        .execute(OperationRequest {
-            request_id: "exact-cannot-steal-recovery".into(),
-            operation: "bridge.transfer".into(),
-            input: new_inputs[0].clone(),
-            run_id: None,
-        })
-        .await;
-    if let Ok(operation) = exact {
-        assert!(operation.submission.is_none() && operation.status != Status::Completed);
-    }
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
-    let mut revised = original_spec;
-    revised.steps.pop();
-    for (i, input) in new_inputs.iter().enumerate() {
-        let mut step = h.plan(std::slice::from_ref(input)).steps.remove(0);
-        step.step_id = format!("stage-{}", i + 3);
-        step.completion.minimum_net_receipt = if i == 1 {
-            Some(gofin_domain::ResourceAmount {
-                resource: ResourceId(format!("ethereum:1:{}", h.wallet)),
-                amount: gofin_bridge::EvmAsset {
-                    chain_id: 1,
-                    token: None,
-                    decimals: 18,
-                }
-                .amount(Quantity::from_u64(1_000_000_000_000)),
-            })
-        } else {
-            None
-        };
-        revised.steps.push(step);
-    }
-    let renewed = h
-        .authorize(
-            revised,
-            600,
-            Some(revoked.revision.revision_id),
-            "authorize-recovery-revision",
-        )
-        .await;
-    assert_eq!(renewed, plan);
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+    let new_inputs = links.iter().map(|link| json!({"transferId":transfer,"stepId":link.step_id,"stepKind":link.kind,"bounds":h.bounds()})).collect::<Vec<_>>();
     h.chain.lock().unwrap().new_game_published = true;
     let proof = h
         .settle(
-            h.execute(&plan, 3, &new_inputs[0], "recovery-new-proof")
+            h.execute_standalone(&new_inputs[0], "recovery-new-proof")
                 .await
                 .unwrap(),
         )
         .await;
-    assert_ne!(proof.id, old_proof.id);
     assert_ne!(
         proof.submission.as_ref().unwrap().reference,
         old_proof.submission.as_ref().unwrap().reference
     );
     h.chain.lock().unwrap().mature = true;
-    h.settle(
-        h.execute(&plan, 4, &new_inputs[1], "recovery-new-final")
-            .await
-            .unwrap(),
-    )
-    .await;
+    let finalization = h
+        .settle(
+            h.execute_standalone(&new_inputs[1], "recovery-new-final")
+                .await
+                .unwrap(),
+        )
+        .await;
     let status = h
         .bridge
         .read("bridge.status", &json!({"transferId":transfer}))
@@ -1662,32 +1689,16 @@ async fn modeled_invalidated_proof_explicit_recovery_renews_same_plan_and_preser
         gofin_domain::BridgeStepState::Superseded
     );
     assert_eq!(record.steps.len(), 5);
-    let persisted = h
-        .state
-        .transfer(&transfer)
-        .unwrap()
-        .unwrap()
-        .quote_revisions[0]
-        .payload["quote"]
-        .clone();
-    assert_eq!(persisted["intent"]["amount"], "1000000000000");
     assert_eq!(
         source_locator.proof["withdrawal"]["withdrawal_hash"],
         response["withdrawal_hash"]
     );
+    for stage in [&old_proof, &proof, &finalization] {
+        assert!(stage.effects.as_ref().unwrap().effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { amount, .. } if amount.atoms == Quantity::from_u64(30_000_000_000_000))));
+    }
     assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 3);
-    let usage = h.engine.financial_plan_status(&plan).await.unwrap().usage;
-    assert_eq!(usage.consumed_debits.len(), 1);
-    let eth_cost = usage
-        .consumed_costs
-        .iter()
-        .find(|c| c.amount.asset.network == "ethereum:1")
-        .unwrap();
-    assert_eq!(
-        eth_cost.amount.atoms,
-        Quantity::from_u64(90_000_000_000_000)
-    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
@@ -1843,166 +1854,33 @@ include!("support/kraken_plan_client.rs");
 #[tokio::test]
 #[ignore = "requires an explicitly built development CLI"]
 async fn cli_base_ethereum_canonical_prove_finalize_positive() {
-    assert!(
-        std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),
-        "real CLI required"
-    );
-    let h = Harness::new();
-    let client = Client::new(h.runtime.clone(), h.temp.path()).await;
-    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":"1000000000000"},"bounds":h.bounds()});
-    let quoted = client
-        .call(
-            args(&[
-                "read",
-                "bridge.quotes",
-                "--input",
-                &input.to_string(),
-                "--json",
-            ]),
-            BrokerRequest::Read {
-                operation: "bridge.quotes".into(),
-                input,
-            },
-            true,
-        )
-        .await;
-    let transfer = quoted["transfers"][0]["transfer_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let mut links: Vec<BridgeStepLink> =
-        serde_json::from_value(quoted["transfers"][0]["steps"].clone()).unwrap();
-    links.sort_by_key(|s| match s.kind {
-        BridgeStepKind::Deposit => 0,
-        BridgeStepKind::Prove => 1,
-        BridgeStepKind::Finalize => 2,
-        _ => panic!("unexpected stage"),
-    });
-    assert_eq!(links.len(), 3);
-    let inputs:Vec<Value>=links.iter().map(|s|json!({"transferId":transfer,"stepId":s.step_id,"stepKind":s.kind,"bounds":h.bounds()})).collect();
-    let plan = h.plan(&inputs);
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "base-canonical-review".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(600),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let plan_json = serde_json::to_string(&plan).unwrap();
-    let review = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &plan_json,
-                "--valid-for",
-                "10m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: request.clone(),
-            },
-            true,
-        )
-        .await;
-    request.request_id = "base-canonical-grant".into();
-    request.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
-    let grant = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &plan_json,
-                "--id",
-                &request.request_id,
-                "--review-hash",
-                request.expected_review_hash.as_ref().unwrap(),
-                "--valid-for",
-                "10m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request },
-            true,
-        )
-        .await;
-    let plan_id = grant["plan_id"].as_str().unwrap();
-    for (index, input) in inputs.iter().enumerate() {
-        if index == 2 {
-            h.chain.lock().unwrap().mature = true;
+    Box::pin(async {
+        assert!(std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),"real CLI required");
+        let h=Harness::new();let client=Client::new(h.runtime.clone(),h.temp.path()).await;
+        let mut bounds=h.bounds();for cap in &mut bounds.fee_caps {cap.maximum_usd_micros=None;}
+        bounds.input=Some(gofin_bridge::AmountInterval{minimum:Quantity::from_u64(1_000_000_000_000),maximum:Quantity::from_u64(1_000_000_000_000)});
+        bounds.maximum_source_debit=Some(Quantity::from_u64(1_000_000_000_000));bounds.minimum_net_receipt=Some(gofin_bridge::EvmAsset{chain_id:1,token:None,decimals:18}.amount(Quantity::from_u64(1_000_000_000_000)));
+        let input=json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+        let request=OperationRequest{request_id:"base-canonical".into(),operation:"bridge.execute".into(),input:input.clone(),run_id:None};
+        let result=client.call(args(&["execute","bridge.execute","--input",&input.to_string(),"--id","base-canonical","--json"]),BrokerRequest::Execute{request},true).await;
+        let id=result["id"].as_str().unwrap().to_owned();let transfer=result["preview"]["binding"]["transfer_id"].as_str().unwrap().to_owned();
+        let before=h.state.transfer(&transfer).unwrap().unwrap();assert_eq!(before.steps[0].state,gofin_domain::BridgeStepState::Settled);assert_eq!(before.steps[1].state,gofin_domain::BridgeStepState::Settled);assert_eq!(before.steps[2].state,gofin_domain::BridgeStepState::Unsubmitted);assert!(before.transit.is_some());
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);
+        let token=result.pointer("/outcome/next_action/continuation_token").and_then(Value::as_str).unwrap();h.chain.lock().unwrap().mature=true;
+        let continued=client.call(args(&["operations","continue",&id,"--token",token,"--json"]),BrokerRequest::ContinueOperation{id:id.clone(),token:token.into()},true).await;
+        assert!(continued["error"].is_null(),"{continued}");
+        let status_input=json!({"transferId":transfer});let status=client.call(args(&["read","bridge.status","--input",&status_input.to_string(),"--json"]),BrokerRequest::Read{operation:"bridge.status".into(),input:status_input},true).await;
+        assert_eq!(status["state"],"completed","{status}");let record=h.state.transfer(&transfer).unwrap().unwrap();assert!(record.transit.is_none());assert_eq!(record.settlement_proofs.len(),1);
+        assert!(record.steps.iter().all(|step|step.state==gofin_domain::BridgeStepState::Settled));assert_eq!(record.steps[0].operation_id,before.steps[0].operation_id);assert_eq!(record.steps[1].operation_id,before.steps[1].operation_id);
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(8453,1),(1,2)]));
+        assert_eq!(continued["outcome"]["result"], "executed", "{continued}");
+        assert_eq!(continued["outcome"]["phase"], "done", "{continued}");
+        assert_eq!(continued["outcome"]["replay_safe"], false, "{continued}");
+        if let Ok(path)=std::env::var("GOFIN_VENUE_EVIDENCE") {
+            let submissions=h.chain.lock().unwrap().broadcasts.values().sum::<usize>();
+            std::fs::write(path,serde_json::to_vec(&json!({"scenario":"canonical-base-ethereum","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":submissions,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
         }
-        let step = format!("stage-{index}");
-        let id = format!("base-canonical-{index}");
-        let request = OperationRequest {
-            request_id: id.clone(),
-            operation: "bridge.transfer".into(),
-            input: input.clone(),
-            run_id: None,
-        };
-        let mut record = client
-            .call(
-                args(&[
-                    "execute",
-                    "bridge.transfer",
-                    "--input",
-                    &input.to_string(),
-                    "--id",
-                    &id,
-                    "--plan",
-                    plan_id,
-                    "--step",
-                    &step,
-                    "--json",
-                ]),
-                BrokerRequest::ExecutePlanStep {
-                    plan_id: plan_id.into(),
-                    step_id: step,
-                    request,
-                },
-                true,
-            )
-            .await;
-        for _ in 0..3 {
-            if record["status"] == "completed" {
-                break;
-            }
-            let op_id = record["id"].as_str().unwrap().to_owned();
-            record = client
-                .call(
-                    args(&["status", &op_id, "--json"]),
-                    BrokerRequest::Status { id: op_id },
-                    true,
-                )
-                .await;
-        }
-        assert_eq!(record["status"], "completed", "{record}");
-    }
-    let input = json!({"transferId":transfer});
-    let status = client
-        .call(
-            args(&[
-                "read",
-                "bridge.status",
-                "--input",
-                &input.to_string(),
-                "--json",
-            ]),
-            BrokerRequest::Read {
-                operation: "bridge.status".into(),
-                input,
-            },
-            true,
-        )
-        .await;
-    assert_eq!(status["state"], "completed");
-    let record = h.state.transfer(&transfer).unwrap().unwrap();
-    assert!(record.transit.is_none());
-    assert_eq!(record.settlement_proofs.len(), 1);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(8453, 1), (1, 2)])
-    );
+    }).await
 }
 
 #[tokio::test]
@@ -2014,7 +1892,11 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
     );
     let h = Harness::new();
     let client = Client::new(h.runtime.clone(), h.temp.path()).await;
-    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":null},"destinationChainId":8453,"destinationAssets":[{"chainId":8453,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":"1000000000000"},"bounds":h.bounds()});
+    let mut native_bounds = h.bounds();
+    for cap in &mut native_bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":null},"destinationChainId":8453,"destinationAssets":[{"chainId":8453,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":"1000000000000"},"bounds":native_bounds});
     let quote = client
         .call(
             args(&[
@@ -2039,7 +1921,7 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
         .as_str()
         .unwrap();
     let input =
-        json!({"transferId":transfer,"stepId":step,"stepKind":"deposit","bounds":h.bounds()});
+        json!({"transferId":transfer,"stepId":step,"stepKind":"deposit","bounds":native_bounds});
     let request = OperationRequest {
         request_id: "ethereum-base-positive".into(),
         operation: "bridge.transfer".into(),
@@ -2062,6 +1944,9 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
         )
         .await;
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     let status_input = json!({"transferId":transfer});
     let status = client
         .call(
@@ -2089,4 +1974,8 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
         "ethereum:8453"
     );
     assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 1)]));
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        std::fs::write(path,serde_json::to_vec(&json!({"scenario":"canonical-ethereum-base","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":h.chain.lock().unwrap().broadcasts.values().sum::<usize>(),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }

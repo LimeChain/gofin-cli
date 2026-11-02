@@ -11,6 +11,7 @@ mod artifacts;
 mod companion_skill;
 mod daemon;
 pub(crate) mod json_stream;
+mod observation;
 mod onboarding;
 mod release_update;
 pub mod response_deadline;
@@ -126,28 +127,43 @@ enum Command {
     Read(ReadArgs),
     /// Review a financial operation without moving funds.
     Preview(OperationArgs),
-    /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
+    /// Execute one action under native economic approval; --dry-run previews.
     Execute(ExecuteArgs),
     /// Configure a human-only venue setting with fresh sudo and protected terminal review.
     Configure(ConfigureArgs),
-    /// Manage bounded financial authorizations.
+    /// Retired authorization history.
+    #[command(hide = true)]
     Authorizations {
         #[command(subcommand)]
         command: AuthorizationsCommand,
     },
-    /// Review, authorize and track named sequential financial plans.
+    /// Retired plan history.
+    #[command(hide = true)]
     Plans {
         #[command(subcommand)]
         command: PlansCommand,
     },
-    /// Check and reconcile an existing operation.
-    Status { id: String },
+    /// Observe an existing operation without approval or another financial write.
+    Status {
+        id: String,
+        /// Poll observations until the phase changes or this many seconds elapse.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(0..=3600))]
+        wait: Option<u64>,
+        /// Observe one transfer side using the original persisted identities.
+        #[arg(long, value_parser = ["source", "destination"])]
+        side: Option<String>,
+    },
     /// List operations or inspect and recover an original submission.
+    #[command(args_conflicts_with_subcommands = true)]
     Operations {
+        /// Show unfinished outcomes and transfers still awaiting destination credit or refund.
+        #[arg(long)]
+        open: bool,
         #[command(subcommand)]
         command: Option<OperationsCommand>,
     },
-    /// Review and release unresolved reservations with fresh Touch ID.
+    /// Retired reservation commands.
+    #[command(hide = true)]
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
@@ -162,7 +178,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot), then Enter to install. Grok Bot prepares a local export for manual import. Enter with none selected or Esc skips."
+        after_help = "Setup uses fresh sudo and protected terminal confirmation. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot), then Enter to install. Grok Bot prepares a local export for manual import. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -170,14 +186,14 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
-    /// Show or change protected human-owned financial policy.
+    /// Inspect retired personal policy settings.
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
     },
     /// Enable, inspect or disable unattended financial execution.
     #[command(
-        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires Apple Terminal or a human-operated macOS OpenSSH session, fresh sudo and explicit protected confirmation. Status reads the protected broker."
+        after_help = "Yolo lets an agent submit financial actions without further human approval. GoFin no longer enforces personal USD limits; the terms the agent chooses for each action are the only financial bounds. Enabling requires Apple Terminal or a human-operated macOS OpenSSH session, fresh sudo and explicit protected confirmation. Status reads the protected broker."
     )]
     Yolo {
         #[command(subcommand)]
@@ -343,23 +359,23 @@ struct ExecuteArgs {
     operation: String,
     #[arg(long)]
     input: String,
-    /// Stable logical identity for retries of this exact operation.
+    /// Stable logical identity; repeating it observes the original action.
     #[arg(long, required_unless_present = "dry_run")]
     id: Option<String>,
     /// Preview without approval or submission; --id is not consumed.
     #[arg(long)]
     dry_run: bool,
-    /// Existing bounded authorization created by `gofin authorizations authorize`.
-    #[arg(long)]
+    /// Retired bounded authorization input.
+    #[arg(long, hide = true)]
     authorization: Option<String>,
-    /// Named plan whose active revision authorizes this ordered step.
-    #[arg(long, requires = "step")]
+    /// Retired named-plan input.
+    #[arg(long, hide = true, requires = "step")]
     plan: Option<String>,
     /// Stable step ID in --plan.
-    #[arg(long, requires = "plan")]
+    #[arg(long, hide = true, requires = "plan")]
     step: Option<String>,
     /// Atomically replace a prior unsubmitted candidate under the selected authority.
-    #[arg(long, requires = "execution_authority")]
+    #[arg(long, hide = true, requires = "execution_authority")]
     replaces_attempt: Option<String>,
 }
 
@@ -447,6 +463,22 @@ enum PlansCommand {
 
 #[derive(Subcommand, Debug)]
 enum OperationsCommand {
+    /// Human-only label: hide an unconfirmed operation from the open list.
+    Dismiss { operation_id: String },
+    /// Resume ready stages of the original action using its returned token.
+    Continue {
+        operation_id: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// Approve explicit replacement terms for unfinished work, retaining completed stages.
+    Reauthorize {
+        operation_id: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        input: String,
+    },
     /// Explain blockers and available recovery actions; changes nothing.
     Recovery { operation_id: String },
     /// Independently verify a supplied transaction or venue reference; never resubmit.
@@ -455,13 +487,15 @@ enum OperationsCommand {
         #[arg(long)]
         input: String,
     },
-    /// Review a human-confirmed outcome and its accounting impact.
+    /// Retired human override.
+    #[command(hide = true)]
     ResolvePreview {
         operation_id: String,
         #[arg(long)]
         input: String,
     },
-    /// Accept the exact reviewed outcome with fresh Touch ID, even without verification.
+    /// Retired human override.
+    #[command(hide = true)]
     ForceResolve {
         operation_id: String,
         #[arg(long)]
@@ -501,9 +535,10 @@ enum DaemonCommand {
 
 #[derive(Subcommand, Debug)]
 enum PolicyCommand {
-    /// Show personal limits, included costs and allocation usage.
+    /// Show retired personal policy settings.
     Show,
-    /// Change financial limits and an optional unpriced exchange exception with fresh sudo and protected terminal review; refuses unresolved work.
+    /// Retired setter; always returns PERSONAL_LIMITS_RETIRED.
+    #[command(hide = true)]
     Set(gofin_discovery::PolicySetArgs),
 }
 
@@ -621,7 +656,13 @@ impl UnixTransport {
         request: BrokerRequest,
         progress_details: bool,
     ) -> Result<Value, GoFinError> {
-        let cancel_on_disconnect = request.may_use_rpc_reads();
+        let cancel_on_disconnect = request.may_use_rpc_reads()
+            || matches!(
+                request,
+                BrokerRequest::Execute { .. }
+                    | BrokerRequest::ContinueOperation { .. }
+                    | BrokerRequest::ReauthorizeOperation { .. }
+            );
         let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path))
             .await
             .map_err(|_| broker_timeout(&request))?
@@ -1081,6 +1122,8 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
             OBSERVER_TIMEOUT
         }
         BrokerRequest::Execute { .. }
+        | BrokerRequest::ContinueOperation { .. }
+        | BrokerRequest::ReauthorizeOperation { .. }
         | BrokerRequest::AuthorizeBoundary { .. }
         | BrokerRequest::ExecuteBoundary { .. }
         | BrokerRequest::ReplaceBoundaryCandidate { .. }
@@ -1094,6 +1137,7 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot
         | BrokerRequest::Status { .. }
+        | BrokerRequest::StatusSide { .. }
         | BrokerRequest::Read { .. }
         | BrokerRequest::PlanStatus { .. }
         | BrokerRequest::RecoverOperationReceipt { .. } => OBSERVER_TIMEOUT,
@@ -1196,7 +1240,7 @@ fn capabilities() -> Value {
         "companion_skill": gofin_discovery::companion_skill::metadata(),
         "operations": financial_catalog(),
         "service_required": false,
-        "yolo": {"available_on":"protected macOS broker","state":"unknown","enabled":null,"authorization_source":null,"offline_state":"unknown","status":"gofin yolo status reads authoritative state from broker IPC","enable":"gofin yolo on requires verified human Terminal, fresh sudo and explicit single-key confirmation (y/Y; no Enter)","disable":"gofin yolo off requires verified human Terminal and fresh sudo","financial_authority":"Allows agent-submitted operations and plans without further human approval within protected caps; includes trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments"},
+        "yolo": {"available_on":"protected macOS broker","state":"unknown","enabled":null,"authorization_source":null,"offline_state":"unknown","status":"gofin yolo status reads authoritative state from broker IPC","enable":"gofin yolo on requires verified human Terminal, fresh sudo and explicit single-key confirmation (y/Y; no Enter)","disable":"gofin yolo off requires verified human Terminal and fresh sudo","financial_authority":"Allows agent-submitted logical actions under independently checked native economic terms without personal USD limits or per-action human approval; includes trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments"},
         "machine_contract": gofin_discovery::machine_contract(),
         "exchanges": gofin_discovery::exchange_capabilities(),
         "evm_networks": gofin_discovery::evm_network_profiles(),
@@ -1833,9 +1877,47 @@ async fn dispatch_with_review_hash(
                 client.call(BrokerRequest::RevokePlan { plan_id: id }).await
             }
         },
-        Command::Status { id } => client.call(BrokerRequest::Status { id }).await,
-        Command::Operations { command } => match command {
-            None => client.call(BrokerRequest::Operations).await,
+        Command::Status { id, wait, side } => observation::status(client, id, wait, side).await,
+        Command::Operations { command, open } => match command {
+            Some(OperationsCommand::Dismiss { operation_id }) => launch_human_privileged(
+                PrivilegedAction::DismissOperation(operation_id),
+                json,
+                verbose,
+            ),
+            Some(OperationsCommand::Continue {
+                operation_id,
+                token,
+            }) => {
+                client
+                    .call(BrokerRequest::ContinueOperation {
+                        id: operation_id,
+                        token,
+                    })
+                    .await
+            }
+            Some(OperationsCommand::Reauthorize {
+                operation_id,
+                token,
+                input,
+            }) => {
+                let input = serde_json::from_str(&input).map_err(|_| generic_input_error())?;
+                client
+                    .call(BrokerRequest::ReauthorizeOperation {
+                        id: operation_id,
+                        token,
+                        input,
+                    })
+                    .await
+            }
+            None => {
+                client
+                    .call(if open {
+                        BrokerRequest::OpenOperations
+                    } else {
+                        BrokerRequest::Operations
+                    })
+                    .await
+            }
             Some(OperationsCommand::Recovery { operation_id }) => {
                 client
                     .call(BrokerRequest::OperationRecovery { operation_id })
@@ -1922,10 +2004,12 @@ async fn dispatch_with_review_hash(
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
             PolicyCommand::Show => client.call(BrokerRequest::PolicyShow).await,
-            PolicyCommand::Set(args) => {
-                args.micros()?;
-                launch_human_privileged(PrivilegedAction::PolicySet(args), json, verbose)
-            }
+            PolicyCommand::Set(_) => Err(GoFinError::new(
+                "PERSONAL_LIMITS_RETIRED",
+                "configuration",
+                "Personal USD policy limits have been retired.",
+                "Review native economic terms when approving an action.",
+            )),
         },
         Command::Connections { command } => match command {
             None | Some(ConnectionsCommand::List) => client.call(BrokerRequest::Connections).await,
@@ -2223,7 +2307,7 @@ fn completion_definition() -> clap::Command {
 
 enum PrivilegedAction {
     Setup,
-    PolicySet(gofin_discovery::PolicySetArgs),
+    DismissOperation(String),
     Configure(OperationRequest),
     Add(gofin_discovery::AddConnectionArgs),
     Generate(gofin_discovery::GenerateConnectionArgs),
@@ -2268,7 +2352,7 @@ fn launch_human_privileged_with_terminal(
             PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
             PrivilegedAction::Generate(args) => drop(args),
             PrivilegedAction::Remove(args) => drop(args),
-            PrivilegedAction::PolicySet(args) => drop(args),
+            PrivilegedAction::DismissOperation(id) => drop(id),
             PrivilegedAction::Configure(request) => drop(request),
             PrivilegedAction::YoloEnable | PrivilegedAction::YoloDisable => {}
         }
@@ -2398,11 +2482,11 @@ fn prepare_privileged_command_with_presentation(
                 .args(["enrollment", "update", "--request"])
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
-        PrivilegedAction::PolicySet(args) => {
+        PrivilegedAction::DismissOperation(id) => {
             command
                 .arg(BROKER_PATH)
-                .args(["enrollment", "policy-set", "--request"])
-                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+                .args(["enrollment", "dismiss-operation", "--request"])
+                .arg(serde_json::to_string(&json!({"id":id})).map_err(|_| generic_input_error())?);
         }
         PrivilegedAction::Configure(request) => {
             command
@@ -2447,8 +2531,8 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         PrivilegedAction::Configure(_) => {
             "GoFin needs administrator access for the protected configuration attempt. Review and confirm the exact venue settings in the protected terminal."
         }
-        PrivilegedAction::PolicySet(_) => {
-            "GoFin needs administrator access to change protected financial policy. Review and confirm the exact limits and unpriced exchange setting in the protected terminal."
+        PrivilegedAction::DismissOperation(_) => {
+            "GoFin needs a protected human confirmation to dismiss this unconfirmed operation. This changes only its open-list label."
         }
         PrivilegedAction::Remove(_) => {
             "GoFin needs administrator access to remove this connection."
@@ -2543,10 +2627,11 @@ fn human_only(command: &Command) -> bool {
     matches!(
         command,
         Command::Setup
-            | Command::Update
-            | Command::Policy {
-                command: PolicyCommand::Set(_)
+            | Command::Operations {
+                command: Some(OperationsCommand::Dismiss { .. }),
+                ..
             }
+            | Command::Update
             | Command::Yolo {
                 command: YoloCommand::Enable | YoloCommand::Disable
             }
@@ -2912,7 +2997,10 @@ async fn run_with_analytics(
                         | PlansCommand::Status { .. }
                 }
                 | Command::Reservations { .. }
-                | Command::Operations { command: Some(_) }
+                | Command::Operations {
+                    command: Some(_),
+                    ..
+                }
         );
     let development_enrollment =
         client.development_mode() && is_development_enrollment(&cli.command);
@@ -3020,12 +3108,16 @@ fn stream_context(command: &Command) -> Value {
         Command::Preview(args) => {
             context["operation"] = json!(args.operation);
         }
-        Command::Status { id } => context["operation_id"] = json!(id),
+        Command::Status { id, .. } => context["operation_id"] = json!(id),
         Command::Operations {
             command: Some(command),
+            ..
         } => {
             let operation_id = match command {
-                OperationsCommand::Recovery { operation_id }
+                OperationsCommand::Dismiss { operation_id }
+                | OperationsCommand::Continue { operation_id, .. }
+                | OperationsCommand::Reauthorize { operation_id, .. }
+                | OperationsCommand::Recovery { operation_id }
                 | OperationsCommand::Recover { operation_id, .. }
                 | OperationsCommand::ResolvePreview { operation_id, .. }
                 | OperationsCommand::ForceResolve { operation_id, .. } => operation_id,
@@ -3215,7 +3307,8 @@ mod tests {
             .clone()
             .render_long_help()
             .to_string();
-        assert!(help.contains("Yolo lets an agent submit financial operations and plans"));
+        assert!(help.contains("Yolo lets an agent submit financial actions"));
+        assert!(help.contains("no longer enforces personal USD limits"));
         assert!(!help.contains("fin yolo"));
         assert!(capabilities()["yolo"]["offline_state"] == "unknown");
         let operation = json!({
@@ -3511,7 +3604,7 @@ mod tests {
             [
                 BrokerRequest::DevelopmentConfigure { .. },
                 BrokerRequest::Operations,
-                BrokerRequest::Status { .. }
+                BrokerRequest::Status { .. } | BrokerRequest::StatusSide { .. }
             ]
         ));
     }
@@ -5022,17 +5115,34 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn policy_machine_mode_requires_human_even_with_a_terminal() {
-        for tty in [true, false] {
-            let action = PrivilegedAction::PolicySet(gofin_discovery::PolicySetArgs {
-                max_movement_usd: "1000".into(),
-                max_run_allocation_usd: "5000".into(),
-                allow_unpriced_exchange_assets: None,
-            });
-            let result = launch_human_privileged_with_terminal(action, tty, true, true);
-            assert_eq!(result.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+    #[tokio::test]
+    async fn retired_policy_set_refuses_without_privileged_or_broker_access() {
+        struct NoBroker;
+        #[async_trait]
+        impl Client for NoBroker {
+            async fn call(&self, _: BrokerRequest) -> Result<Value, GoFinError> {
+                panic!("retired policy must not reach broker")
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("retired policy must not execute")
+            }
         }
+        let client = NoBroker;
+        let cli = Cli::try_parse_from([
+            "gofin",
+            "policy",
+            "set",
+            "--max-movement-usd",
+            "0",
+            "--max-run-allocation-usd",
+            "0",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(
+            dispatch(cli, &client).await.unwrap_err().code,
+            "PERSONAL_LIMITS_RETIRED"
+        );
     }
 
     struct NoticeWriter<'a> {
@@ -5083,14 +5193,6 @@ mod tests {
             ),
             (PrivilegedAction::Update(args()), "update this connection"),
             (PrivilegedAction::Remove(remove), "remove this connection"),
-            (
-                PrivilegedAction::PolicySet(gofin_discovery::PolicySetArgs {
-                    max_movement_usd: "1000".into(),
-                    max_run_allocation_usd: "5000".into(),
-                    allow_unpriced_exchange_assets: None,
-                }),
-                "change protected financial policy",
-            ),
             (
                 PrivilegedAction::Configure(OperationRequest {
                     operation: "synthetic.configuration".into(),
@@ -5278,6 +5380,124 @@ mod tests {
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, true, true, true)
                 .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn reauthorization_preserves_original_identity_token_and_explicit_terms() {
+        struct Renew(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for Renew {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"id":"original","outcome":{"phase":"in_progress"}}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("reauthorization must never become a new execute identity");
+            }
+        }
+        let client = Renew(std::sync::Mutex::new(vec![]));
+        for _ in 0..2 {
+            let command = Cli::try_parse_from([
+                "gofin",
+                "operations",
+                "reauthorize",
+                "original",
+                "--token",
+                "issued-token",
+                "--input",
+                r#"{"deadline":1793534400,"amount":"12"}"#,
+                "--json",
+            ])
+            .unwrap();
+            dispatch(command, &client).await.unwrap();
+        }
+        {
+            let calls = client.0.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            for request in calls.iter() {
+                assert!(
+                    matches!(request, BrokerRequest::ReauthorizeOperation { id, token, input }
+                    if id == "original" && token == "issued-token" && input == &json!({"deadline":1793534400,"amount":"12"}))
+                );
+                assert!(response_deadline::execution_progress_required(request));
+                assert_eq!(broker_response_timeout(request), FINANCIAL_WRITE_TIMEOUT);
+            }
+        }
+        let malformed = Cli::try_parse_from([
+            "gofin",
+            "operations",
+            "reauthorize",
+            "original",
+            "--token",
+            "issued-token",
+            "--input",
+            "private-malformed-input",
+            "--json",
+        ])
+        .unwrap();
+        let error = dispatch(malformed, &client).await.unwrap_err();
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("private-malformed-input")
+        );
+        assert_eq!(client.0.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dismissal_requires_human_confirmation_and_never_uses_financial_rpc() {
+        let parsed =
+            Cli::try_parse_from(["gofin", "operations", "dismiss", "original-id", "--json"])
+                .unwrap();
+        assert!(human_only(&parsed.command));
+        for (terminal, json) in [(false, false), (false, true), (true, true)] {
+            let error = launch_human_privileged_with_terminal(
+                PrivilegedAction::DismissOperation("original-id".into()),
+                terminal,
+                json,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+        }
+        assert!(
+            serde_json::from_value::<BrokerRequest>(
+                json!({"method":"dismiss_operation","id":"original-id"})
+            )
+            .is_err()
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let command = prepare_privileged_command_with_presentation(
+                PrivilegedAction::DismissOperation("original-id".into()),
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(command.get_program(), "/usr/bin/sudo");
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                &args[..8],
+                &[
+                    "-k",
+                    "-p",
+                    gofin_discovery::MACOS_ADMIN_PASSWORD_PROMPT,
+                    "--",
+                    BROKER_PATH,
+                    "enrollment",
+                    "dismiss-operation",
+                    "--request"
+                ]
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(args[8]).unwrap(),
+                json!({"id":"original-id"})
+            );
+        }
     }
 
     #[test]
@@ -5562,11 +5782,6 @@ mod tests {
             serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
         for action in [
             PrivilegedAction::Setup,
-            PrivilegedAction::PolicySet(gofin_discovery::PolicySetArgs {
-                max_movement_usd: "100".into(),
-                max_run_allocation_usd: "100".into(),
-                allow_unpriced_exchange_assets: None,
-            }),
             PrivilegedAction::Add(args),
             PrivilegedAction::Generate(gofin_discovery::GenerateConnectionArgs {
                 network: gofin_discovery::WalletNetwork::Evm,
@@ -6072,7 +6287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_wire_and_engine_allow_two_attempts_under_one_synthetic_grant() {
+    async fn cli_wire_cannot_create_retired_grant_authority() {
         use std::sync::atomic::Ordering;
         let authorizer = std::sync::Arc::new(SyntheticBoundaryAuthorizer(
             std::sync::atomic::AtomicUsize::new(0),
@@ -6102,146 +6317,9 @@ mod tests {
             "--json",
         ])
         .unwrap();
-        let authorization = dispatch(grant, &client).await.unwrap();
-        let authorization_id = authorization["id"].as_str().unwrap().to_owned();
-
-        let out_of_bounds = Cli::try_parse_from([
-            "gofin",
-            "execute",
-            "synthetic.trade",
-            "--input",
-            r#"{"account":"synthetic-account","units":"3"}"#,
-            "--authorization",
-            &authorization_id,
-            "--dry-run",
-            "--json",
-        ])
-        .unwrap();
-        let error = dispatch(out_of_bounds, &client).await.unwrap_err();
-        assert_eq!(error.code, "BOUNDARY_VIOLATION");
-        let details = error.details.unwrap()["boundary_violation"].clone();
-        assert_eq!(details["constraint"], "max_units");
-        assert_eq!(details["approved_bound"], "2");
-        assert_eq!(details["candidate_value"], "3");
-        assert_eq!(details["reauthorization_required"], false);
-        assert_eq!(details["reconciliation_required"], false);
-
-        let rejected_attempt = Cli::try_parse_from([
-            "gofin",
-            "execute",
-            "synthetic.trade",
-            "--input",
-            r#"{"account":"synthetic-account","units":"3"}"#,
-            "--id",
-            "synthetic-attempt-out-of-bounds",
-            "--authorization",
-            &authorization_id,
-            "--json",
-        ])
-        .unwrap();
-        let rejected = dispatch(rejected_attempt, &client).await.unwrap();
-        assert_eq!(rejected["status"], "failed");
-        assert_eq!(rejected["error"]["code"], "BOUNDARY_VIOLATION");
-        assert_eq!(
-            rejected["error"]["details"]["boundary_violation"]["candidate_value"],
-            "3"
-        );
-        for (attempt_id, units) in [
-            ("synthetic-attempt-one", "1"),
-            ("synthetic-attempt-two", "1"),
-        ] {
-            let execute = Cli::try_parse_from([
-                "gofin",
-                "execute",
-                "synthetic.trade",
-                "--input",
-                &format!(r#"{{"account":"synthetic-account","units":"{units}"}}"#),
-                "--id",
-                attempt_id,
-                "--authorization",
-                &authorization_id,
-                "--json",
-            ])
-            .unwrap();
-            let result = dispatch(execute, &client).await.unwrap();
-            assert_eq!(result["status"], "completed", "attempt result: {result}");
-        }
-
-        let status = dispatch(
-            Cli::try_parse_from([
-                "gofin",
-                "authorizations",
-                "status",
-                &authorization_id,
-                "--json",
-            ])
-            .unwrap(),
-            &client,
-        )
-        .await
-        .unwrap();
-        let attempts = status["attempts"].as_array().unwrap();
-        assert_eq!(attempts.len(), 3);
-        // Several attempts can share one millisecond timestamp. Match durable
-        // identities instead of relying on the order of equal-time rows.
-        let attempt = |request_id: &str| {
-            attempts
-                .iter()
-                .find(|row| row["request_id"] == request_id)
-                .unwrap()
-        };
-        assert_eq!(
-            attempt("synthetic-attempt-out-of-bounds")["status"],
-            "failed"
-        );
-        assert_eq!(attempt("synthetic-attempt-one")["status"], "completed");
-        assert_eq!(attempt("synthetic-attempt-two")["status"], "completed");
-        assert_eq!(
-            status["authorization"]["remaining_debits"][0]["amount"]["atoms"],
-            "0"
-        );
-        assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-
-        // Replacement is allowed only for an unsubmitted active candidate.
-        // The synthetic adapter has completed both prior attempts, so the CLI
-        // route must preserve the engine's refusal and must not submit again.
-        let completed_attempt_id = attempt("synthetic-attempt-two")["id"].as_str().unwrap();
-        let replacement = Cli::try_parse_from([
-            "gofin",
-            "execute",
-            "synthetic.trade",
-            "--input",
-            r#"{"account":"synthetic-account","units":"1"}"#,
-            "--id",
-            "synthetic-attempt-replacement",
-            "--authorization",
-            &authorization_id,
-            "--replaces-attempt",
-            completed_attempt_id,
-            "--json",
-        ])
-        .unwrap();
-        let error = dispatch(replacement, &client).await.unwrap_err();
-        assert_eq!(error.code, "BOUNDARY_AUTHORIZATION_INVALID");
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-
-        let untrusted = Cli::try_parse_from([
-            "gofin",
-            "authorizations",
-            "authorize",
-            "synthetic.trade",
-            "--id",
-            "synthetic-intent-untrusted",
-            "--input",
-            r#"{"account":"synthetic-account","units":"1"}"#,
-            "--bounds",
-            r#"{"max_units":"2"}"#,
-            "--json",
-        ])
-        .unwrap();
-        let error = dispatch(untrusted, &client).await.unwrap_err();
-        assert_eq!(error.code, "INVALID_INPUT");
-        assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+        let error = dispatch(grant, &client).await.unwrap_err();
+        assert_eq!(error.code, "EXECUTION_INTERFACE_RETIRED");
+        assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
     }
 }

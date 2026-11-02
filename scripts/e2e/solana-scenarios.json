@@ -12,7 +12,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/meteora-dlmm-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -27,7 +29,8 @@
           "--family",
           "dlmm"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/meteora-dlmm-outcome.json"
     },
     {
       "id": "meteora-damm-v2",
@@ -41,7 +44,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/meteora-damm-v2-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -56,13 +61,14 @@
           "--family",
           "damm_v2"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/meteora-damm-v2-outcome.json"
     },
     {
       "id": "jupiter-swaps",
       "group": "solana",
       "environment": "surfpool",
-      "description": "Execute a Meta-Aggregator USDT-to-USDC round trip through a synthetic order and execute backend with real local SPL settlement.",
+      "description": "Execute four dependent Meta-Aggregator USDT/USDC swaps through a synthetic order and execute backend, with only the first input funded and real local SPL settlement.",
       "requires": [
         "surfpool",
         "solana",
@@ -70,7 +76,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-swaps-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -83,7 +91,8 @@
           "{python}",
           "{repo}/scripts/e2e/jupiter-swap-surfpool.py"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/jupiter-swaps-outcome.json"
     }
   ]
 }

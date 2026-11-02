@@ -84,23 +84,6 @@ pub(super) fn failed_matches(intent: &FinancialIntent, effect: &FinancialEffect)
     Ok(children(intent)?.is_some_and(|scope| matches(scope, proof, false)))
 }
 
-fn difference(
-    before: &BTreeMap<String, BigUint>,
-    after: &BTreeMap<String, BigUint>,
-) -> BTreeMap<String, BigUint> {
-    after
-        .iter()
-        .filter_map(|(key, quantity)| {
-            let old = before.get(key).cloned().unwrap_or_default();
-            (quantity > &old).then(|| (key.clone(), quantity - old))
-        })
-        .collect()
-}
-fn add(target: &mut BTreeMap<String, BigUint>, source: BTreeMap<String, BigUint>) {
-    for (key, quantity) in source {
-        *target.entry(key).or_default() += quantity;
-    }
-}
 fn reserve_rows(intent: &FinancialIntent) -> Result<Vec<ReservationRow>> {
     let mut amounts = BTreeMap::<String, BigUint>::new();
     for row in cash_reservation_amounts(&intent.debits, &intent.maximum_costs)? {
@@ -360,13 +343,10 @@ impl Engine {
                 "Prepared children do not match the exact human input.",
             ));
         }
-        let mut required_debits = BTreeMap::new();
-        let mut required_costs = BTreeMap::new();
         let mut required_locks = BTreeSet::new();
         let mut owners = BTreeSet::new();
-        let mut required_usd = BigUint::zero();
         for child in children {
-            let linked = context
+            let _linked = context
                 .children
                 .get(&child.child_tag)
                 .filter(|linked| linked.operation_id == child.operation_id)
@@ -399,224 +379,30 @@ impl Engine {
             }
             required_locks.extend(old.intent.locks.iter().cloned());
             match &child.mutation {
-                ChildMutation::Cancel => {
-                    if self.has_pending_amendment_except(&child.operation_id, attempt_id)? {
-                        return Err(invalid(
-                            "An unresolved mutation already owns the cancellation boundary.",
-                        ));
-                    }
-                }
+                ChildMutation::Cancel => {}
                 ChildMutation::Amend { revision } => {
-                    let previous = linked
-                        .context
-                        .effective_scope()
-                        .map(|scope| &scope.intent)
-                        .unwrap_or(&old.intent);
-                    let debit_delta = difference(
-                        &aggregate_resource_amounts(&previous.debits)?,
-                        &aggregate_resource_amounts(&revision.intent.debits)?,
-                    );
-                    let cost_delta = difference(
-                        &aggregate_cost_bounds(&previous.maximum_costs)?,
-                        &aggregate_cost_bounds(&revision.intent.maximum_costs)?,
-                    );
-                    let total = |value: &gofin_domain::Valuation| {
-                        value.movement_usd_micros.integer()
-                            + value.maximum_fee_usd_micros.integer()
-                            + value.additional_allocation_usd_micros.integer()
-                    };
-                    let old_value = linked
-                        .context
-                        .effective_scope()
-                        .and_then(|scope| scope.valuation.as_ref())
-                        .or(old.valuation.as_ref())
-                        .ok_or_else(|| invalid("The prior child valuation is missing."))?;
-                    let new_value = revision
-                        .valuation
-                        .as_ref()
-                        .ok_or_else(|| invalid("The revised child valuation is missing."))?;
-                    let scalar_increase = if total(new_value) > total(old_value) {
-                        total(new_value) - total(old_value)
-                    } else {
-                        BigUint::zero()
-                    };
-                    // Every new approval must contain the independently priced
-                    // positive increment. Serde still accepts the absent field in
-                    // older submitted records so reconciliation never replays them.
-                    let incremental = child.incremental_valuation.as_ref().ok_or_else(|| {
-                        invalid("Every newly prepared amendment requires its own positive incremental valuation.")
-                    })?;
-                    validate_price_observation(
-                        &incremental.observed_at,
-                        &incremental.source,
-                        Utc::now(),
-                        "VALUATION_UNAVAILABLE",
-                    )?;
-                    validate_price_rows(
-                        &incremental.prices,
-                        &incremental
-                            .prices
-                            .iter()
-                            .map(|price| price.asset.clone())
-                            .collect(),
-                        Utc::now(),
-                    )?;
-                    required_usd += std::cmp::max(scalar_increase, total(incremental));
                     let mut virtual_child = prepared.clone();
-                    let mut debit_keys = BTreeSet::new();
-                    let mut cost_keys = BTreeSet::new();
-                    virtual_child.intent = FinancialIntent {
-                        debits: revision
-                            .intent
-                            .debits
-                            .iter()
-                            .filter_map(|row| {
-                                let key = resource_asset_key(row).ok()?;
-                                if !debit_keys.insert(key.clone()) {
-                                    return None;
-                                }
-                                let amount = debit_delta.get(&key)?;
-                                let mut row = row.clone();
-                                row.amount.atoms =
-                                    gofin_domain::Quantity::new(amount.to_string()).ok()?;
-                                Some(row)
-                            })
-                            .collect(),
-                        maximum_costs: revision
-                            .intent
-                            .maximum_costs
-                            .iter()
-                            .filter_map(|row| {
-                                let key =
-                                    cost_key(&row.location, &row.amount.asset, &row.treatment)
-                                        .ok()?;
-                                if !cost_keys.insert(key.clone()) {
-                                    return None;
-                                }
-                                let amount = cost_delta.get(&key)?;
-                                let mut row = row.clone();
-                                row.amount.atoms =
-                                    gofin_domain::Quantity::new(amount.to_string()).ok()?;
-                                Some(row)
-                            })
-                            .collect(),
-                        expected: vec![EffectConstraint::SubmissionAmendment {
-                            operation_id: child.operation_id.clone(),
-                            submission: child.submission.clone(),
-                            revision: revision.clone(),
-                        }],
-                        locks: old.intent.locks.clone(),
-                    };
-                    if let Some(value) = &child.incremental_valuation {
-                        virtual_child.valuation = Some(value.clone());
-                        validate_cost_prices(
-                            &virtual_child,
-                            &prepared_cost_assets(&virtual_child.intent),
-                            Utc::now(),
-                        )?;
-                    }
+                    virtual_child.intent = revision.intent.clone();
+                    virtual_child.intent.expected = vec![EffectConstraint::SubmissionAmendment {
+                        operation_id: child.operation_id.clone(),
+                        submission: child.submission.clone(),
+                        revision: revision.clone(),
+                    }];
+                    virtual_child.valuation = revision.valuation.clone();
                     self.validate_submission_amendment_for_attempt(
                         &virtual_child,
                         None,
                         false,
                         attempt_id,
                     )?;
-                    add(&mut required_debits, debit_delta);
-                    add(&mut required_costs, cost_delta);
                 }
             }
         }
-        let covers = |actual: BTreeMap<String, BigUint>, required: &BTreeMap<String, BigUint>| {
-            required
-                .iter()
-                .all(|(key, value)| actual.get(key).is_some_and(|available| available >= value))
-        };
-        if !covers(
-            aggregate_resource_amounts(&prepared.intent.debits)?,
-            &required_debits,
-        ) || !covers(
-            aggregate_cost_bounds(&prepared.intent.maximum_costs)?,
-            &required_costs,
-        ) || !required_locks.is_subset(&prepared.intent.locks.iter().cloned().collect())
-        {
+        if !required_locks.is_subset(&prepared.intent.locks.iter().cloned().collect()) {
             return Err(invalid(
-                "The batch does not reserve every positive child scope increase and original resource lock.",
-            ));
-        }
-        let own = prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("The compound incremental valuation is missing."))?;
-        if own.movement_usd_micros.integer()
-            + own.maximum_fee_usd_micros.integer()
-            + own.additional_allocation_usd_micros.integer()
-            < required_usd
-        {
-            return Err(invalid(
-                "The compound rolling allocation does not cover all positive revised child exposures.",
+                "The batch must retain each original resource identity.",
             ));
         }
         Ok(Some(binding_hash(&to_value(&children)?)?))
-    }
-
-    pub(super) fn has_pending_amendment_except(
-        &self,
-        id: &str,
-        except: Option<&str>,
-    ) -> Result<bool> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        for value in store.list_records().map_err(map_store)? {
-            let row: OperationRecord = from_value(value)?;
-            if row.status.terminal() || row.id == id || except == Some(row.id.as_str()) {
-                continue;
-            }
-            let Some(prepared) = &row.preview else {
-                continue;
-            };
-            if amendments::target(&prepared.intent).is_some_and(|(owner, _, _)| owner == id) {
-                return Ok(true);
-            }
-            if let Some(children) = children(&prepared.intent)? {
-                for child in children.iter().filter(|child| child.operation_id == id) {
-                    let proved = row.effects.as_ref().is_some_and(|verified| {
-                        verified.effects.iter().any(|effect| match effect {
-                            FinancialEffect::CompoundSubmissionMutations { children: proofs } => {
-                                proofs.iter().any(|proof| {
-                                    matches(
-                                        std::slice::from_ref(child),
-                                        std::slice::from_ref(proof),
-                                        false,
-                                    )
-                                })
-                            }
-                            _ => false,
-                        })
-                    });
-                    if !proved {
-                        return Ok(true);
-                    }
-                }
-            }
-            for group in grouped_amendments::groups(&prepared.intent)?
-                .iter()
-                .filter(|group| group.operation_id == id)
-            {
-                let proved = row.effects.as_ref().is_some_and(|verified| {
-                    verified.effects.iter().any(|effect| match effect {
-                        FinancialEffect::GroupedSubmissionAmendments { proof } => {
-                            grouped_amendments::matches(group, proof, false)
-                        }
-                        _ => false,
-                    })
-                });
-                if !proved {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 }

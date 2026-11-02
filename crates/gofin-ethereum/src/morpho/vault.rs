@@ -537,13 +537,35 @@ impl EthereumAdapter {
         } else {
             shares
         };
-        require(
-            allowance >= required
-                && allowance < U256::MAX
-                && (operation == "morpho.deposit" || allowance <= maximum_shares),
-            "ALLOWANCE_INSUFFICIENT",
-            "A finite allowance to the reviewed VaultBundlesV1 must cover this action; withdrawal share allowance must not exceed max_shares.",
-        )?;
+        if allowance < required
+            || allowance == U256::MAX
+            || (operation != "morpho.deposit" && allowance > maximum_shares)
+        {
+            let token = if operation == "morpho.deposit" {
+                &state.asset
+            } else {
+                &state.shares
+            };
+            return Err(GoFinError::new(
+                "ALLOWANCE_INSUFFICIENT",
+                "validation",
+                "A finite allowance to the reviewed VaultBundlesV1 must cover this action; withdrawal share allowance must not exceed max_shares.",
+                "Read wallet.allowance for the reported token and spender, then use wallet.approve with a finite amount within the reported bounds and preview this action again. Allowance amounts in details are atomic units; wallet.approve takes decimal token units.",
+            ).with_details(json!({
+                "wallet": r.wallet,
+                "chain_id": self.config.chain_id,
+                "network": r.network,
+                "vault": state.vault,
+                "token": token,
+                "spender": lower_address(bundles),
+                "spender_verification": "reviewed_runtime_code_at_observation_block",
+                "observed_block": state.block,
+                "current_allowance_atoms": allowance.to_string(),
+                "required_allowance_atoms": required.to_string(),
+                "recommended_allowance_atoms": required.to_string(),
+                "maximum_allowance_atoms": if operation == "morpho.deposit" { None } else { Some(maximum_shares.to_string()) },
+            })));
+        }
         // The baseline and prepared preview share the same observation instant.
         // Capturing a later wall-clock time here makes the baseline appear to
         // come from the future to the independent engine freshness validator.
@@ -705,7 +727,7 @@ impl EthereumAdapter {
         }
         let summary = write_summary(operation, &r, &b);
         let expires = current_time + chrono::Duration::seconds(300);
-        Ok(PreparedOperation {operation:operation.into(),input:input.clone(),binding:serde_json::to_value(&b).expect("vault binding"),summary,checks:vec![Check {name:"verified Morpho V2 vault, exact allowance and simulated standard flow".into(),status:CheckStatus::Passed,detail:"Factory membership, chain, contract identities, finite shares and local calldata are bound before signing.".into()}],warnings,observed_at:current_time.to_rfc3339(),expires_at:expires.min(chrono::DateTime::from_timestamp(i64::try_from(deadline).map_err(|_| GoFinError::validation("Deadline exceeds timestamp range."))?,0).ok_or_else(|| GoFinError::validation("Invalid deadline."))?).to_rfc3339(),valuation:Some(valuation(self,&b.asset,&b.assets,gas).await?),intent,operation_version:1,action_deadline:None})
+        Ok(PreparedOperation {operation:operation.into(),input:input.clone(),binding:serde_json::to_value(&b).expect("vault binding"),summary,checks:vec![Check {name:"verified Morpho V2 vault, exact allowance and simulated standard flow".into(),status:CheckStatus::Passed,detail:"Factory membership, chain, contract identities, finite shares and local calldata are bound before signing.".into()}],warnings,observed_at:current_time.to_rfc3339(),expires_at:expires.min(chrono::DateTime::from_timestamp(i64::try_from(deadline).map_err(|_| GoFinError::validation("Deadline exceeds timestamp range."))?,0).ok_or_else(|| GoFinError::validation("Invalid deadline."))?).to_rfc3339(),valuation:valuation(self,&b.asset,&b.assets,gas).await.ok(),intent,operation_version:1,action_deadline:None})
     }
 
     pub(crate) async fn morpho_revalidate(
@@ -882,17 +904,29 @@ impl EthereumAdapter {
             .morpho_canonical_receipt(submission, &b.transaction)
             .await?
         else {
+            if let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.runtime
+                    .finalized_nonce_replacement(submission, &b.transaction),
+            )
+            .await
+            {
+                return Ok(proof);
+            }
             return Ok(pending(submission));
         };
-        let mut effects = vec![FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: b.resource.clone(),
-            },
-            amount: amount(&self.native_asset(), receipt.fee),
-            category: "ethereum_gas".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        }];
-        let mut details = json!({"original_hash":submission.reference,"block":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"success":receipt.success,"finality":self.config.finality_label(),"fee_wei":quantity(receipt.fee)});
+        let mut effects = Vec::new();
+        if let Some(fee) = receipt.fee {
+            effects.push(FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: b.resource.clone(),
+                },
+                amount: amount(&self.native_asset(), fee),
+                category: "ethereum_gas".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            });
+        }
+        let mut details = json!({"original_hash":submission.reference,"block":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"success":receipt.success,"outcome_replay_safe":!receipt.success,"finality":self.config.finality_label(),"outcome_reporting":if receipt.fee.is_none() {"partial"} else {"complete"},"fee_wei":receipt.fee.map(quantity)});
         if receipt.success {
             let owner = address(&b.transaction.sender)?;
             let vault = address(&b.vault)?;
@@ -1416,7 +1450,7 @@ mod tests {
             block_number: 20,
             confirmations: 2,
             success: true,
-            fee: U256::from(10),
+            fee: Some(U256::from(10)),
             receipt: json!({"transactionHash":format!("{hash:#x}"),"blockHash":format!("{block_hash:#x}"),"blockNumber":"0x14","logs":[log]}),
         }
     }

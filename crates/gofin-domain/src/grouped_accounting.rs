@@ -247,37 +247,38 @@ pub fn derive_accounting_scope(
             .map(|s| to_value(&s.expected))
             .collect::<Result<Vec<_>>>()?,
     )?)?;
-    let mut valuation = group
-        .approved_envelope
-        .valuation
-        .clone()
-        .ok_or_else(|| invalid("The grouped valuation is missing."))?;
-    let old = group
-        .original_scope
-        .valuation
-        .as_ref()
-        .ok_or_else(|| invalid("The original valuation is missing."))?;
-    let mut movement = old.movement_usd_micros.integer();
-    let mut allocation = old.additional_allocation_usd_micros.integer();
-    let mut fee = old.maximum_fee_usd_micros.integer();
-    for child in &selected {
-        let new = child
-            .scope
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("A member valuation is missing."))?;
-        if new.movement_usd_micros > old.movement_usd_micros {
-            movement += new.movement_usd_micros.integer() - old.movement_usd_micros.integer();
+    // USD observations are advisory. Derive an aggregate only when every
+    // contributing observation is available; native limits above remain binding.
+    let valuation = if let (Some(mut valuation), Some(old)) = (
+        group.approved_envelope.valuation.clone(),
+        group.original_scope.valuation.as_ref(),
+    ) {
+        if selected.iter().all(|child| child.scope.valuation.is_some()) {
+            let mut movement = old.movement_usd_micros.integer();
+            let mut allocation = old.additional_allocation_usd_micros.integer();
+            let mut fee = old.maximum_fee_usd_micros.integer();
+            for child in &selected {
+                let new = child.scope.valuation.as_ref().expect("checked above");
+                if new.movement_usd_micros > old.movement_usd_micros {
+                    movement +=
+                        new.movement_usd_micros.integer() - old.movement_usd_micros.integer();
+                }
+                if new.additional_allocation_usd_micros > old.additional_allocation_usd_micros {
+                    allocation += new.additional_allocation_usd_micros.integer()
+                        - old.additional_allocation_usd_micros.integer();
+                }
+                fee = std::cmp::max(fee, new.maximum_fee_usd_micros.integer());
+            }
+            valuation.movement_usd_micros = Quantity::new(movement.to_string())?;
+            valuation.additional_allocation_usd_micros = Quantity::new(allocation.to_string())?;
+            valuation.maximum_fee_usd_micros = Quantity::new(fee.to_string())?;
+            Some(valuation)
+        } else {
+            None
         }
-        if new.additional_allocation_usd_micros > old.additional_allocation_usd_micros {
-            allocation += new.additional_allocation_usd_micros.integer()
-                - old.additional_allocation_usd_micros.integer();
-        }
-        fee = std::cmp::max(fee, new.maximum_fee_usd_micros.integer());
-    }
-    valuation.movement_usd_micros = Quantity::new(movement.to_string())?;
-    valuation.additional_allocation_usd_micros = Quantity::new(allocation.to_string())?;
-    valuation.maximum_fee_usd_micros = Quantity::new(fee.to_string())?;
+    } else {
+        None
+    };
     Ok(AmendmentScope {
         intent: FinancialIntent {
             debits,
@@ -286,6 +287,6 @@ pub fn derive_accounting_scope(
             locks: original.locks.clone(),
         },
         binding: compose_binding(group, tags.iter().map(String::as_str))?,
-        valuation: Some(valuation),
+        valuation,
     })
 }

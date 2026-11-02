@@ -15,6 +15,7 @@ import zipfile
 COMMIT = "86493c4bf716b01d4bedbc531aa9288cb14d5f36"  # v1.5.0
 ROOT = Path(__file__).resolve().parents[2]
 PATCH = ROOT / "scripts/e2e/surfpool-v1.5.0.patch"
+EXPIRY_PATCH = ROOT / "scripts/e2e/surfpool-expiry-height.patch"
 
 
 def run(args, **kwargs):
@@ -57,7 +58,7 @@ def cache_key(patch_hash):
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
-def build(destination):
+def build(destination, patches):
     with tempfile.TemporaryDirectory(prefix="gofin-surfpool-") as temp:
         source = Path(temp) / "source"
         source.mkdir()
@@ -67,8 +68,9 @@ def build(destination):
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
         if actual != COMMIT:
             raise SystemExit("Surfpool source commit mismatch")
-        run(["git", "apply", "--check", str(PATCH)], cwd=source)
-        run(["git", "apply", str(PATCH)], cwd=source)
+        for patch in patches:
+            run(["git", "apply", "--check", str(patch)], cwd=source)
+            run(["git", "apply", str(patch)], cwd=source)
         # Studio is disabled by the harness. Avoid upstream's build-time
         # download of an unpinned latest UI release.
         stub = Path(temp) / "studio-stub.zip"
@@ -88,9 +90,10 @@ def build(destination):
         os.chmod(destination / "surfpool", 0o755)
 
 
-def install(destination, cache_directory):
+def install(destination, cache_directory, expiry_proof=False):
     destination.mkdir(parents=True, exist_ok=True)
-    patch_hash = hashlib.sha256(PATCH.read_bytes()).hexdigest()
+    patches = [PATCH, EXPIRY_PATCH] if expiry_proof else [PATCH]
+    patch_hash = hashlib.sha256(b"".join(p.read_bytes() for p in patches)).hexdigest()
     if valid_build(destination, patch_hash):
         return
     cache_directory.mkdir(parents=True, exist_ok=True)
@@ -104,7 +107,7 @@ def install(destination, cache_directory):
             with tempfile.TemporaryDirectory(prefix=f"{key}-", dir=cache_directory) as temp:
                 staged = Path(temp) / "artifact"
                 staged.mkdir()
-                build(staged)
+                build(staged, patches)
                 record = metadata(staged, patch_hash)
                 if record is None:
                     raise RuntimeError("Surfpool build did not produce the pinned executable")
@@ -128,9 +131,11 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--cache-dir", type=Path, default=default_cache_directory(),
                         help="shared compiled-artifact cache (default: user cache directory/gofin/surfpool)")
+    parser.add_argument("--expiry-proof", action="store_true",
+                        help="also fix sparse block height/hash reconstruction for expiry proofs")
     args = parser.parse_args()
     destination = args.directory.resolve()
-    install(destination, args.cache_dir.resolve())
+    install(destination, args.cache_dir.resolve(), args.expiry_proof)
     print(destination / "surfpool")
 
 

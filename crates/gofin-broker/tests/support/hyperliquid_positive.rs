@@ -61,8 +61,12 @@ pub struct Fixture {
     wallet: String,
     inner: Arc<bridge_fixture::Rpc>,
     state: Mutex<State>,
+    other_state: Mutex<State>,
     pub deposits: AtomicUsize,
     pub native_dispatches: AtomicUsize,
+    pub lose_first_order: std::sync::atomic::AtomicBool,
+    pub hide_withdrawal_ledger: std::sync::atomic::AtomicBool,
+    pub tamper_withdrawal_detail: std::sync::atomic::AtomicBool,
 }
 
 impl Fixture {
@@ -75,26 +79,54 @@ impl Fixture {
                 cross: true,
                 ..State::default()
             }),
+            other_state: Mutex::new(State {
+                leverage: 1,
+                cross: true,
+                perp_usdc: 100_000_000,
+                ..State::default()
+            }),
             deposits: AtomicUsize::new(0),
             native_dispatches: AtomicUsize::new(0),
+            lose_first_order: std::sync::atomic::AtomicBool::new(false),
+            hide_withdrawal_ledger: std::sync::atomic::AtomicBool::new(false),
+            tamper_withdrawal_detail: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     pub fn profile(self: &Arc<Self>) -> HyperliquidProfile {
-        HyperliquidProfile::new(
-            vec![HyperliquidAccount {
-                name: "synthetic-hl".into(),
-                owner: self.wallet.clone(),
-                credential_ref: Some("synthetic-hl-key".into()),
+        self.profile_with_other(false)
+    }
+    pub fn profile_with_other(self: &Arc<Self>, other: bool) -> HyperliquidProfile {
+        let mut accounts = vec![HyperliquidAccount {
+            name: "synthetic-hl".into(),
+            owner: self.wallet.clone(),
+            credential_ref: Some("synthetic-hl-key".into()),
+            signing_enabled: true,
+            execution_scope: Default::default(),
+        }];
+        if other {
+            accounts.push(HyperliquidAccount {
+                name: "synthetic-hl-other".into(),
+                owner: "0x0000000000000000000000000000000000000002".into(),
+                credential_ref: Some("synthetic-hl-other-key".into()),
                 signing_enabled: true,
                 execution_scope: Default::default(),
-            }],
+            });
+        }
+        HyperliquidProfile::new(
+            accounts,
             self.clone(),
             Arc::new(Prices),
             Arc::new(DeferredExecutionState::default()),
         )
         .unwrap()
         .with_withdrawal_proof(self.clone())
+    }
+    #[allow(dead_code)] // Used by the reverse-workflow fixture.
+    pub fn seed_reverse_position(&self, collateral_usdc: i128, size: i128) {
+        let mut state = self.state.lock().unwrap();
+        state.perp_usdc = collateral_usdc;
+        state.position = size;
     }
     pub fn set_receipt(&self, receipt: Value) {
         self.state.lock().unwrap().receipt = Some(receipt);
@@ -152,7 +184,9 @@ impl EvmRpc for Fixture {
             if selector == transferCall::SELECTOR {
                 let call = transferCall::abi_decode(&raw).unwrap();
                 assert_eq!(params[0]["to"], bridge_fixture::ARB_USDC);
-                assert_eq!(lower_address(call.to), BRIDGE);
+                if lower_address(call.to) != BRIDGE {
+                    return self.inner.request(method, params).await;
+                }
                 if *self.inner.token_balance.lock().unwrap() < call.value {
                     return Err(GoFinError::validation(
                         "Synthetic deposit has no funded USDC.",
@@ -165,6 +199,14 @@ impl EvmRpc for Fixture {
             let raw = gofin_evm::rpc_bytes(&params[0])?;
             let tx = TxEnvelope::decode_2718(&mut raw.as_ref()).unwrap();
             let sender = tx.recover_signer().unwrap();
+            let is_hl_deposit = tx
+                .to()
+                .is_some_and(|to| lower_address(to) == bridge_fixture::ARB_USDC)
+                && transferCall::abi_decode(tx.input())
+                    .is_ok_and(|call| lower_address(call.to) == BRIDGE);
+            if !is_hl_deposit {
+                return self.inner.request(method, params).await;
+            }
             assert_eq!(lower_address(sender), self.wallet);
             assert_eq!(tx.chain_id(), Some(42161));
             assert_eq!(lower_address(tx.to().unwrap()), bridge_fixture::ARB_USDC);
@@ -207,9 +249,13 @@ impl EvmRpc for Fixture {
             return Ok(json!(hash));
         }
         if method == "eth_getTransactionCount" {
+            let inner = self.inner.request(method, params).await?;
+            let nonce =
+                u64::from_str_radix(inner.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
+                    .unwrap_or(0);
             return Ok(json!(format!(
                 "0x{:x}",
-                self.deposits.load(Ordering::SeqCst)
+                nonce.max(self.deposits.load(Ordering::SeqCst) as u64)
             )));
         }
         if matches!(
@@ -236,7 +282,26 @@ impl EvmRpc for Fixture {
 #[async_trait]
 impl HyperliquidTransport for Fixture {
     async fn info(&self, request: HyperliquidInfoRequest) -> Result<Value> {
-        let s = self.state.lock().unwrap();
+        let owner = match &request {
+            HyperliquidInfoRequest::UserRole { owner }
+            | HyperliquidInfoRequest::UserAbstractionState { owner }
+            | HyperliquidInfoRequest::UserDexAbstractionState { owner }
+            | HyperliquidInfoRequest::SpotClearinghouseState { owner }
+            | HyperliquidInfoRequest::ClearinghouseState { owner }
+            | HyperliquidInfoRequest::FrontendOpenOrders { owner }
+            | HyperliquidInfoRequest::ActiveAssetData { owner, .. }
+            | HyperliquidInfoRequest::UserNonFundingLedgerUpdates { owner, .. }
+            | HyperliquidInfoRequest::OrderStatus { owner, .. }
+            | HyperliquidInfoRequest::OrderStatusByClientId { owner, .. }
+            | HyperliquidInfoRequest::UserFillsByTime { owner, .. } => Some(owner.as_str()),
+            _ => None,
+        };
+        let state = if owner == Some("0x0000000000000000000000000000000000000002") {
+            &self.other_state
+        } else {
+            &self.state
+        };
+        let s = state.lock().unwrap();
         let spot = decimal(s.spot_usdc);
         let eth = decimal(s.spot_eth);
         let margin = (s.position.abs() * 100 + i128::from(s.leverage) - 1) / i128::from(s.leverage);
@@ -277,6 +342,9 @@ impl HyperliquidTransport for Fixture {
             }
             HyperliquidInfoRequest::UserNonFundingLedgerUpdates { end_time_ms, .. } => {
                 let mut rows = s.ledger.clone();
+                if self.hide_withdrawal_ledger.load(Ordering::SeqCst) {
+                    rows.retain(|row| row["delta"]["type"] != "withdraw");
+                }
                 if let Some((hash, amount)) = &s.deposit {
                     rows.push(json!({"time":end_time_ms.unwrap_or(1),"hash":hash,"delta":{"type":"deposit","usdc":gofin_evm::quantity(*amount).to_decimal(6)}}));
                 }
@@ -308,7 +376,18 @@ impl HyperliquidTransport for Fixture {
         Ok(match request {
             HyperliquidExplorerRequest::UserDetails { .. } => json!({"txs":s.explorer}),
             HyperliquidExplorerRequest::TxDetails { hash } => {
-                json!({"tx":s.explorer.iter().find(|t|t["hash"]==hash).cloned().unwrap_or(Value::Null)})
+                let mut tx = s
+                    .explorer
+                    .iter()
+                    .find(|t| t["hash"] == hash)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if self.tamper_withdrawal_detail.load(Ordering::SeqCst)
+                    && tx["action"]["type"] == "withdraw3"
+                {
+                    tx["action"]["amount"] = json!("999");
+                }
+                json!({"tx":tx})
             }
         })
     }
@@ -319,9 +398,17 @@ impl HyperliquidTransport for Fixture {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Value> {
         journal.assert_authorized()?;
-        assert_eq!(account.owner, self.wallet);
+        assert!(
+            account.owner == self.wallet
+                || account.owner == "0x0000000000000000000000000000000000000002"
+        );
         self.native_dispatches.fetch_add(1, Ordering::SeqCst);
-        let mut s = self.state.lock().unwrap();
+        let state = if account.owner == "0x0000000000000000000000000000000000000002" {
+            &self.other_state
+        } else {
+            &self.state
+        };
+        let mut s = state.lock().unwrap();
         match &envelope.action {
             HyperliquidAction::UpdateLeverage {
                 leverage, is_cross, ..
@@ -331,6 +418,14 @@ impl HyperliquidTransport for Fixture {
                 Ok(json!({"status":"ok"}))
             }
             HyperliquidAction::Order { orders, .. } => {
+                if self.lose_first_order.swap(false, Ordering::SeqCst) {
+                    return Err(GoFinError::new(
+                        "SYNTHETIC_TIMEOUT",
+                        "transport",
+                        "Synthetic response lost.",
+                        "Observe the original order.",
+                    ));
+                }
                 assert_eq!(orders.len(), 1);
                 let order = &orders[0];
                 let client = order.client_order_id.clone().unwrap();

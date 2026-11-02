@@ -451,11 +451,11 @@ pub(super) mod tests {
         let reservations = store.reservations("old").unwrap();
         store
             .conn
-            .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE reservation_overrides; PRAGMA user_version=22;")
+            .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE reservation_overrides; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=22;")
             .unwrap();
         drop(store);
         let raw = Connection::open(&path).unwrap();
-        raw.execute_batch("BEGIN IMMEDIATE; CREATE TABLE reservation_overrides(interrupted TEXT); PRAGMA user_version=23;").unwrap();
+        raw.execute_batch("BEGIN IMMEDIATE; CREATE TABLE reservation_overrides(interrupted TEXT); DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=23;").unwrap();
         drop(raw);
         let raw = Connection::open(&path).unwrap();
         assert_eq!(

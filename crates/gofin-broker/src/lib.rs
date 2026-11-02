@@ -66,8 +66,6 @@ use gofin_domain::{
 };
 use gofin_engine::{Engine, EngineOptions};
 #[cfg(test)]
-use gofin_engine::{RunAllocation, RunPlan, RunResult};
-#[cfg(test)]
 use gofin_protocol::RunBeginRequest;
 use gofin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_envelope};
 use gofin_store::Store;
@@ -345,10 +343,12 @@ pub struct BrokerPolicy {
     /// Legacy serialized setting, retained for configuration compatibility; ignored at runtime.
     #[serde(default)]
     pub require_run_for_writes: bool,
+    /// Retired audit setting; never parsed or used for admission.
     pub max_movement_usd_micros: String,
+    /// Retired audit setting; never parsed or used for admission.
     pub max_run_allocation_usd_micros: String,
     pub preview_ttl_seconds: u64,
-    /// Human-approved exception; absent legacy configuration remains disabled.
+    /// Retired pricing exception, retained only for historical configuration.
     #[serde(default)]
     pub allow_unpriced_exchange_assets: bool,
 }
@@ -443,10 +443,8 @@ impl BrokerPolicy {
     pub fn beta() -> Self {
         Self {
             require_run_for_writes: false,
-            max_movement_usd_micros: gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
-                .to_string(),
-            max_run_allocation_usd_micros: gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
-                .to_string(),
+            max_movement_usd_micros: "0".into(),
+            max_run_allocation_usd_micros: "0".into(),
             preview_ttl_seconds: 90,
             allow_unpriced_exchange_assets: false,
         }
@@ -970,19 +968,6 @@ impl BrokerConfigV2 {
                 }
             }
         }
-        for value in [
-            &self.policy.max_movement_usd_micros,
-            &self.policy.max_run_allocation_usd_micros,
-        ] {
-            if gofin_domain::policy::policy_micros(value).is_err() {
-                return Err(error(
-                    "CONFIG_POLICY_INVALID",
-                    "configuration",
-                    "Financial policy bounds must be unsigned 64-bit integer USD micros; zero means no personal limit.",
-                    "Repair policy bounds through protected human enrollment.",
-                ));
-            }
-        }
         Ok(())
     }
 }
@@ -1011,81 +996,285 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_papertrade::operation_definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
-        annotate_plan_discovery(definition);
+        annotate_execution_discovery(definition);
     }
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
 }
 
-/// Add presentation-only plan discovery to a detached definition. Never pass
-/// this decorated copy into the engine: approved definition hashes retain the
-/// adapter's original authorization contract across explanatory catalog edits.
-pub fn annotate_plan_discovery(definition: &mut Definition) {
-    if definition.name == "aave.borrow" {
-        definition.semantics["plan_permission"]["debt_bound_review"] = json!({
-            "preapproval_checks":"Read the selected market's current normalized variable-debt index and Aave USD oracle. The cumulative borrowing ceiling must cover maximum principal plus finite mint rounding; max_debt_usd must cover the selected incremental debt including rounding. These checks do not require future collateral or token balances.",
-            "diagnostics":"Insufficient bounds report the exact market/resource/asset, current index or oracle evidence, and the required and declared quantities before approval.",
-            "headroom":"Cash received is not the entire debt obligation. Current required quantities are observed minima, not recommended tight ceilings. Review generous finite headroom for index, price and accrual variation within the human's intent; execution still enforces all approved debt, health and cumulative limits."
-        });
-    }
-    if definition.name == "wallet.approve" {
-        let permission = &mut definition.semantics["plan_permission"];
-        permission["mode"] = json!("adapter_scoped");
-        permission["requires_adapter_scope"] = json!(false);
-        permission["scope"] = json!(
-            "Adapter-scoped bounds cover finite Morpho VaultBundlesV1 prerequisites or revocations; bounds.vault identifies the verified V2 vault. This specialized scope does not restrict generic exact-input plans."
-        );
-        permission["fixed_fields"] = json!(
-            "Wallet, network, vault, token and reviewed spender for adapter-scoped Morpho permission."
-        );
-        permission["exact_input_scope"] = json!(
-            "Generic exact-input plans also support finite ERC-20 approval or revocation for an explicit token and spender, including an Aave pool. Bind the exact amount and all input fields, declare gas costs, and include the approval as its own ordered step. Current allowance and transaction checks run at execution."
-        );
-    }
-    if definition.semantics["standalone_only"] == true {
-        definition.semantics["plan_authorization"] = json!({
-            "mode":"unsupported",
-            "reason":"This operation requires standalone exact approval of venue-calculated fees."
-        });
-        return;
-    }
-    // Bridge transfers use their own persisted finite-boundary grants;
-    // nominated plan-only wrappers advertise their adapter-owned
-    // plan_permission contract instead of this generic exact-input mode.
-    if definition.name.starts_with("bridge.")
-        || (definition.semantics["plan_only"] == true
-            && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
-    {
-        return;
-    }
-    let eligible = matches!(
-        (&definition.kind, &definition.execution_actor),
-        (
-            OperationKind::Write,
-            gofin_domain::ExecutionActor::AgentInvocable
-        ) | (
-            OperationKind::Read,
-            gofin_domain::ExecutionActor::AgentReadable
-        )
-    );
-    if eligible {
-        if !definition.semantics.is_object() {
-            definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
+/// Decorate detached discovery only; preserve adapter definition hashes used by
+/// historical approvals and exact signed-payload validation.
+pub fn annotate_execution_discovery(definition: &mut Definition) {
+    fn remove_retired_timing(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                for field in [
+                    "plan_allowance_seconds",
+                    "plan_relative_deadline",
+                    "usd_pricing_buffer",
+                ] {
+                    object.remove(field);
+                }
+                for child in object.values_mut() {
+                    remove_retired_timing(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    remove_retired_timing(child);
+                }
+            }
+            _ => {}
         }
-        let requires_adapter_scope =
-            definition.semantics["plan_permission"]["requires_adapter_scope"] == true;
-        if let Some(semantics) = definition.semantics.as_object_mut() {
-            semantics.insert(
-                "plan_authorization".into(),
-                json!({
-                    "mode":if requires_adapter_scope { "adapter_scoped" } else { "exact_input" },
-                    "binds":if requires_adapter_scope { vec!["operation", "adapter_reviewed_fixed_input", "adapter_reviewed_bounds", "protected_connection_identity"] } else { vec!["operation", "input_schema", "canonical_input", "protected_connection_identity"] },
-                    "financial_limits":"per_step_maximum_debits_and_costs",
-                    "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
-                    "approval_requires_future_balances":false
-                }),
+    }
+    fn project_native_fee_description(schema: &mut Value) {
+        if let Some(fee) = schema.pointer_mut("/properties/max_fee_eth") {
+            fee["description"] = json!(
+                "Requested native ETH fee ceiling. Preparation checks the transaction fee envelope against this cap; rollup data fees may be estimated and checked after execution. USD estimates are optional reporting."
             );
         }
+        if let Some(variants) = schema.get_mut("anyOf").and_then(Value::as_array_mut) {
+            for variant in variants {
+                project_native_fee_description(variant);
+            }
+        }
+    }
+    if let Some(semantics) = definition.semantics.as_object_mut() {
+        for field in [
+            "plan_authorization",
+            "plan_permission",
+            "plan_only",
+            "boundary_authorization",
+            "named_plan_support",
+            "scopedTimeInForce",
+            "plan_allowance_seconds",
+            "plan_relative_deadline",
+            "usd_pricing_buffer",
+        ] {
+            semantics.remove(field);
+        }
+        if semantics.contains_key("feeConsentScopes") {
+            semantics.insert("feeConsentScopes".into(), json!(["standalone_exact"]));
+        }
+    }
+    project_native_fee_description(&mut definition.input_schema);
+    remove_retired_timing(&mut definition.semantics);
+    match definition.name.as_str() {
+        "binance.spot.order-place" => {
+            definition.semantics["approval"] = json!(
+                "Native action approval; LIMIT IOC/FOK, GTC, maker and market modes retain their distinct venue meanings."
+            );
+            definition.semantics["resting"]["reservation"] = Value::Null;
+            if let Some(resting) = definition.semantics["resting"].as_object_mut() {
+                resting.remove("reservation");
+            }
+            definition.semantics["resting"]["observation"] = json!(
+                "Partial fills retain executed quantities; approval expiry does not cancel a live venue order."
+            );
+        }
+        "binance.withdraw" => {
+            definition.semantics["ordinaryExecution"] = json!(
+                "Native bounds, action approval, original submission identity and independent source/destination evidence."
+            );
+        }
+        "binance.spot.order-cancel" | "binance.futures.order-cancel" => {
+            definition.completion = "The original numeric order has no open remainder. Observe its original GoFin identity separately to retain exact fills and costs.".into();
+        }
+        "bridge.execute" => {
+            definition.description = "Execute one compound bridge action under native intent approval, including its declared allowance, source and destination stages.".into();
+            definition.coverage = "One explicit provider, exact source amount, fixed asset/account/recipient identities, minimum receipt, native action-wide fee caps and a reviewed deadline. Known stage prerequisites are checked before approval.".into();
+            definition.completion = "The original logical action completes when correlated evidence establishes destination receipt. Waiting returns durable status and broker-issued continuation arguments; completed stages never repeat.".into();
+            if let Some(schema) = definition.input_schema.as_object_mut() {
+                schema.remove("anyOf");
+            }
+            definition.input_schema["$ref"] = json!("#/$defs/BridgeExecuteIntentInput");
+            definition.input_schema["description"] =
+                json!("Native intent for a foreground compound bridge action.");
+            definition.input_schema["$defs"]["BridgeExecuteIntentInput"]["description"] = json!(
+                "One explicit provider, an exact amount interval (minimum equals maximum) and an explicit reviewed deadline."
+            );
+            let intent = &mut definition.input_schema["$defs"]["BridgeExecuteIntentInput"];
+            intent["properties"]["cctp"] = json!({"type":"object","additionalProperties":false,"properties":{"transferMode":{"type":"string","enum":["standard","fast"],"default":"standard","description":"CCTP transfer mode, fixed throughout this action and any remaining-stage reauthorization."}}});
+            intent["properties"]["actionDeadline"] = json!({"type":"integer","minimum":1,"description":"Reviewed Unix-seconds deadline for admitting new stages; no protocol completion guarantee."});
+            if let Some(required) = intent["required"].as_array_mut()
+                && !required.iter().any(|field| field == "actionDeadline")
+            {
+                required.push(json!("actionDeadline"));
+            }
+            definition.input_schema["$defs"]["BridgeExecuteIntent"]["description"] = json!(
+                "Select either destinationChainId with destinationAssets, or solanaDestination for supported CCTP routes. Do not combine them."
+            );
+            let bounds = &mut definition.input_schema["$defs"]["BridgeBounds"];
+            bounds["description"] = json!(
+                "Native economic bounds for every stage. Optional latest_protocol_deadline is a provider-enforced protocol bound; it does not set the action admission deadline."
+            );
+            if let Some(properties) = bounds["properties"].as_object_mut() {
+                for field in [
+                    "authorization_seconds",
+                    "input_usd_micros",
+                    "maximum_total_usd_micros",
+                    "source_usd_per_unit_micros",
+                ] {
+                    properties.remove(field);
+                }
+            }
+            bounds["required"] = json!([
+                "input",
+                "fee_caps",
+                "maximum_source_debit",
+                "minimum_net_receipt"
+            ]);
+            bounds["properties"]["input"] = json!({"$ref":"#/$defs/AmountInterval","description":"The same exact amount interval as intent.amount."});
+            bounds["properties"]["maximum_source_debit"] = json!({"$ref":"#/$defs/Quantity"});
+            bounds["properties"]["minimum_net_receipt"] = json!({"$ref":"#/$defs/Amount"});
+            if let Some(properties) =
+                definition.input_schema["$defs"]["FeeCap"]["properties"].as_object_mut()
+            {
+                properties.remove("maximum_usd_micros");
+            }
+            definition.semantics["financial_authorization"] = json!(
+                "One native action approval covering declared stages through the explicit deadline, or protected Yolo."
+            );
+            definition.semantics["execution_input"] = json!(
+                "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting."
+            );
+            definition.semantics["preview_timing"] = json!(
+                "Preview binding.timing_guidance reports the provider arrival estimate when available, the remaining approval window at observed_at, and a suggested deadline with a 25% buffer of at least 300 seconds. A shorter window produces a warning. These are advisory estimates, not settlement guarantees; the reviewed deadline never extends automatically."
+            );
+            definition.semantics["selection"] = json!(
+                "The broker prepares stages within the approved provider and route; no automatic provider switching."
+            );
+            definition.semantics["providers"] =
+                json!(["relay", "arbitrum_canonical", "base_canonical", "cctp"]);
+            definition.semantics["submission_identity"] = json!(
+                "One public logical operation ID with immutable admitted attempt and stage identities."
+            );
+            definition.semantics["command_line_example"] =
+                json!("gofin execute bridge.execute --input JSON --json");
+            definition
+                .examples
+                .retain(|example| example.get("intent").is_some());
+            for example in &mut definition.examples {
+                let maximum = example["intent"]["amount"]["maximum"].clone();
+                example["intent"]["amount"]["minimum"] = maximum.clone();
+                if example["bounds"].get("input").is_some() {
+                    example["bounds"]["input"]["minimum"] = maximum;
+                }
+                example["actionDeadline"] = json!(1793534400u64);
+            }
+        }
+        "bridge.quotes" => {
+            definition.input_schema =
+                gofin_bridge::native_bridge_input_schema(definition.input_schema.clone());
+            if let Some(semantics) = definition.semantics.as_object_mut() {
+                semantics.remove("exact_child_plan_renewal");
+            }
+        }
+        "bridge.recovery" => {
+            definition.semantics["next"] = json!(
+                "Observe the original operation and use its returned continuation arguments. A submitted failed stage requires new authority."
+            );
+        }
+        "bridge.transfer" => {
+            definition.input_schema =
+                gofin_bridge::native_bridge_input_schema(definition.input_schema.clone());
+            definition.description = "Prepare or execute a persisted bridge stage with native action approval and immutable transfer identity.".into();
+            definition.semantics["financial_authorization"] = json!(
+                "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages."
+            );
+            definition.semantics["compound_owned_stage"] = json!(
+                "A stage owned by an approved bridge.execute action cannot be previewed or executed as a new standalone action. Inspect the original operation with status and follow its returned continuation or reauthorization arguments."
+            );
+        }
+        "hyperliquid.orders.twap" => {
+            definition.semantics["fees"] =
+                json!("Estimate checked after execution; not a venue-enforced maximum.");
+            definition.semantics["notional"] =
+                json!("Estimate checked after execution; not an absolute quote-price ceiling.");
+        }
+        "jupiter.perps.limit.update" => {
+            definition.semantics["order_lifecycle"] = json!(
+                "The update targets current venue state. Observe the original create identity for fills, escrow and cancellation; completed quantities are never re-granted."
+            );
+        }
+        "aave.supply" => {
+            definition.description = "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data, exact backing proof and native quantity, rounding and gas bounds.".into();
+        }
+        _ if definition.name.starts_with("kamino.")
+            && definition.semantics.get("swaps").is_some() =>
+        {
+            definition.semantics["swaps"] = json!(
+                "Swaps are separate actions orchestrated by the agent. Native liquidity deposits require both vault assets; withdrawals return native underlying assets."
+            );
+        }
+        _ => {}
+    }
+    if definition.kind == OperationKind::Write {
+        let refresh = match definition.name.as_str() {
+            "wallet.transfer" => {
+                json!({"mode":"conditional", "supported_when":"EVM wallet selected", "otherwise":"exact_binding"})
+            }
+            "swap.execute" | "jupiter.swap" | "kraken.add-order" => {
+                json!({"mode":"within_approved_native_terms"})
+            }
+            "bridge.execute" => {
+                json!({"mode":"declared_stages", "supported_when":"Candidate remains within the approved route, stage, fee caps and action deadline"})
+            }
+            _ => {
+                json!({"mode":"exact_binding", "expired_candidate":"Changed payload requires new approval"})
+            }
+        };
+        // These describe the selected operation's contract. The preview's
+        // typed review supplies the concrete bounds and provider-specific labels.
+        let mut terms = json!({
+            "action_identity":"enforced",
+            "candidate_binding_at_admission":"enforced",
+            "optional_usd_value":"estimate",
+            "actual_fees_and_effects":"after_execution"
+        });
+        match definition.name.as_str() {
+            "swap.execute" => {
+                terms["input_amount"] =
+                    json!({"local_router":"enforced","uniswap_api_v1":"after_execution"});
+                terms["minimum_output"] =
+                    json!({"local_router":"enforced","uniswap_api_v1":"after_execution"});
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "sushi.swap" | "pancakeswap.swap" | "ramses.swap" => {
+                terms["input_amount"] = json!("enforced");
+                terms["minimum_output"] = json!("enforced");
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "uniswap.swap" | "jupiter.swap" => {
+                terms["input_amount"] = json!("after_execution");
+                terms["minimum_output"] = json!("after_execution");
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "wallet.transfer" => {
+                terms["amount_and_recipient"] = json!("enforced");
+                terms["evm_signed_gas_envelope"] = json!("enforced");
+                terms["rollup_data_fee"] = json!("after_execution");
+            }
+            "bridge.execute" => {
+                terms["provider_route_and_stage_deadline"] = json!("enforced");
+                terms["action_fee_caps"] =
+                    json!("enforced at admission; actual fees checked after execution");
+                terms["recipient_and_destination_receipt"] = json!("after_execution");
+            }
+            _ => {}
+        }
+        definition.semantics["authorization"] = json!({
+            "mode":"native_action", "outcome_version":1,
+            "candidate":"Every exact payload must remain within the original approved native terms",
+            "candidate_refresh":refresh,
+            "terms":terms,
+            "concrete_terms":"preview.review.terms labels each concrete term; provider selection can change enforcement",
+            "personal_usd_limits":false,
+            "continuation":"Use the original operation ID and broker-issued token; successful stages never repeat"
+        });
     }
 }
 
@@ -3351,6 +3540,8 @@ fn concurrent_read_request(request: &BrokerRequest) -> bool {
             | BrokerRequest::PolicyShow
             | BrokerRequest::Doctor
             | BrokerRequest::Operations
+            | BrokerRequest::OpenOperations
+            | BrokerRequest::StatusSide { .. }
             | BrokerRequest::Snapshot
     ) || matches!(request, BrokerRequest::Read { operation, .. } if !matches!(operation.as_str(), "bridge.quotes" | "bridge.status" | "bridge.recovery"))
 }
@@ -3362,6 +3553,9 @@ fn independent_request(request: &BrokerRequest) -> bool {
     matches!(
         request,
         BrokerRequest::Preview { .. }
+            | BrokerRequest::Execute { .. }
+            | BrokerRequest::ContinueOperation { .. }
+            | BrokerRequest::ReauthorizeOperation { .. }
             | BrokerRequest::PreviewPlan { .. }
             | BrokerRequest::PreviewPlanStep { .. }
             | BrokerRequest::PreviewBoundary { .. }
@@ -4035,7 +4229,7 @@ impl BrokerRuntime {
                 self.engine.rpc_read_scope(operation, input)
             }
             R::Snapshot => self.engine.rpc_read_scope("gofin.snapshot", &json!({})),
-            R::Status { id } => self.engine.status_rpc_read_scope(id),
+            R::Status { id } | R::StatusSide { id, .. } => self.engine.status_rpc_read_scope(id),
             R::RecoverOperationReceipt { operation_id, .. } => {
                 self.engine.status_rpc_read_scope(operation_id)
             }
@@ -4118,6 +4312,30 @@ impl BrokerRuntime {
 
     async fn handle_result(&self, request: BrokerRequest) -> gofin_domain::Result<Value> {
         use BrokerRequest as R;
+        if matches!(
+            &request,
+            R::PreviewBoundaryAuthorization { .. }
+                | R::AuthorizeBoundary { .. }
+                | R::PreviewBoundary { .. }
+                | R::ExecuteBoundary { .. }
+                | R::ReplaceBoundaryCandidate { .. }
+                | R::PreviewPlan { .. }
+                | R::AuthorizePlan { .. }
+                | R::PreviewPlanStep { .. }
+                | R::ExecutePlanStep { .. }
+                | R::ReplacePlanCandidate { .. }
+                | R::PreviewOperationResolution { .. }
+                | R::ResolveOperation { .. }
+                | R::PreviewReservationRelease { .. }
+                | R::ReleaseReservation { .. }
+        ) {
+            return Err(error(
+                "EXECUTION_INTERFACE_RETIRED",
+                "validation",
+                "Plans, bounded grants, reservation overrides and outcome attestations are retired.",
+                "Use preview and execute for native single-action approval; observe existing identities with status. No authority was issued or consumed.",
+            ));
+        }
         let lifecycle_request = matches!(&request, R::DaemonStart | R::DaemonStop);
         if self.protected_config_check.load(Ordering::SeqCst) {
             let stopped = gofin_protocol::daemon::stop_requested_at(
@@ -4152,6 +4370,7 @@ impl BrokerRuntime {
                 | R::Connections
                 | R::Doctor
                 | R::Operations
+                | R::OpenOperations
                 | R::PreviewReservationRelease { .. }
                 | R::ReleaseReservation { .. }
                 | R::OperationRecovery { .. }
@@ -4182,28 +4401,13 @@ impl BrokerRuntime {
                 "exchanges":gofin_discovery::exchange_capabilities(),
                 "aave_mcp_read_tools":self.cached_aave_mcp_read_definitions()?
             })),
-            R::PolicyShow => {
-                let mut view = gofin_discovery::PolicyView::new(
-                    &self.config.policy.max_movement_usd_micros,
-                    &self.config.policy.max_run_allocation_usd_micros,
-                )?;
-                view.set_unpriced_policy(self.config.policy.allow_unpriced_exchange_assets);
-                match self.engine.allocation_unpriced_operations() {
-                    Ok(count) => {
-                        view.allocation_unpriced_operations = Some(count);
-                        if count > 0 {
-                            view.unpriced_assets_warning =
-                                Some(gofin_domain::unpriced::WARNING.into());
-                        }
-                    }
-                    Err(error) => view.allocation_usage_error = Some(error),
-                }
-                match self.engine.allocation_used_usd_micros() {
-                    Ok(value) => view.allocation_used_usd = Some(format_micros_total(&value)),
-                    Err(error) => view.allocation_usage_error = Some(error),
-                }
-                serde_json::to_value(view).map_err(|_| internal_error())
-            }
+            R::PolicyShow => Ok(json!({
+                "retired": true,
+                "personal_limits_enforced": false,
+                "retired_settings": self.config.policy,
+                "authorization": "Each action requires native economic approval or protected Yolo authority.",
+                "next_action": "Discover an operation's native terms with explain and schema."
+            })),
             R::YoloStatus => {
                 let fixture_paths = self
                     .yolo_fixture_paths
@@ -4573,8 +4777,20 @@ impl BrokerRuntime {
                     .await?,
             )
             .map_err(|_| internal_error()),
-            R::Execute { request } => serde_json::to_value(self.engine.execute(request).await?)
-                .map_err(|_| internal_error()),
+            R::Execute { request } => {
+                let record = Box::pin(self.engine.execute(request)).await?;
+                self.engine.operation_view(&record)
+            }
+            R::ContinueOperation { id, token } => {
+                Box::pin(self.engine.continue_operation(&id, &token)).await
+            }
+            R::ReauthorizeOperation { id, token, input } => {
+                Box::pin(self.engine.reauthorize_operation(&id, &token, input)).await
+            }
+            R::OpenOperations => {
+                serde_json::to_value(self.engine.open_operations()?).map_err(|_| internal_error())
+            }
+            R::StatusSide { id, side } => self.engine.status_side(&id, &side).await,
             R::Status { id } if id.starts_with("configuration:") => {
                 if !self.protected_config_check.load(Ordering::SeqCst) {
                     return Err(GoFinError::validation(
@@ -4587,13 +4803,13 @@ impl BrokerRuntime {
                 let record = self.engine.status(&id, true).await?;
                 self.engine.operation_view(&record)
             }
-            R::Operations => self
-                .engine
-                .operations()?
-                .iter()
-                .map(|record| self.engine.operation_view(record))
-                .collect::<gofin_domain::Result<Vec<_>>>()
-                .map(Value::Array),
+            R::Operations => Ok(Value::Array(
+                self.engine
+                    .operations()?
+                    .iter()
+                    .map(|record| self.engine.operation_view(record))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
@@ -4628,215 +4844,6 @@ impl BrokerRuntime {
 
     pub async fn snapshot(&self) -> gofin_domain::Result<StateSnapshot> {
         self.observer.snapshot().await
-    }
-
-    #[cfg(test)]
-    async fn begin_run(&self, request: RunBeginRequest) -> gofin_domain::Result<RunResult> {
-        if request.allocations.is_empty()
-            || request.planned_operations.is_empty()
-            || request.unwind.is_empty()
-            || request.planned_operations.len() + request.unwind.len() > 64
-        {
-            return Err(error(
-                "RETURN_ROUTE_NOT_READY",
-                "budget",
-                "Run needs selected holdings, forward operations and a complete return path.",
-                "Supply exact selected holdings and every forward and return step before starting.",
-            ));
-        }
-        // The engine owns the authoritative observer capture. Keep its opaque
-        // token while the broker validates allocations and obtains trusted
-        // prices, then consume that same capture instead of taking a second
-        // complete Ethereum snapshot after the price reads.
-        let observed = self.engine.observe_run_baseline("gofin.snapshot").await?;
-        let baseline = observed.snapshot().clone();
-        if !baseline.complete
-            || !baseline.pending.is_empty()
-            || !baseline.state.in_flight.is_empty()
-        {
-            return Err(error(
-                "INCOMPLETE_BASELINE",
-                "budget",
-                "Broker observers did not capture complete quiet state.",
-                "Reconcile pending activity and retry the broker-captured snapshot.",
-            ));
-        }
-        let definitions = self.engine.definitions()?;
-        let mut allocations = Vec::with_capacity(request.allocations.len());
-        let mut allocation_value = num_bigint::BigUint::default();
-        for selected in &request.allocations {
-            let observed = baseline
-                .state
-                .holdings
-                .iter()
-                .find(|holding| {
-                    holding.resource == selected.resource
-                        && holding.amount.asset == selected.amount.asset
-                })
-                .ok_or_else(|| {
-                    error(
-                        "ALLOCATION_NOT_IN_BASELINE",
-                        "budget",
-                        "Selected holding is absent from the broker-captured baseline.",
-                        "Select an exact holding reported by the broker.",
-                    )
-                })?;
-            if selected.amount.atoms.integer() > observed.amount.atoms.integer() {
-                return Err(error(
-                    "ALLOCATION_NOT_IN_BASELINE",
-                    "budget",
-                    "Selected quantity exceeds the broker-observed holding.",
-                    "Reduce the selected quantity to the exact observed available allocation.",
-                ));
-            }
-            let (value_usd_micros, observed_at, source) =
-                self.valuator.usd_micros(&selected.amount).await?;
-            allocation_value += parse_atoms(&value_usd_micros)?;
-            allocations.push(RunAllocation {
-                holding: selected.clone(),
-                value_usd_micros,
-                observed_at,
-                source,
-            });
-        }
-        if gofin_domain::policy::limit(&self.config.policy.max_run_allocation_usd_micros)?
-            .is_some_and(|limit| allocation_value > num_bigint::BigUint::from(limit))
-        {
-            return Err(error(
-                "RUN_ALLOCATION_LIMIT",
-                "budget",
-                "Selected allocations exceed the configured run limit.",
-                "Reduce selected holdings to stay within the protected run policy.",
-            ));
-        }
-        let selected_assets = request
-            .allocations
-            .iter()
-            .map(|allocation| allocation.amount.asset.clone())
-            .collect::<Vec<_>>();
-        let route_prices = self
-            .trusted_asset_prices(&baseline, &selected_assets)
-            .await?;
-        let mut fee_caps = num_bigint::BigUint::default();
-        let steps = request.planned_operations.iter().chain(&request.unwind);
-        for (index, step) in steps.enumerate() {
-            if !definitions.iter().any(|definition| {
-                definition.name == step.operation && definition.kind == OperationKind::Write
-            }) || step.description.is_empty()
-                || step.description.len() > 1024
-                || step
-                    .input
-                    .as_object()
-                    .is_none_or(|object| object.len() > 128)
-                || step.maximum_fee_usd_micros.is_empty()
-                || !step
-                    .maximum_fee_usd_micros
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-                || index >= 64
-            {
-                return Err(error(
-                    "RETURN_ROUTE_INVALID",
-                    "budget",
-                    "A route step is unsupported, incomplete or exceeds the bounded plan length.",
-                    "Provide a reviewed plan operation, strict input, finite fee cap and short purpose.",
-                ));
-            }
-            fee_caps += parse_atoms(&step.maximum_fee_usd_micros)?;
-        }
-        let return_cost_cap = parse_atoms(&request.return_cost_reserve_usd_micros)?;
-        if fee_caps > return_cost_cap {
-            return Err(error(
-                "RETURN_COST_BUDGET_EXCEEDED",
-                "budget",
-                "Forward and return fee caps exceed the reserved total.",
-                "Increase the total cost reserve or reduce planned fee caps.",
-            ));
-        }
-        let plan = RunPlan {
-            id: uuid::Uuid::new_v4().to_string(),
-            baseline,
-            allocations,
-            borrowed_proceeds_reserve_usd_micros: request.borrowed_proceeds_reserve_usd_micros,
-            return_cost_reserve_usd_micros: request.return_cost_reserve_usd_micros,
-            planned_operations: request.planned_operations,
-            unwind: request.unwind,
-            route_proofs: vec![],
-            asset_prices: vec![],
-        };
-        self.engine
-            .begin_run_from_observed_baseline_with_asset_prices(
-                observed,
-                plan,
-                route_prices,
-                Utc::now(),
-            )
-            .await
-    }
-
-    #[cfg(test)]
-    async fn replan_run(
-        &self,
-        id: String,
-        remaining: Vec<gofin_domain::PlanStep>,
-    ) -> gofin_domain::Result<RunResult> {
-        if remaining.is_empty() || remaining.len() > 64 {
-            return Err(error(
-                "RETURN_ROUTE_INVALID",
-                "budget",
-                "A replacement route must contain a bounded list of remaining steps.",
-                "Provide every remaining forward and cleanup step in order.",
-            ));
-        }
-        let definitions = self.engine.definitions()?;
-        for step in &remaining {
-            if !definitions.iter().any(|definition| {
-                definition.name == step.operation && definition.kind == OperationKind::Write
-            }) || step.description.is_empty()
-                || step.description.len() > 1024
-                || step
-                    .input
-                    .as_object()
-                    .is_none_or(|object| object.len() > 128)
-                || step.maximum_fee_usd_micros.is_empty()
-                || !step
-                    .maximum_fee_usd_micros
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-            {
-                return Err(error(
-                    "RETURN_ROUTE_INVALID",
-                    "budget",
-                    "A replacement route step is unsupported or incomplete.",
-                    "Use reviewed writes with strict inputs, finite fee caps and short purposes.",
-                ));
-            }
-            parse_atoms(&step.maximum_fee_usd_micros)?;
-        }
-        let current = self.snapshot().await?;
-        if !current.complete || !current.pending.is_empty() || !current.state.in_flight.is_empty() {
-            return Err(error(
-                "INCOMPLETE_BASELINE",
-                "budget",
-                "Fresh complete and quiet state is required to revise a return route.",
-                "Reconcile pending activity and retry with a broker-captured snapshot.",
-            ));
-        }
-        // Original allocation assets remain relevant to origin/cost accounting
-        // when their current local holding is zero after a custody conversion.
-        let original_assets = self.engine.run_allocation_assets(&id)?;
-        let route_prices = self
-            .trusted_asset_prices(&current, &original_assets)
-            .await?;
-        self.engine
-            .replan_remaining_from_observer(
-                &id,
-                "gofin.snapshot",
-                remaining,
-                route_prices,
-                Utc::now(),
-            )
-            .await
     }
 
     #[cfg(test)]
@@ -5816,17 +5823,6 @@ impl Adapter for CompositeObserver {
 }
 
 #[cfg(test)]
-fn parse_atoms(value: &str) -> gofin_domain::Result<num_bigint::BigUint> {
-    value.parse().map_err(|_| {
-        error(
-            "INVALID_AMOUNT",
-            "budget",
-            "Run allocation quantity is not an exact integer atom count.",
-            "Select a canonical positive base-unit quantity.",
-        )
-    })
-}
-
 fn format_micros_total(micros: &str) -> String {
     let padded = format!("{:0>7}", micros);
     let (whole, fraction) = padded.split_at(padded.len() - 6);
@@ -5843,6 +5839,7 @@ fn protocol_methods() -> Vec<&'static str> {
         "capabilities",
         "connections",
         "policy_show",
+        "yolo_status",
         "doctor",
         "read",
         "read_artifact",
@@ -5850,22 +5847,15 @@ fn protocol_methods() -> Vec<&'static str> {
         "release_artifact",
         "preview",
         "configuration_preview",
-        "preview_boundary_authorization",
-        "authorize_boundary",
-        "boundary_status",
-        "revoke_boundary",
-        "preview_boundary",
         "execute",
-        "execute_boundary",
-        "replace_boundary_candidate",
+        "continue_operation",
+        "reauthorize_operation",
         "status",
+        "status_side",
         "operations",
+        "open_operations",
         "operation_recovery",
         "recover_operation_receipt",
-        "preview_operation_resolution",
-        "preview_reservation_release",
-        "release_reservation",
-        "resolve_operation",
         "snapshot",
         "daemon_start",
         "daemon_stop",
@@ -5891,6 +5881,9 @@ pub async fn handle_request(runtime: &BrokerRuntime, request: BrokerRequest) -> 
 pub fn open_protected_store() -> gofin_domain::Result<Store> {
     validate_installation()?;
     validate_private_file_parent(Path::new(OPERATIONS_PATH))?;
+    if Path::new(OPERATIONS_PATH).exists() {
+        runtime_update::require_execution_review_before_migration()?;
+    }
     Store::open(OPERATIONS_PATH).map_err(store_startup_error)
 }
 
@@ -6383,6 +6376,24 @@ async fn serve_connection_with_timeouts(
     let runtime = shared_runtime.read().await;
     let cancellable_read =
         envelope.cancellable_read() && runtime.request_uses_rpc_reads(&envelope.request);
+    if envelope.cancel_on_disconnect
+        && matches!(
+            envelope.request,
+            BrokerRequest::Execute { .. }
+                | BrokerRequest::ContinueOperation { .. }
+                | BrokerRequest::ReauthorizeOperation { .. }
+        )
+    {
+        let response = gofin_protocol::progress::observe_financial_request(
+            &mut stream,
+            envelope.progress,
+            envelope.progress_details,
+            runtime.handle_client_request(envelope.request, false),
+        )
+        .await;
+        write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
+        return Ok(());
+    }
     let Some(response) = gofin_protocol::progress::observe_request_with_details(
         &mut stream,
         envelope.progress,
@@ -6674,155 +6685,6 @@ fn peer_uid(stream: &UnixStream) -> gofin_domain::Result<u32> {
     ))
 }
 
-/// Confirm no unresolved operation currently reserves this exact physical
-/// resource before enrollment changes or removes its mapping.
-pub fn resource_has_pending_operations(
-    store: &Store,
-    resource: &ResourceId,
-) -> gofin_domain::Result<bool> {
-    let records = store.list_records().map_err(|_| {
-        error(
-            "STORE_UNAVAILABLE",
-            "configuration",
-            "Pending-operation state could not be inspected.",
-            "Preserve this resource mapping until the broker journal is available.",
-        )
-    })?;
-    let mut pending = false;
-    for value in records {
-        pending |= record_reserves_resource(&value, resource)?
-            && !operation_is_resolved_for_enrollment(store, &value)?;
-    }
-    Ok(pending)
-}
-
-/// Detect unresolved Hyperliquid work owned by a master signer. Unlike a
-/// single account resource, one signing identity may have owner, delegated,
-/// spot, perp, unified, DEX and nonce-recovery records. The prepared binding
-/// carries the exact master owner for every such action.
-pub(crate) fn hyperliquid_owner_has_pending_operations(
-    store: &Store,
-    owner: &str,
-) -> gofin_domain::Result<bool> {
-    let records = store.list_records().map_err(|_| {
-        error(
-            "STORE_UNAVAILABLE",
-            "configuration",
-            "Pending-operation state could not be inspected.",
-            "Preserve this EVM signer mapping until the broker journal is available.",
-        )
-    })?;
-    for value in records {
-        if record_reserves_hyperliquid_owner(&value, owner)?
-            && !operation_is_resolved_for_enrollment(store, &value)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-// Raw journal status deliberately preserves the original uncertain observation.
-// Only a validated durable human disposition can supersede it here; releasing
-// reservations alone does not resolve an operation. Retained lifecycle holds
-// still require the original signer/account mapping for independent recovery.
-fn operation_is_resolved_for_enrollment(
-    store: &Store,
-    value: &Value,
-) -> gofin_domain::Result<bool> {
-    let invalid = || {
-        error(
-            "STORE_INVALID_RECORD",
-            "configuration",
-            "Durable operation resolution state could not be verified.",
-            "Preserve account and signer mappings until the journal has been repaired and reconciled.",
-        )
-    };
-    let id = value["id"].as_str().ok_or_else(invalid)?;
-    let Some(resolution) = store.operation_resolution(id).map_err(|_| invalid())? else {
-        return Ok(false);
-    };
-    if !matches!(resolution["outcome"].as_str(), Some("succeeded" | "failed")) {
-        return Err(invalid());
-    }
-    Ok(!store
-        .all_effective_reservations()
-        .map_err(|_| invalid())?
-        .iter()
-        .any(|(operation_id, _)| operation_id == id))
-}
-
-fn record_reserves_hyperliquid_owner(value: &Value, owner: &str) -> gofin_domain::Result<bool> {
-    let record: gofin_domain::OperationRecord =
-        serde_json::from_value(value.clone()).map_err(|_| {
-            error(
-                "STORE_INVALID_RECORD",
-                "configuration",
-                "A durable operation record is malformed.",
-                "Do not change signer mappings until the journal has been repaired and reconciled.",
-            )
-        })?;
-    if record.status.terminal() || !record.operation.starts_with("hyperliquid.") {
-        return Ok(false);
-    }
-    let binding = &record.preview.as_ref().ok_or_else(|| {
-        error(
-            "STORE_INVALID_RECORD",
-            "configuration",
-            "A nonterminal Hyperliquid operation has no durable account binding.",
-            "Preserve all reusable signer mappings until the record is repaired and reconciled.",
-        )
-    })?.binding;
-    let bound_owner = binding
-        .get("account")
-        .and_then(|account| account.get("owner"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            // The broker-composed EVM-to-Hyperliquid deposit wraps the
-            // adapter binding and carries its authenticated owner at top level.
-            (record.operation == "hyperliquid.account.deposit")
-                .then(|| binding.get("owner").and_then(Value::as_str))
-                .flatten()
-        })
-        .ok_or_else(|| {
-            error(
-                "STORE_INVALID_RECORD",
-                "configuration",
-                "A nonterminal Hyperliquid operation has no master-owner binding.",
-                "Preserve all reusable signer mappings until the record is repaired and reconciled.",
-            )
-        })?;
-    Ok(bound_owner.eq_ignore_ascii_case(owner))
-}
-
-fn record_reserves_resource(value: &Value, resource: &ResourceId) -> gofin_domain::Result<bool> {
-    let record: gofin_domain::OperationRecord = serde_json::from_value(value.clone()).map_err(|_| {
-        error("STORE_INVALID_RECORD", "configuration", "A durable operation record is malformed.", "Do not change account mappings until the journal has been repaired and reconciled.")
-    })?;
-    if record.status.terminal() {
-        return Ok(false);
-    }
-    let preview = record.preview.as_ref().ok_or_else(|| {
-        error(
-            "STORE_INVALID_RECORD",
-            "configuration",
-            "A nonterminal operation has no resource binding.",
-            "Preserve all account mappings until the operation record is repaired and reconciled.",
-        )
-    })?;
-    Ok(preview
-        .intent
-        .debits
-        .iter()
-        .any(|debit| &debit.resource == resource)
-        || preview
-            .intent
-            .maximum_costs
-            .iter()
-            .any(|cost| cost.location.resource() == resource)
-        || preview.intent.locks.contains(resource))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6858,181 +6720,80 @@ mod tests {
     }
 
     #[test]
-    fn operation_catalog_advertises_generic_exact_plan_support_by_actor_and_kind() {
-        let definitions = operation_definitions();
-        let meteora_operations = [
-            "meteora.pools",
-            "meteora.pool",
-            "meteora.positions",
-            "meteora.position",
-            "meteora.quote",
-            "meteora.swap",
-            "meteora.position.open",
-            "meteora.position.add",
-            "meteora.position.remove",
-            "meteora.position.collect",
-            "meteora.position.close",
-        ];
-        for name in meteora_operations {
-            let definition = definitions
-                .iter()
-                .find(|definition| definition.name == name)
-                .unwrap_or_else(|| {
-                    panic!("Meteora operation {name} is missing from offline catalog")
-                });
-            let schema = jsonschema::options()
-                .offline()
-                .build(&definition.input_schema)
-                .unwrap_or_else(|error| panic!("Meteora schema {name} is invalid: {error}"));
-            for example in &definition.examples {
-                if let Err(errors) = schema.validate(example) {
-                    panic!("Meteora example for {name} is invalid: {errors}");
-                }
-            }
-        }
-        for definition in &definitions {
-            if definition.name == "coinbase.withdraw" {
-                assert_eq!(
-                    definition.semantics["plan_authorization"]["mode"],
-                    "exact_input"
-                );
-                assert_eq!(definition.semantics["feePolicy"]["reserveIsFeeCap"], false);
-                assert_eq!(
-                    definition.semantics["feeConsentScopes"],
-                    json!(["standalone_exact", "named_plan_exact"])
-                );
-            }
-            if definition.semantics["standalone_only"] == true {
-                assert_eq!(
-                    definition.semantics["plan_authorization"]["mode"],
-                    "unsupported"
-                );
-                assert_eq!(definition.semantics["feePolicy"]["reserveIsFeeCap"], false);
-                continue;
-            }
-            let eligible = !definition.name.starts_with("bridge.")
-                && !(definition.semantics["plan_only"] == true
-                    && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
-                && matches!(
-                    (&definition.kind, &definition.execution_actor),
-                    (
-                        OperationKind::Write,
-                        gofin_domain::ExecutionActor::AgentInvocable
-                    ) | (
-                        OperationKind::Read,
-                        gofin_domain::ExecutionActor::AgentReadable
-                    )
-                );
-            assert_eq!(
-                definition
-                    .semantics
-                    .get("plan_authorization")
-                    .and_then(Value::as_object)
-                    .is_some(),
-                eligible,
-                "{}",
-                definition.name
+    fn operation_catalog_advertises_native_actions_without_changing_legacy_definitions() {
+        for definition in operation_definitions() {
+            assert!(definition.semantics.get("plan_authorization").is_none());
+            assert!(definition.semantics.get("plan_permission").is_none());
+            assert!(definition.semantics.get("plan_allowance_seconds").is_none());
+            assert!(definition.semantics.get("usd_pricing_buffer").is_none());
+            assert!(
+                !definition
+                    .input_schema
+                    .to_string()
+                    .contains("Fresh USD quotes must")
             );
-            if eligible {
+            if definition.kind == OperationKind::Write {
                 assert_eq!(
-                    definition.semantics["plan_authorization"]["mode"],
-                    if definition.semantics["plan_permission"]["requires_adapter_scope"] == true {
-                        "adapter_scoped"
-                    } else {
-                        "exact_input"
-                    },
-                    "{}",
-                    definition.name
+                    definition.semantics["authorization"]["mode"],
+                    "native_action"
                 );
                 assert_eq!(
-                    definition.semantics["plan_authorization"]["approval_requires_future_balances"],
+                    definition.semantics["authorization"]["personal_usd_limits"],
                     false
                 );
-                jsonschema::options()
-                    .offline()
-                    .build(&definition.input_schema)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "eligible plan operation {} has an invalid or unavailable input schema: {error}",
-                            definition.name
-                        )
-                    });
+                assert!(definition.semantics["authorization"]["terms"].is_object());
+                let refresh = &definition.semantics["authorization"]["candidate_refresh"];
+                assert!(refresh["mode"].is_string());
+                if definition.name == "jupiter.perps.open" {
+                    assert_eq!(refresh["mode"], "exact_binding");
+                }
+                if matches!(
+                    definition.name.as_str(),
+                    "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
+                ) {
+                    assert_eq!(refresh["mode"], "exact_binding");
+                    assert_eq!(
+                        definition.semantics["authorization"]["terms"]["minimum_output"],
+                        if definition.name == "uniswap.swap" {
+                            "after_execution"
+                        } else {
+                            "enforced"
+                        }
+                    );
+                }
+                if definition.name == "jupiter.swap" {
+                    assert_eq!(refresh["mode"], "within_approved_native_terms");
+                    assert_eq!(
+                        definition.semantics["authorization"]["terms"]["minimum_output"],
+                        "after_execution"
+                    );
+                }
             }
+            jsonschema::options()
+                .offline()
+                .build(&definition.input_schema)
+                .unwrap();
         }
-        // Adapter semantics participate in persisted exact-plan hashes. The
-        // explanatory discovery view must leave that existing contract intact.
-        let adapter_approval = gofin_ethereum::operation_definitions()
+        let raw = gofin_ethereum::operation_definitions()
             .into_iter()
-            .find(|definition| definition.name == "wallet.approve")
+            .find(|d| d.name == "wallet.approve")
             .unwrap();
-        assert!(adapter_approval.semantics["plan_permission"]["mode"].is_null());
+        let original = serde_json::to_value(&raw).unwrap();
+        let mut detached = raw.clone();
+        annotate_execution_discovery(&mut detached);
+        assert_eq!(serde_json::to_value(&raw).unwrap(), original);
+        assert!(detached.semantics.get("plan_permission").is_none());
+        let bridge = operation_definitions()
+            .into_iter()
+            .find(|d| d.name == "bridge.execute")
+            .unwrap();
+        let cctp = &bridge.input_schema["$defs"]["BridgeExecuteIntentInput"]["properties"]["cctp"];
+        assert_eq!(cctp["properties"]["transferMode"]["default"], "standard");
+        assert!(cctp.get("required").is_none());
         assert!(
-            adapter_approval.semantics["plan_permission"]["scope"]
-                .as_str()
-                .unwrap()
-                .starts_with("Finite Morpho VaultBundlesV1")
-        );
-        let mut development_approval = adapter_approval.clone();
-        annotate_plan_discovery(&mut development_approval);
-        assert_eq!(
-            development_approval.semantics["plan_permission"]["requires_adapter_scope"],
-            false
-        );
-        let approval = definitions
-            .iter()
-            .find(|definition| definition.name == "wallet.approve")
-            .unwrap();
-        assert_eq!(
-            approval.semantics["plan_authorization"]["mode"],
-            "exact_input"
-        );
-        assert_eq!(
-            approval.semantics["plan_permission"]["mode"],
-            "adapter_scoped"
-        );
-        assert_eq!(
-            approval.semantics["plan_permission"]["requires_adapter_scope"],
-            false
-        );
-        assert!(
-            approval.semantics["plan_permission"]["exact_input_scope"]
-                .as_str()
-                .unwrap()
-                .contains("Aave pool")
-        );
-        let borrow = definitions
-            .iter()
-            .find(|definition| definition.name == "aave.borrow")
-            .unwrap();
-        assert_eq!(
-            borrow.semantics["plan_authorization"]["mode"],
-            "adapter_scoped"
-        );
-        let deposit = definitions
-            .iter()
-            .find(|definition| definition.name == "binance.deposit")
-            .unwrap();
-        assert_eq!(
-            deposit.semantics["broker_generated_attempt_input_fields"],
-            json!(["/requestId"])
-        );
-        assert!(
-            deposit.input_schema["required"]
-                .as_array()
-                .is_some_and(|required| required.iter().any(|field| field == "requestId"))
-        );
-        assert_eq!(
-            deposit.input_schema["properties"]["requestId"]["type"],
-            "string"
-        );
-        let nominated_swap = definitions
-            .iter()
-            .find(|definition| definition.name == "swap.execute")
-            .unwrap();
-        assert!(nominated_swap.semantics.get("plan_authorization").is_none());
-        assert_eq!(
-            nominated_swap.semantics["plan_permission"]["mode"],
-            "agent_nominated"
+            bridge.input_schema["$defs"]["BridgeExecuteIntent"]["properties"]
+                .get("solanaDestination")
+                .is_some()
         );
     }
 
@@ -7748,8 +7509,6 @@ mod tests {
         runtime: Arc<BrokerRuntime>,
         snapshot: Arc<Mutex<StateSnapshot>>,
         calls: Arc<Mutex<Vec<(AssetId, usize)>>>,
-        revision: Arc<AtomicUsize>,
-        allow_preflight: Arc<AtomicBool>,
     }
 
     fn price_holding(reference: &str, atoms: &str) -> ResourceAmount {
@@ -7813,8 +7572,6 @@ mod tests {
             runtime,
             snapshot,
             calls,
-            revision,
-            allow_preflight,
         }
     }
 
@@ -8004,105 +7761,6 @@ mod tests {
             );
         }
         assert_eq!(fixture.calls.lock().unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn independent_usdt_premium_blocks_99_token_allocation_over_100_usd() {
-        let mut selected = price_holding("USDT", "0");
-        selected.amount.asset.decimals = 36;
-        selected.amount.atoms = Quantity::from_decimal("99", 36).unwrap();
-        let observed = Arc::new(Mutex::new(price_snapshot(vec![selected.clone()])));
-        let runtime = compose_runtime(
-            config(),
-            RuntimeDependencies {
-                store: Store::in_memory().unwrap(),
-                adapters: vec![Arc::new(ReadAdapter {
-                    captures: Arc::new(AtomicUsize::new(0)),
-                    pricing_snapshot: Some(observed),
-                    pricing_preflight: None,
-                    identity_probe: None,
-                    connection_metadata: vec![],
-                })],
-                authorizer: Arc::new(ReadOnlyAuthorizer),
-                valuator: Arc::new(pricing::tests::fixed_valuator("1.02")),
-                bridge: None,
-            },
-        )
-        .unwrap();
-        let step = gofin_domain::PlanStep {
-            operation: "fixture.write".into(),
-            input: json!({}),
-            maximum_fee_usd_micros: "0".into(),
-            description: "synthetic cap check".into(),
-        };
-        let failure = runtime
-            .begin_run(RunBeginRequest {
-                allocations: vec![selected],
-                planned_operations: vec![step.clone()],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "0".into(),
-                unwind: vec![step],
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(failure.code, "RUN_ALLOCATION_LIMIT");
-        assert!(runtime.engine.operations().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn replan_freshly_prices_original_allocation_when_current_local_holding_is_zero() {
-        let original = price_holding("USDC", "1000000");
-        let fixture = pricing_fixture(config(), price_snapshot(vec![original.clone()]));
-        let step = gofin_domain::PlanStep {
-            operation: "fixture.write".into(),
-            input: json!({}),
-            maximum_fee_usd_micros: "0".into(),
-            description: "synthetic no-change authority proof for pricing only".into(),
-        };
-        let run = fixture
-            .runtime
-            .begin_run(RunBeginRequest {
-                allocations: vec![original.clone()],
-                planned_operations: vec![step.clone()],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "0".into(),
-                unwind: vec![step.clone()],
-            })
-            .await
-            .unwrap();
-        fixture.calls.lock().unwrap().clear();
-        fixture.revision.store(2, Ordering::SeqCst);
-        // The read-only fixture observes displaced custody. It intentionally
-        // refuses any replacement proof after we inspect its fresh quotes.
-        fixture.allow_preflight.store(false, Ordering::SeqCst);
-        let displaced = ResourceAmount {
-            resource: ResourceId("fixture:wallet".into()),
-            amount: Amount {
-                asset: AssetId {
-                    network: "ethereum:1".into(),
-                    reference: "synthetic-usdc".into(),
-                    decimals: 6,
-                },
-                atoms: original.amount.atoms.clone(),
-            },
-        };
-        {
-            let mut current = fixture.snapshot.lock().unwrap();
-            current.state.holdings[0].amount.atoms = Quantity::zero();
-            current.state.holdings.push(displaced.clone());
-            current.coverage.push(displaced.resource.0.clone());
-        }
-        let failure = fixture
-            .runtime
-            .replan_run(run.id, vec![step])
-            .await
-            .unwrap_err();
-        assert_eq!(failure.code, "RETURN_ROUTE_PREFLIGHT_UNAVAILABLE");
-        assert_eq!(
-            *fixture.calls.lock().unwrap(),
-            vec![(displaced.amount.asset, 2), (original.amount.asset, 2)]
-        );
-        assert!(fixture.runtime.engine.operations().unwrap().is_empty());
     }
 
     fn config() -> BrokerConfigV2 {
@@ -9899,7 +9557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_reload_replaces_limits_without_reinstalling_or_creating_operations() {
+    async fn policy_reload_preserves_retired_settings_without_activating_limits() {
         let directory = tempfile::tempdir().unwrap();
         let loader = FixtureRuntimeLoader {
             database: directory.path().join("operations.sqlite"),
@@ -9912,8 +9570,8 @@ mod tests {
                 .handle(BrokerRequest::PolicyShow)
                 .await
                 .result
-                .unwrap()["max_movement_usd"],
-            "100"
+                .unwrap()["retired_settings"]["max_movement_usd_micros"],
+            "0"
         );
         let original = runtime.clone();
         let mut changed = config();
@@ -9930,8 +9588,16 @@ mod tests {
             .await
             .result
             .unwrap();
-        assert_eq!(shown["max_movement_usd"], "1000");
-        assert_eq!(shown["max_run_allocation_usd"], "5000");
+        assert_eq!(shown["retired"], true);
+        assert_eq!(shown["personal_limits_enforced"], false);
+        assert_eq!(
+            shown["retired_settings"]["max_movement_usd_micros"],
+            "1000000000"
+        );
+        assert_eq!(
+            shown["retired_settings"]["max_run_allocation_usd_micros"],
+            "5000000000"
+        );
         assert!(shown.get("verification_max_run_allocation_usd").is_none());
         refresh_runtime(&mut runtime, changed, 501, &loader)
             .await
@@ -10346,27 +10012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_gofin_snapshot_plan_read_does_not_count_its_own_journal_record() {
-        struct PlanAuthorizer;
-        #[async_trait]
-        impl Authorizer for PlanAuthorizer {
-            async fn authorize(
-                &self,
-                challenge: &gofin_domain::AuthorizationChallenge,
-            ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
-                assert_eq!(challenge.purpose, "financial_plan");
-                Ok(gofin_domain::ApprovalAudit {
-                    source: Some(gofin_domain::AuthorizationSource::Development),
-                    yolo_provenance: None,
-                    mechanism: "synthetic-plan-read-approval".into(),
-                    binding_hash: challenge.binding_hash.clone(),
-                    challenge_nonce: challenge.nonce.clone(),
-                    approved_at: now(),
-                    expires_at: challenge.expires_at.clone(),
-                })
-            }
-        }
-
+    async fn generic_gofin_snapshot_read_needs_no_authority_or_journal_record() {
         let captures = Arc::new(AtomicUsize::new(0));
         let runtime = compose_runtime(
             config(),
@@ -10379,115 +10025,24 @@ mod tests {
                     identity_probe: None,
                     connection_metadata: vec![],
                 })],
-                authorizer: Arc::new(PlanAuthorizer),
+                authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
                 bridge: None,
             },
         )
         .unwrap();
-        let mut request = gofin_domain::financial_plans::FinancialPlanAuthorizationRequest {
-            request_id: "synthetic-snapshot-plan-approval".into(),
-            plan: gofin_domain::financial_plans::FinancialPlanSpec {
-                version: 1,
-                name: "Synthetic snapshot read".into(),
-                summary: None,
-                steps: vec![gofin_domain::financial_plans::FinancialPlanStepSpec {
-                    action_deadline_seconds: None,
-                    step_id: "snapshot".into(),
-                    operation: "gofin.snapshot".into(),
-                    input: json!({}),
-                    permitted_variations: json!({
-                        "mode":"exact",
-                        "maximum_debits":[],
-                        "maximum_costs":[],
-                        "possible_credits":[]
-                    }),
-                    completion: gofin_domain::financial_plans::FinancialStepCompletion {
-                        operation_succeeded: true,
-                        principal_spend: None,
-                        minimum_net_receipt: None,
-                    },
-                    funding_dependencies: vec![],
-                }],
-                aggregate_bounds: gofin_domain::financial_plans::FinancialPlanBounds {
-                    maximum_debits: vec![],
-                    maximum_costs: vec![],
-                },
-            },
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
-        let review = runtime
-            .engine
-            .preview_financial_plan(request.clone())
-            .await
-            .unwrap();
-        request.expected_review_hash = Some(review.review_hash);
-        let authorized = runtime
-            .engine
-            .authorize_financial_plan(request)
-            .await
-            .unwrap();
-        let attempt = runtime
-            .engine
-            .execute_financial_plan_step(
-                &authorized.plan_id,
-                "snapshot",
-                OperationRequest {
-                    request_id: "synthetic-snapshot-plan-attempt".into(),
-                    operation: "gofin.snapshot".into(),
-                    input: json!({}),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(attempt.status, gofin_domain::Status::Completed);
-        let snapshot = attempt
-            .last_reconciliation_evidence
-            .as_ref()
-            .and_then(|evidence| evidence.get("read_result"))
-            .expect("completed plan read returns its snapshot result");
+        let response = runtime
+            .handle(BrokerRequest::Read {
+                operation: "gofin.snapshot".into(),
+                input: json!({}),
+            })
+            .await;
+        assert!(response.ok, "{response:?}");
+        let snapshot = response.result.unwrap();
+        assert!(runtime.engine.operations().unwrap().is_empty());
         assert_eq!(snapshot["complete"], true);
         assert_eq!(snapshot["pending"], json!([]));
         assert_eq!(snapshot["state"]["in_flight"], json!([]));
-        assert_eq!(captures.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn run_begin_reuses_the_engine_owned_snapshot_instead_of_recapturing() {
-        let (runtime, captures) = runtime_with_capture_counter();
-        let request = RunBeginRequest {
-            allocations: vec![ResourceAmount {
-                resource: ResourceId("fixture:account".into()),
-                amount: Amount {
-                    asset: AssetId {
-                        network: "fixture".into(),
-                        reference: "USD".into(),
-                        decimals: 6,
-                    },
-                    atoms: Quantity::new("5000000").unwrap(),
-                },
-            }],
-            planned_operations: vec![gofin_domain::PlanStep {
-                operation: "fixture.write".into(),
-                input: json!({}),
-                maximum_fee_usd_micros: "0".into(),
-                description: "synthetic route step".into(),
-            }],
-            borrowed_proceeds_reserve_usd_micros: "0".into(),
-            return_cost_reserve_usd_micros: "0".into(),
-            unwind: vec![gofin_domain::PlanStep {
-                operation: "fixture.write".into(),
-                input: json!({}),
-                maximum_fee_usd_micros: "0".into(),
-                description: "synthetic return step".into(),
-            }],
-        };
-        let failure = runtime.begin_run(request).await.unwrap_err();
-        assert_eq!(failure.code, "RETURN_ROUTE_PREFLIGHT_UNAVAILABLE");
         assert_eq!(captures.load(Ordering::SeqCst), 1);
     }
 
@@ -11539,105 +11094,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_durable_operation_bindings_block_enrollment_mutations() {
-        let resource = ResourceId("binance:uid:271828:SPOT".into());
-        assert_eq!(
-            record_reserves_resource(&json!({"status":"submitted"}), &resource)
-                .unwrap_err()
-                .code,
-            "STORE_INVALID_RECORD"
-        );
-        let no_preview = gofin_domain::OperationRecord {
-            id: "synthetic-pending".into(),
-            request_id: "synthetic-request".into(),
-            fingerprint: "synthetic-fingerprint".into(),
-            fingerprint_version: 1,
-            operation: "synthetic.write".into(),
-            input: json!({}),
-            status: gofin_domain::Status::Submitted,
-            created_at: now(),
-            updated_at: now(),
-            preview: None,
-            approval: None,
-            authorization_source: None,
-            submission: None,
-            dispatch_evidence: None,
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        assert_eq!(
-            record_reserves_resource(&serde_json::to_value(no_preview).unwrap(), &resource)
-                .unwrap_err()
-                .code,
-            "STORE_INVALID_RECORD"
-        );
-    }
-
-    #[test]
-    fn pending_hyperliquid_owner_guard_covers_all_write_families_and_delegated_scopes() {
-        let owner = "0x1111111111111111111111111111111111111111";
-        for (index, operation) in [
-            "hyperliquid.order",
-            "hyperliquid.account.invalidate_nonce",
-            "hyperliquid.margin",
-            "hyperliquid.account.deposit",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let record = gofin_domain::OperationRecord {
-                id: format!("pending-{index}"),
-                request_id: format!("request-{index}"),
-                fingerprint: format!("fingerprint-{index}"),
-                fingerprint_version: 1,
-                operation: operation.into(),
-                input: json!({}),
-                status: gofin_domain::Status::Submitted,
-                created_at: now(),
-                updated_at: now(),
-                preview: Some(gofin_domain::PreparedOperation {
-                    operation: operation.into(),
-                    input: json!({}),
-                    binding: if operation == "hyperliquid.account.deposit" {
-                        json!({"owner":owner,"account":"owner-account"})
-                    } else {
-                        json!({"account":{"owner":owner,"execution_scope":{"type":"subaccount","address":"0x2222222222222222222222222222222222222222"}}})
-                    },
-                    summary: "synthetic pending action".into(),
-                    checks: vec![],
-                    warnings: vec![],
-                    observed_at: now(),
-                    expires_at: now(),
-                    valuation: None,
-                    intent: gofin_domain::FinancialIntent::default(),
-                    operation_version: 1,
-                    action_deadline: None,
-                }),
-                approval: None,
-                authorization_source: None,
-                submission: None,
-                dispatch_evidence: None,
-                position_baseline: None,
-                effects: None,
-                last_reconciliation_evidence: None,
-                error: None,
-                run_id: None,
-            };
-            let value = serde_json::to_value(record).unwrap();
-            assert!(record_reserves_hyperliquid_owner(&value, owner).unwrap());
-            assert!(
-                !record_reserves_hyperliquid_owner(
-                    &value,
-                    "0x3333333333333333333333333333333333333333"
-                )
-                .unwrap()
-            );
-        }
-    }
     #[tokio::test]
     async fn retired_run_mutations_do_not_capture_state_or_change_historical_records() {
         let (runtime, captures) = runtime_with_capture_counter();
@@ -11681,7 +11137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boundary_methods_are_advertised_and_requests_reach_the_engine() {
+    async fn retired_boundary_methods_issue_no_new_authority_but_preserve_history_reads() {
         let methods = protocol_methods();
         for method in [
             "preview_boundary_authorization",
@@ -11693,8 +11149,8 @@ mod tests {
             "replace_boundary_candidate",
         ] {
             assert!(
-                methods.contains(&method),
-                "missing protocol method {method}"
+                !methods.contains(&method),
+                "retired method {method} was advertised"
             );
         }
 
@@ -11713,7 +11169,7 @@ mod tests {
             })
             .await;
         assert!(!preview.ok);
-        assert_ne!(preview.error.unwrap().code, "INVALID_PROTOCOL_FRAME");
+        assert_eq!(preview.error.unwrap().code, "EXECUTION_INTERFACE_RETIRED");
 
         for request in [
             BrokerRequest::BoundaryStatus {
@@ -11738,10 +11194,18 @@ mod tests {
                 },
             },
         ] {
+            let historical = matches!(
+                request,
+                BrokerRequest::BoundaryStatus { .. } | BrokerRequest::RevokeBoundary { .. }
+            );
             let response = runtime.handle(request).await;
             assert_eq!(
                 response.error.unwrap().code,
-                "BOUNDARY_AUTHORIZATION_NOT_FOUND"
+                if historical {
+                    "BOUNDARY_AUTHORIZATION_NOT_FOUND"
+                } else {
+                    "EXECUTION_INTERFACE_RETIRED"
+                }
             );
         }
     }

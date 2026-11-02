@@ -3,6 +3,86 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use tokio::sync::mpsc;
 
+/// Foreground lifetime controls admission only. Cancellation must never cancel
+/// an immutable submission that has already been durably admitted.
+#[derive(Clone)]
+pub struct Invocation {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deadline: tokio::time::Instant,
+}
+
+tokio::task_local! {
+    static INVOCATION: Invocation;
+}
+
+impl Invocation {
+    pub fn new(duration: std::time::Duration) -> Self {
+        Self {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: tokio::time::Instant::now() + duration,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn scope<F: Future>(&self, work: F) -> impl Future<Output = F::Output> + use<F> {
+        // Box before constructing the task-local future: financial adapter
+        // futures are large and must not be duplicated in nested async frames.
+        INVOCATION.scope(self.clone(), Box::pin(work))
+    }
+}
+
+pub fn invocation_active() -> bool {
+    INVOCATION
+        .try_with(|invocation| {
+            !invocation
+                .cancelled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && tokio::time::Instant::now() < invocation.deadline
+        })
+        .unwrap_or(true)
+}
+
+pub fn invocation_context_present() -> bool {
+    INVOCATION.try_with(|_| ()).is_ok()
+}
+
+/// Cancels the shared foreground scope if its owning future is dropped.
+pub struct InvocationDropGuard(Option<Invocation>);
+impl InvocationDropGuard {
+    pub fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for InvocationDropGuard {
+    fn drop(&mut self) {
+        if let Some(invocation) = self.0.take() {
+            invocation.cancel();
+        }
+    }
+}
+pub fn invocation_drop_guard() -> Option<InvocationDropGuard> {
+    INVOCATION
+        .try_with(|invocation| InvocationDropGuard(Some(invocation.clone())))
+        .ok()
+}
+
+pub fn ensure_invocation_active() -> crate::Result<()> {
+    if invocation_active() {
+        Ok(())
+    } else {
+        Err(crate::GoFinError::new(
+            "INVOCATION_ENDED",
+            "admission",
+            "The foreground execution ended before another stage was admitted.",
+            "Observe the original operation and use its continuation when ready.",
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -106,6 +186,7 @@ impl From<Stage> for Event {
     }
 }
 
+#[derive(Clone)]
 enum Observer {
     Stages(mpsc::Sender<Stage>),
     Events(mpsc::Sender<Event>),
@@ -113,6 +194,26 @@ enum Observer {
 
 tokio::task_local! {
     static OBSERVER: Observer;
+}
+
+/// Copy foreground cancellation and progress into a separately scheduled
+/// financial task. The shared invocation still stops new admissions when the
+/// calling client disconnects.
+pub fn inherit_current<F: Future>(work: F) -> impl Future<Output = F::Output> + use<F> {
+    let invocation = INVOCATION.try_with(Clone::clone).ok();
+    let observer = OBSERVER.try_with(Clone::clone).ok();
+    async move {
+        match (invocation, observer) {
+            (Some(invocation), Some(observer)) => {
+                INVOCATION
+                    .scope(invocation, OBSERVER.scope(observer, work))
+                    .await
+            }
+            (Some(invocation), None) => INVOCATION.scope(invocation, work).await,
+            (None, Some(observer)) => OBSERVER.scope(observer, work).await,
+            (None, None) => work.await,
+        }
+    }
 }
 
 pub fn enabled() -> bool {

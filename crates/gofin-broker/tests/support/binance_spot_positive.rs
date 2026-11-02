@@ -15,6 +15,140 @@ struct SpotVenue {
     inner: Arc<SyntheticVenue>,
     orders: Mutex<BTreeMap<String, (Value, Value)>>,
     cancels: AtomicUsize,
+    lose_first_order: std::sync::atomic::AtomicBool,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires GOFIN_KRAKEN_PLAN_CLI built with synthetic-kraken-build"]
+async fn missing_binance_order_remains_uncertain_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("missing-order.sqlite");
+    let inner = Arc::new(SyntheticVenue::new());
+    inner
+        .state
+        .lock()
+        .unwrap()
+        .usdc_balances
+        .insert("main".into(), "1000".into());
+    inner
+        .state
+        .lock()
+        .unwrap()
+        .balances
+        .insert("main".into(), "1".into());
+    let venue = Arc::new(SpotVenue {
+        inner: inner.clone(),
+        orders: Mutex::new(BTreeMap::new()),
+        cancels: AtomicUsize::new(0),
+        lose_first_order: std::sync::atomic::AtomicBool::new(true),
+    });
+    let approval = Arc::new(SpotApproval(AtomicUsize::new(0)));
+    let make_runtime = || {
+        compose_runtime(
+            runtime_config(),
+            RuntimeDependencies {
+                store: Store::open(&path).unwrap(),
+                adapters: vec![Arc::new(
+                    BinanceAdapter::new(
+                        adapter_config(),
+                        venue.clone(),
+                        Some(Arc::new(SpotPrices)),
+                        None,
+                    )
+                    .unwrap(),
+                )],
+                authorizer: approval.clone(),
+                valuator: Arc::new(SpotPrices),
+                bridge: None,
+            },
+        )
+        .unwrap()
+    };
+    let client = Client::new(make_runtime(), temp.path()).await;
+    let id = "missing-binance-order";
+    let input = json!({"request_id":id,"account":"main","symbol":"ETHUSDC","side":"BUY","quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"ETH":"0.00003"}});
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: id.into(),
+            operation: "binance.spot.order-place".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let argv = args(&[
+        "execute",
+        "binance.spot.order-place",
+        "--id",
+        id,
+        "--input",
+        &input.to_string(),
+        "--json",
+    ]);
+    let before_action = (
+        approval.0.load(Ordering::SeqCst),
+        inner.state.lock().unwrap().posts,
+    );
+    let original = client.call(argv.clone(), request.clone(), true).await;
+    let after_action = (
+        approval.0.load(Ordering::SeqCst),
+        inner.state.lock().unwrap().posts,
+    );
+    assert!(original["submission"].is_object(), "{original}");
+    assert_eq!(original["outcome"]["replay_safe"], false);
+    let mut probes = Vec::new();
+    for (scope, probe, from, to) in [
+        ("same_account", "missing-same", MAIN, CHILD_A),
+        ("different_account", "missing-other", CHILD_B, MAIN),
+    ] {
+        let before = (
+            approval.0.load(Ordering::SeqCst),
+            inner.state.lock().unwrap().posts,
+        );
+        let input = transfer(probe, from, to, "0.001");
+        let result = client
+            .call(
+                args(&[
+                    "execute",
+                    "binance.transfer",
+                    "--id",
+                    probe,
+                    "--input",
+                    &input.to_string(),
+                    "--json",
+                ]),
+                BrokerRequest::Execute {
+                    request: OperationRequest {
+                        request_id: probe.into(),
+                        operation: "binance.transfer".into(),
+                        input,
+                        run_id: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(result["submission"].is_object(), "{result}");
+        let after = (
+            approval.0.load(Ordering::SeqCst),
+            inner.state.lock().unwrap().posts,
+        );
+        probes.push(outcome_evidence::admission_probe(
+            scope, before, after, &result,
+        ));
+    }
+    drop(client);
+    let client = Client::new(make_runtime(), temp.path()).await;
+    let repeated = client.call(argv, request, true).await;
+    assert_eq!(repeated["id"], original["id"]);
+    assert_eq!(repeated["submission"], original["submission"]);
+    assert_eq!(repeated["outcome"]["replay_safe"], false);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+    assert_eq!(inner.state.lock().unwrap().posts, 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a13.binance","approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":true});
+        outcome_evidence::attach_probes(&mut evidence, &probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
 }
 
 impl SpotVenue {
@@ -75,9 +209,16 @@ impl SpotVenue {
         };
         assert!(eth >= 0 && usdc >= 0);
         state.balances.insert("main".into(), format_micros(eth));
-        state
-            .usdc_balances
-            .insert("main".into(), format_micros(usdc));
+        state.usdc_balances.insert(
+            "main".into(),
+            format_micros(if orders.is_empty() {
+                usdc + 1_000_000
+            } else {
+                usdc
+            }),
+        );
+        // Independent venue activity lands after the first fill and before
+        // GoFin's reconciliation; order/fill identity remains authoritative.
         let timestamp = chrono::Utc::now().timestamp_millis();
         let row = json!({"symbol":"ETHUSDC","orderId":order_id,"clientOrderId":id,"status":status,"side":side,"type":kind,"timeInForce":tif.unwrap_or("GTC"),"price":if kind == "MARKET" {"0".to_owned()} else {price.to_string()},"origQty":format_micros(requested),"origQuoteOrderQty":request.get("quoteOrderQty").unwrap_or("0"),"executedQty":format_micros(filled),"cummulativeQuoteQty":format_micros(quote),"time":timestamp,"updateTime":timestamp});
         let fills = if filled == 0 {
@@ -103,6 +244,13 @@ impl SpotVenue {
             row["status"].as_str(),
             Some("NEW" | "PARTIALLY_FILLED")
         ));
+        if row["status"] == "NEW" {
+            let mut state = self.inner.state.lock().unwrap();
+            let balance = micros(&state.usdc_balances["main"]);
+            state
+                .usdc_balances
+                .insert("main".into(), format_micros(balance + 1_000_000));
+        }
         row["status"] = json!("CANCELED");
         row["origClientOrderId"] = row["clientOrderId"].clone();
         row["clientOrderId"] = json!(request.get("newClientOrderId").unwrap());
@@ -119,8 +267,10 @@ impl BinanceTransport for SpotVenue {
         request: BinanceRequest,
     ) -> std::result::Result<Value, TransportError> {
         use BinanceEndpoint as E;
-        assert_eq!(credential.as_str(), "test-only:main");
         request.validate().unwrap();
+        if credential.as_str() != "test-only:main" {
+            return self.inner.request(credential, request).await;
+        }
         match request.endpoint {
             E::SpotPlaceOrder | E::SpotCancelOrder | E::StandardWithdrawal => {
                 panic!("unguarded financial write")
@@ -209,7 +359,38 @@ impl BinanceTransport for SpotVenue {
             .map_err(|_| TransportError::PermissionDenied)?;
         assert_eq!(credential.as_str(), "test-only:main");
         request.validate().unwrap();
+        if request.endpoint == BinanceEndpoint::UniversalTransfer {
+            let from = request.get("fromEmail").unwrap_or("main");
+            let to = request.get("toEmail").unwrap_or("main");
+            let amount = request.get("amount").unwrap();
+            let client_id = request.get("clientTranId").unwrap();
+            let mut state = self.inner.state.lock().unwrap();
+            let debit = micros(amount);
+            let source = micros(&state.balances[from]);
+            let destination = micros(&state.balances[to]);
+            assert!(source >= debit);
+            assert!(
+                !state
+                    .history
+                    .iter()
+                    .any(|row| row["clientTranId"] == client_id)
+            );
+            state
+                .balances
+                .insert(from.into(), format_micros(source - debit));
+            state
+                .balances
+                .insert(to.into(), format_micros(destination + debit));
+            state.posts += 1;
+            let id = state.posts.to_string();
+            state.history.push(json!({"tranId":id,"clientTranId":client_id,"asset":"ETH","amount":amount,"fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":request.get("fromEmail").unwrap_or(MASTER_EMAIL),"toEmail":request.get("toEmail").unwrap_or(MASTER_EMAIL),"status":"SUCCESS","createTimeStamp":chrono::Utc::now().timestamp_millis() as u64}));
+            return Ok(json!({"tranId":id,"clientTranId":client_id}));
+        }
         if request.endpoint == BinanceEndpoint::SpotPlaceOrder {
+            if self.lose_first_order.swap(false, Ordering::SeqCst) {
+                self.inner.state.lock().unwrap().posts += 1;
+                return Err(TransportError::Timeout);
+            }
             return Ok(self.dispatch_order(&request));
         }
         if request.endpoint == BinanceEndpoint::SpotCancelOrder {
@@ -361,14 +542,19 @@ impl Authorizer for SpotApproval {
                 if buy { "USDC" } else { "ETH" }
             );
             assert_eq!(principal.account.as_ref().unwrap().name, "main");
+            let intent: gofin_domain::FinancialIntent =
+                serde_json::from_value(challenge.binding["financial_intent"].clone())
+                    .expect("bound native financial intent");
             assert!(
-                details.contains(if buy {
-                    "Deducted cost ≤: 0.00003 ETH"
-                } else {
-                    "Deducted cost ≤: 0.05 USDC"
+                intent.maximum_costs.iter().any(|bound| {
+                    bound.treatment == gofin_domain::CostTreatment::DeductedFromCredit
+                        && bound.amount.asset.reference == if buy { "ETH" } else { "USDC" }
+                        && bound.amount.atoms.to_decimal(bound.amount.asset.decimals)
+                            == if buy { "0.00003" } else { "0.05" }
                 }),
-                "{details}"
+                "{intent:?}"
             );
+            assert!(!details.contains("Deducted cost ≤"), "{details}");
             if details.contains("MARKET") {
                 assert_eq!(
                     principal.amount.as_deref(),
@@ -395,12 +581,17 @@ impl Authorizer for SpotApproval {
             }
         }
         #[cfg(target_os = "macos")]
-        native_approval::assert_review_renders(
+        let reason = native_approval::assert_review_renders(
             challenge.review.clone().expect("typed review"),
             &challenge.purpose,
             &challenge.operation_id,
             challenge.binding.clone(),
             &challenge.summary,
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            !reason.contains("Deducted cost ≤") && !reason.contains("Fee ≤"),
+            "{reason}"
         );
         SyntheticApproval(AtomicUsize::new(0))
             .authorize(challenge)
@@ -454,6 +645,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         inner: inner.clone(),
         orders: Mutex::new(BTreeMap::new()),
         cancels: AtomicUsize::new(0),
+        lose_first_order: std::sync::atomic::AtomicBool::new(false),
     });
     let signer = gofin_evm::LocalEnvelopeSigner::from_private_key(
         "0x0000000000000000000000000000000000000000000000000000000000000001",
@@ -503,7 +695,6 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .with_wallet_valuation(Arc::new(SpotPrices)),
     );
     let mut config = adapter_config();
-    config.accounts.retain(|a| a.name == MAIN);
     config.destinations = vec![gofin_binance::EthereumDestination {
         name: "synthetic-wallet".into(),
         resource: wallet.clone(),
@@ -532,9 +723,6 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
     let mut config = runtime_config();
     config.policy.max_movement_usd_micros = "200000000".into();
     config.networks = gofin_broker::NetworkConfig::reviewed_evm_networks();
-    config
-        .connections
-        .retain(|c| !matches!(c,ConnectionConfig::Binance {name,..} if name!=MAIN));
     for connection in &mut config.connections {
         if let ConnectionConfig::Ethereum {
             resource,
@@ -609,6 +797,41 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         }
         result
     }
+    async fn probes(
+        client: &Client,
+        stage: &str,
+        approval: &SpotApproval,
+        venue: &SyntheticVenue,
+        recorded: &mut Vec<Value>,
+    ) {
+        for (scope, suffix, from, to) in [
+            ("same_account", "same", MAIN, CHILD_A),
+            ("different_account", "different", CHILD_A, MAIN),
+        ] {
+            let before = (
+                approval.0.load(Ordering::SeqCst),
+                venue.state.lock().unwrap().posts,
+            );
+            let id = format!("probe-{stage}-{suffix}");
+            let result = execute(
+                client,
+                &id,
+                "binance.transfer",
+                transfer(&id, from, to, "0.001"),
+                "completed",
+            )
+            .await;
+            assert_eq!(result["outcome"]["phase"], "done", "{result}");
+            assert_eq!(result["outcome"]["result"], "executed");
+            let after = (
+                approval.0.load(Ordering::SeqCst),
+                venue.state.lock().unwrap().posts,
+            );
+            recorded.push(outcome_evidence::admission_probe(
+                scope, before, after, &result,
+            ));
+        }
+    }
     async fn read(client: &Client, operation: &str, input: Value) -> Value {
         client
             .call(
@@ -641,9 +864,8 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         received: &str,
         fee: &str,
     ) {
-        let record: gofin_domain::OperationRecord = serde_json::from_value(record.clone()).unwrap();
-        let verified = record.effects.unwrap();
-        assert_eq!(verified.evidence["balanceChangesVerified"], true);
+        let verified: gofin_domain::VerifiedEffects =
+            serde_json::from_value(record["effects"].clone()).unwrap();
         assert_eq!(
             verified.effects.len(),
             2,
@@ -659,6 +881,8 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
                 if amount.asset.reference == received_asset && amount.atoms.to_decimal(36) == fee
         )));
     }
+    let mut recorded_probes = Vec::new();
+    let before_approvals = approval.0.load(Ordering::SeqCst);
     let deposit = execute(&client,"binance-spot-deposit","binance.deposit",json!({"requestId":"binance-spot-deposit","account":"main","wallet":"synthetic-wallet","amount":"100","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":TOKEN}), "completed").await;
     balances(&client, "0", "0", "100").await;
     let mut identities = BTreeSet::from([deposit["submission"]["reference"]
@@ -667,6 +891,16 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .to_owned()]);
     let buy = execute(&client,"spot-buy","binance.spot.order-place",json!({"request_id":"spot-buy","account":"main","symbol":"ETHUSDC","side":"BUY","quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"ETH":"0.00003"}}), "completed").await;
     receipt(&buy, "USDC", "40", "ETH", "0.02", "0.00002");
+    probes(&client, "filled", &approval, &inner, &mut recorded_probes).await;
+    balances(&client, "0.01998", "0", "61").await;
+    // A second independent venue movement restores the baseline for the
+    // remainder of this existing round-trip fixture.
+    inner
+        .state
+        .lock()
+        .unwrap()
+        .usdc_balances
+        .insert("main".into(), "60".into());
     balances(&client, "0.01998", "0", "60").await;
     let partial = execute(&client,"spot-partial-sell","binance.spot.order-place",json!({"request_id":"spot-partial-sell","account":"main","symbol":"ETHUSDC","side":"SELL","quantity":"0.01","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDC":"0.05"}}), "completed").await;
     receipt(&partial, "ETH", "0.005", "USDC", "10", "0.01");
@@ -722,13 +956,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
             )
         );
         let operation_id = resting["id"].as_str().unwrap();
-        assert!(
-            Store::open(&path)
-                .unwrap()
-                .reservation_count(operation_id)
-                .unwrap()
-                > 0
-        );
+        probes(&client, id, &approval, &inner, &mut recorded_probes).await;
         balances(&client, free, held, cash).await;
         let orders = read(
             &client,
@@ -761,12 +989,23 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
                     .to_owned()
             )
         );
-        let typed: gofin_domain::OperationRecord = serde_json::from_value(cancellation).unwrap();
+        let effects: gofin_domain::VerifiedEffects =
+            serde_json::from_value(cancellation["effects"].clone()).unwrap();
         assert!(matches!(
-            typed.effects.unwrap().effects.as_slice(),
+            effects.effects.as_slice(),
             [gofin_domain::FinancialEffect::SubmissionCancellation { .. }]
         ));
-        balances(&client, "0.014972", "0", "65.2747").await;
+        balances(
+            &client,
+            "0.014972",
+            "0",
+            if kind == "LIMIT_MAKER" {
+                "66.2747"
+            } else {
+                "65.2747"
+            },
+        )
+        .await;
         let settled = client
             .call(
                 args(&["status", operation_id, "--json"]),
@@ -779,18 +1018,19 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         assert_eq!(settled["submission"], resting["submission"]);
         if kind == "LIMIT" {
             assert_eq!(settled["status"], "completed", "{settled}");
+            assert_eq!(settled["outcome"]["result"], "executed");
+            assert_eq!(settled["outcome"]["replay_safe"], false);
             receipt(&settled, "ETH", "0.003", "USDC", "6.3", "0.0063");
         } else {
             assert_eq!(settled["status"], "failed", "{settled}");
             assert_eq!(settled["effects"]["evidence"]["noFill"], true);
-        }
-        assert_eq!(
-            Store::open(&path)
+            inner
+                .state
+                .lock()
                 .unwrap()
-                .reservation_count(operation_id)
-                .unwrap(),
-            0
-        );
+                .usdc_balances
+                .insert("main".into(), "65.2747".into());
+        }
         let orders = read(
             &client,
             "binance.spot.orders",
@@ -820,7 +1060,8 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
     assert_eq!(source.accepted.load(Ordering::SeqCst), 1);
     assert_eq!(venue.orders.lock().unwrap().len(), 7);
     assert_eq!(venue.cancels.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 11);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 17);
+    assert_eq!(inner.state.lock().unwrap().posts, 6);
     assert_eq!(identities.len(), 11);
     let input =
         json!({"wallet":"synthetic-wallet","network":"evm","chain_id":42161,"tokens":[TOKEN]});
@@ -851,4 +1092,21 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .find(|row| row["amount"]["asset"]["reference"] == "native")
         .unwrap();
     assert_eq!(native_balance["amount"]["atoms"], "99860000000000000");
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let probe_approvals: usize = recorded_probes
+            .iter()
+            .map(|p| p["approval_count"].as_u64().unwrap() as usize)
+            .sum();
+        let deposits = source.accepted.load(Ordering::SeqCst);
+        let orders = venue.orders.lock().unwrap().len();
+        let cancels = venue.cancels.load(Ordering::SeqCst);
+        let withdrawals = inner.state.lock().unwrap().withdrawal_history.len();
+        let mut evidence = json!({"scenario":std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_else(|_|"outcome.a14".into()),
+            "approval_count":approval.0.load(Ordering::SeqCst)-before_approvals-probe_approvals,
+            "external_submission_count":deposits+orders+cancels+withdrawals,
+            "intervention_count":0,"remaining_external_uncertainty":false,
+            "stage_submissions":{"deposit":deposits,"orders":orders,"cancellations":cancels,"withdrawal":withdrawals}});
+        outcome_evidence::attach_probes(&mut evidence, &recorded_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
 }

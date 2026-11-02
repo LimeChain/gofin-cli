@@ -141,7 +141,7 @@ impl KrakenProfile {
         priced_scope.intent = full.intent.clone();
         priced_scope.binding = full.binding.clone();
         priced_scope.valuation = full.valuation.clone();
-        gofin_domain::value_bounds::bind(&mut priced_scope);
+
         full.binding = priced_scope.binding;
         let mut delta = FinancialIntent {
             locks: full.intent.locks.clone(),
@@ -211,7 +211,7 @@ impl KrakenProfile {
         edit.valuation = Some(value);
         edit.binding["amendmentPreviousScope"] = json!(previous);
         edit.binding["originalBatchMemberIndex"] = json!(index);
-        gofin_domain::value_bounds::bind(&mut edit);
+
         Ok(edit)
     }
     async fn batch_exposure_valuation(

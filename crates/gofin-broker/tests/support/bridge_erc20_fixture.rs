@@ -410,6 +410,9 @@ pub struct Rpc {
     block_number: AtomicU64,
     sent: Mutex<BTreeMap<String, (Value, Value)>>,
     broadcasts: AtomicUsize,
+    pub rise_gas_after_first: AtomicBool,
+    pub omit_source_receipt_fee: AtomicBool,
+    pub destination_ready: AtomicBool,
     token_balance_reads: AtomicUsize,
     estimate_gas_calls: AtomicUsize,
     transaction_mutation: Mutex<Option<&'static str>>,
@@ -442,6 +445,9 @@ impl Rpc {
             block_number: AtomicU64::new(if chain_id == 1 { 100 } else { 101 }),
             sent: Mutex::new(BTreeMap::new()),
             broadcasts: AtomicUsize::new(0),
+            rise_gas_after_first: AtomicBool::new(false),
+            omit_source_receipt_fee: AtomicBool::new(false),
+            destination_ready: AtomicBool::new(true),
             token_balance_reads: AtomicUsize::new(0),
             estimate_gas_calls: AtomicUsize::new(0),
             transaction_mutation: Mutex::new(None),
@@ -450,7 +456,7 @@ impl Rpc {
             historical_code_unavailable: Mutex::new(false),
         }
     }
-    fn set_direct_destination(
+    pub fn set_direct_destination(
         &self,
         asset: &EvmAsset,
         recipient: &str,
@@ -631,7 +637,7 @@ impl Rpc {
             "latest" | "finalized" | "safe" => latest,
             value => u64::from_str_radix(value.trim_start_matches("0x"), 16).unwrap_or(latest),
         };
-        json!({"hash":BLOCK_HASH,"number":format!("0x{block:x}"),"baseFeePerGas":"0x3b9aca00"})
+        json!({"hash":BLOCK_HASH,"number":format!("0x{block:x}"),"baseFeePerGas":if self.rise_gas_after_first.load(Ordering::SeqCst) && self.broadcasts.load(Ordering::SeqCst) > 0 {"0x2540be400"} else {"0x3b9aca00"}})
     }
     fn store_transaction(&self, raw: &[u8]) -> (String, Value, Value) {
         let tx = TxEnvelope::decode_2718(&mut raw.to_vec().as_slice()).unwrap();
@@ -641,7 +647,12 @@ impl Rpc {
         let input = tx.input().as_ref();
         let selector = &input[..4];
         let mut logs = Vec::new();
-        if to.eq_ignore_ascii_case(ETH_USDC) {
+        let source_token = if self.chain_id == 42161 {
+            ARB_USDC
+        } else {
+            ETH_USDC
+        };
+        if to.eq_ignore_ascii_case(source_token) {
             assert_eq!(selector, &FixtureErc20::approveCall::SELECTOR);
             let spender = Address::from_slice(&input[16..36]);
             assert_eq!(spender, addr(DEPOSITORY));
@@ -652,7 +663,7 @@ impl Rpc {
             history.insert(block - 1, before);
             history.insert(block, amount);
             logs.push(self.event_log(
-                ETH_USDC,
+                source_token,
                 vec![
                     hash("Approval(address,address,uint256)"),
                     pad_topic(addr(&self.wallet)),
@@ -690,7 +701,7 @@ impl Rpc {
             let amount = U256::from_be_slice(&input[68..100]);
             let order = B256::from_slice(&input[100..132]);
             assert_eq!(depositor, addr(&self.wallet));
-            assert_eq!(token, addr(ETH_USDC));
+            assert_eq!(token, addr(source_token));
             let balance_before = *self.token_balance.lock().unwrap();
             assert!(
                 balance_before >= amount,
@@ -711,7 +722,7 @@ impl Rpc {
             history.insert(block - 1, allowance_before);
             history.insert(block, allowance_after);
             let token_transfer = self.event_log(
-                ETH_USDC,
+                source_token,
                 vec![
                     hash("Transfer(address,address,uint256)"),
                     pad_topic(depositor),
@@ -739,7 +750,7 @@ impl Rpc {
         }
         let receipt = json!({
             "transactionHash":hash_value,"blockNumber":format!("0x{block:x}"),"blockHash":BLOCK_HASH,"status":"0x1",
-            "gasUsed":if to.eq_ignore_ascii_case(ETH_USDC) {"0x8ca0"} else {"0x11940"},
+            "gasUsed":if to.eq_ignore_ascii_case(source_token) {"0x8ca0"} else {"0x11940"},
             "effectiveGasPrice":"0x3b9aca00","logs":logs
         });
         let transaction = json!({
@@ -864,7 +875,6 @@ impl EvmRpc for Rpc {
             "eth_blockNumber" => json!(format!("0x{:x}", self.block_number.load(Ordering::SeqCst))),
             "eth_getBlockByNumber" => self.block_value(&params[0]),
             "eth_sendRawTransaction" => {
-                assert_eq!(self.chain_id, 1, "destination is observe-only");
                 let raw =
                     hex::decode(params[0].as_str().unwrap().trim_start_matches("0x")).unwrap();
                 let (tx_hash, transaction, receipt) = self.store_transaction(&raw);
@@ -877,15 +887,18 @@ impl EvmRpc for Rpc {
             }
             "eth_getTransactionByHash" | "eth_getTransactionReceipt" => {
                 let hash = params[0].as_str().unwrap_or_default();
-                let stored = if self.chain_id != 1 && hash == DESTINATION_TX {
-                    self.destination_override
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .or_else(|| Some(self.destination_receipt()))
-                } else {
-                    self.sent.lock().unwrap().get(hash).cloned()
-                };
+                let stored =
+                    if hash == DESTINATION_TX && !self.destination_ready.load(Ordering::SeqCst) {
+                        None
+                    } else if hash == DESTINATION_TX {
+                        self.destination_override
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .or_else(|| (self.chain_id != 1).then(|| self.destination_receipt()))
+                    } else {
+                        self.sent.lock().unwrap().get(hash).cloned()
+                    };
                 stored
                     .map(|(mut tx, mut receipt)| {
                         if self.chain_id == 1 {
@@ -905,6 +918,11 @@ impl EvmRpc for Rpc {
                             }
                         }
                         if method == "eth_getTransactionReceipt" {
+                            if self.chain_id == 1
+                                && self.omit_source_receipt_fee.load(Ordering::SeqCst)
+                            {
+                                receipt.as_object_mut().unwrap().remove("effectiveGasPrice");
+                            }
                             receipt
                         } else {
                             tx

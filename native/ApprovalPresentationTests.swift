@@ -23,12 +23,45 @@ struct ApprovalPresentationTests {
             ["version":1, "kind":"financial_approval_review", "purpose":(review["action"] as? String == "execute-plan" ? "financial_plan" : "financial_write"), "execution_binding":[:], "review":review]
         }
         let asset: [String: Any] = ["name":"USDC", "identifier":["network":"ethereum:1", "reference":"native", "decimals":6]]
+        for amount in ["5", "0"] {
+            let approval: [String: Any] = ["version":2, "action":"approve", "service":"wallet", "input":["account":["name":"treasury", "domain":"Ethereum"]], "other_details":"Spender: 0xspender; Allowance: \(amount) USDC"]
+            guard case .success(let reason) = typedFinancialApprovalReason(envelope(approval)) else { fatalError("Wallet approval rejected") }
+            assert(reason.contains("from treasury (Ethereum)") && reason.contains("Spender: 0xspender") && reason.contains("Allowance: \(amount) USDC"), reason)
+            var missing = approval
+            missing["input"] = [:] as [String: Any]
+            guard case .failure(.invalid) = typedFinancialApprovalReason(envelope(missing)) else { fatalError("Approval without wallet accepted") }
+        }
+        let order: [String: Any] = ["version":2, "action":"place-order", "service":"hyperliquid", "market":"SOL/USDC:USDC", "input":["account":["name":"evm-dev", "domain":"hyperliquid"]], "other_details":"buy 0.28 SOL market ≤103.85 (or better) TIF ioc max notional 30 USDC"]
+        guard case .success(let orderReason) = typedFinancialApprovalReason(envelope(order)) else { fatalError("Order review rejected") }
+        assert(orderReason == "place order on hyperliquid in SOL/USDC:USDC from evm-dev (hyperliquid); buy 0.28 SOL market ≤103.85 (or better) TIF ioc max notional 30 USDC", orderReason)
         let leg: [String: Any] = ["amount":"1.25", "asset":asset, "account":["name":"wallet", "domain":"chain"]]
         let partialTransfer: [String: Any] = ["version":2, "action":"account-transfer", "service":"Example",
             "input":["asset":asset, "account":["name":"source"]],
             "output":["amount":"5", "asset":asset, "account":["name":"destination"]]]
         guard case .success(let transferReason) = typedFinancialApprovalReason(envelope(partialTransfer)) else { fatalError("Valid partial transfer rejected") }
         assert(transferReason == "transfer 5 USDC from source to destination on Example; at least 5 USDC; input: USDC", transferReason)
+        var classified = partialTransfer
+        classified["terms"] = [
+            ["label":"Input amount", "value":"5 USDC", "enforcement":"enforced"],
+            ["label":"Expected USD value", "value":"unavailable", "enforcement":"estimate"],
+            ["label":"Deadline", "value":"Unix time 1793563917", "enforcement":"enforced"],
+            ["label":"Venue fee", "value":"Not capped; determined by venue", "enforcement":"after_execution"]
+        ]
+        guard case .success(let classifiedReason) = typedFinancialApprovalReason(envelope(classified)) else { fatalError("Classified intent rejected") }
+        assert(classifiedReason == transferReason, classifiedReason)
+        assert(!classifiedReason.lowercased().contains("fee") && !classifiedReason.contains("estimate") && !classifiedReason.contains("enforced") && !classifiedReason.contains("Deadline"))
+        var advised = classified
+        advised["advisories"] = [["operation_id":"original-uncertain", "operation":"wallet.transfer",
+            "amounts":[["resource":"wallet-a", "amount":["asset":["network":"ethereum:1", "reference":"native", "decimals":18], "atoms":"1000000000000000"]]]]]
+        guard case .success(let warning) = typedFinancialApprovalReason(envelope(advised)) else { fatalError("Advisory blocked approval") }
+        assert(warning.contains("original-uncertain"))
+        assert(warning.contains("0.001 ethereum:1/native"))
+        assert(warning.contains("does not block"))
+        advised["advisories"] = [["operation_id":"bad\u{001b}history"]]
+        guard case .success(let skipped) = typedFinancialApprovalReason(envelope(advised)) else { fatalError("Malformed advisory blocked approval") }
+        assert(!skipped.contains("bad"))
+        classified["terms"] = [["label":"Fee", "value":"0.1 USDC", "enforcement":"silently_unbounded"]]
+        guard case .failure(.invalid) = typedFinancialApprovalReason(envelope(classified)) else { fatalError("Unknown enforcement accepted") }
         // The fixture enumerates Rust’s generated ApprovalAction schema and
         // serializes each validated review through the native contract.
         if let path = ProcessInfo.processInfo.environment["GOFIN_NATIVE_FINANCIAL_FIXTURES"] {
@@ -38,7 +71,7 @@ struct ApprovalPresentationTests {
             for binding in bindings {
                 let action = (binding["review"] as! [String: Any])["action"] as! String
                 guard case .success(let reason) = typedFinancialApprovalReason(binding) else { fatalError("Rust-validated review rejected: \(action)") }
-                assert(reason.contains("Example") && reason.contains("fee cap 0.01 USDC"), action)
+                assert(reason.contains("Example") && reason.contains("reference: 42"), action)
                 assert(reason.contains("ORE") && reason.contains("USDC") && !reason.contains("synthetic-ore-address"), action + ": " + reason)
             }
         }
@@ -54,7 +87,7 @@ struct ApprovalPresentationTests {
         assert(sparseReason.contains(longAmount))
         let actions = ["swap", "account-transfer", "exchange-withdrawal", "exchange-deposit", "cancel-order", "lending-borrow", "lending-deposit", "vault-deposit", "set-leverage", "lending-repay", "collect-fees", "bridge"]
         for action in actions {
-            let review: [String: Any] = ["version":2, "action":action, "service":"Example", "market":"market", "input":leg, "output":leg, "other_details":"fee cap 0.01 USDC"]
+            let review: [String: Any] = ["version":2, "action":action, "service":"Example", "market":"market", "input":leg, "output":leg, "other_details":"reference: 42"]
             guard case .success(let reason) = typedFinancialApprovalReason(envelope(review)) else { fatalError(action) }
             let expected: [String: String] = [
                 "swap":"swap 1.25 USDC for at least 1.25 USDC on Example in market via wallet (chain)",
@@ -70,7 +103,7 @@ struct ApprovalPresentationTests {
                 "collect-fees":"collect fees 1.25 USDC on Example in market from wallet (chain)",
                 "bridge":"bridge 1.25 USDC from wallet (chain) to wallet (chain) on Example in market; at least 1.25 USDC"
             ]
-            assert(reason == expected[action]! + "; fee cap 0.01 USDC", action + ": " + reason)
+            assert(reason == expected[action]! + "; reference: 42", action + ": " + reason)
         }
         var review: [String: Any] = ["version":2, "action":"execute-plan", "service":"GoFin", "description":"rebalance", "step_count":2, "valid_for_seconds":60]
         guard case .success(let plan) = typedFinancialApprovalReason(envelope(review)) else { fatalError("plan") }

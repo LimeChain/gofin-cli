@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc.workspace = true
 gofin-domain = { path = "../gofin-domain" }
+gofin-evm = { path = "../gofin-evm" }
 chrono.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

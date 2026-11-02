@@ -8180,7 +8180,7 @@ mod tests {
             .status(&create.id, true)
             .await
             .expect("reconcile the finalized over-cap keeper receipt");
-        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
+        assert_eq!(result.status, gofin_domain::Status::Completed, "{result:?}");
         assert!(
             result.submission.is_some(),
             "original frozen submission remains"
@@ -8188,12 +8188,12 @@ mod tests {
         let saved: gofin_domain::OperationRecord = serde_json::from_value(
             gofin_store::Store::open(&store_path)
                 .expect("reopen durable engine store")
-                .get_record(&create.id)
+                .get_typed_record(&create.id)
                 .expect("read durable operation")
                 .expect("operation remains saved"),
         )
         .expect("durable operation record schema");
-        assert_eq!(saved.status, gofin_domain::Status::Unknown);
+        assert_eq!(saved.status, gofin_domain::Status::Completed);
         assert!(saved.submission.is_some());
         let evidence = saved
             .last_reconciliation_evidence
@@ -8209,13 +8209,10 @@ mod tests {
             evidence_json.contains("\"fee_usd\":1001"),
             "the over-cap event fee remains in durable reconciliation evidence"
         );
-        assert_eq!(
-            saved.error.as_ref().map(|error| error.code.as_str()),
-            Some("COST_EXCEEDS_RESERVATION"),
-            "the operation stays unresolved for needs-attention review"
-        );
-        assert_eq!(evidence["state"], "needs_attention");
-        let attempted = &evidence["verified_effects"];
+        let view = engine.operation_view(&saved).unwrap();
+        assert_eq!(view["outcome"]["attention"]["kind"], "discrepancy");
+        assert_eq!(view["outcome"]["replay_safe"], false);
+        let attempted = serde_json::to_value(saved.effects.as_ref().unwrap()).unwrap();
         assert!(
             attempted["proof_digest"]
                 .as_str()
@@ -8238,20 +8235,6 @@ mod tests {
                 && effect["net_position"]["atoms"] == "98999"
                 && effect["included_cost"]["atoms"] == "1001"
         }));
-        assert!(
-            saved.effects.as_ref().is_some_and(|verified| {
-                verified.effects.iter().any(|effect| {
-                    matches!(
-                        effect,
-                        gofin_domain::FinancialEffect::EscrowPositionProgress {
-                            state: gofin_domain::EscrowLifecycleState::Open,
-                            ..
-                        }
-                    )
-                })
-            }),
-            "the originally verified open escrow effects remain durable"
-        );
         let fixture = fixture_rpc.0.lock().expect("finalized synthetic ledger");
         assert!(
             fixture
@@ -8450,17 +8433,11 @@ mod tests {
             .status(&create.id, true)
             .await
             .expect("reconcile the finalized token-over-cap keeper receipt");
-        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
-        assert_eq!(
-            result.error.as_ref().map(|error| error.code.as_str()),
-            Some("EFFECT_EXCEEDS_RESERVATION"),
-            "token denomination alone exceeds the approved amount"
-        );
-
+        assert_eq!(result.status, gofin_domain::Status::Completed, "{result:?}");
         let saved: gofin_domain::OperationRecord = serde_json::from_value(
             gofin_store::Store::open(&store_path)
                 .expect("reopen durable engine store")
-                .get_record(&create.id)
+                .get_typed_record(&create.id)
                 .expect("read durable operation")
                 .expect("operation remains saved"),
         )
@@ -8469,10 +8446,13 @@ mod tests {
             .last_reconciliation_evidence
             .as_ref()
             .expect("needs-attention evidence is retained");
-        assert_eq!(evidence["state"], "needs_attention");
+        let view = engine.operation_view(&saved).unwrap();
+        assert_eq!(view["outcome"]["attention"]["kind"], "discrepancy");
+        assert_eq!(view["outcome"]["replay_safe"], false);
         let evidence_json = serde_json::to_string(evidence).expect("serialize evidence");
         assert!(evidence_json.contains(&keeper_signature));
-        let attempted = evidence["verified_effects"]["effects"]
+        let verified = serde_json::to_value(saved.effects.as_ref().unwrap()).unwrap();
+        let attempted = verified["effects"]
             .as_array()
             .expect("attempted finalized effects remain available");
         assert!(attempted.iter().any(|effect| {
@@ -8491,27 +8471,7 @@ mod tests {
                 && effect["net_position"]["atoms"] == "100000"
                 && effect["included_cost"]["atoms"] == "0"
         }));
-        assert!(
-            saved
-                .effects
-                .as_ref()
-                .is_some_and(|verified| verified.effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::EscrowPositionProgress {
-                        state: gofin_domain::EscrowLifecycleState::Open,
-                        ..
-                    }
-                ))),
-            "the accepted record remains the original open placement proof"
-        );
-        assert!(
-            !gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .all_reservations()
-                .expect("read unresolved reservations")
-                .is_empty(),
-            "needs-attention keeps the original financial reservation"
-        );
+        assert_eq!(saved.submission, create.submission);
     }
 
     async fn assert_position_collateral_matches_read(

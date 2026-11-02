@@ -1,0 +1,24 @@
+diff --git a/crates/gofin-engine/src/reservation_overrides.rs b/crates/gofin-engine/src/reservation_overrides.rs
+index 3808740..a85731f 100644
+--- a/crates/gofin-engine/src/reservation_overrides.rs
++++ b/crates/gofin-engine/src/reservation_overrides.rs
+@@ -265,7 +265,7 @@ pub(super) mod tests {
+     }
+ 
+     pub(crate) fn seeded_store() -> SharedStore {
+-        let mut store = Store::in_memory().unwrap();
++        let mut store = if let Ok(path) = std::env::var("GOFIN_SCHEMA25_RELEASE_DATABASE") { Store::open(path).unwrap() } else { Store::in_memory().unwrap() };
+         let mut record = seed_record("original");
+         store
+             .create_request(
+@@ -403,6 +403,10 @@ pub(super) mod tests {
+             .await
+             .unwrap();
+         assert_eq!(result["status"], "released");
++        if let (Ok(database), Ok(output)) = (std::env::var("GOFIN_SCHEMA25_RELEASE_DATABASE"), std::env::var("GOFIN_SCHEMA25_RELEASE_FIXTURE")) {
++            let status = std::process::Command::new("sqlite3").arg(database).arg(format!(".backup {output}")).status().unwrap();
++            assert!(status.success());
++        }
+         assert_eq!(
+             engine
+                 .override_operation_locks("original", "override-request", hash)

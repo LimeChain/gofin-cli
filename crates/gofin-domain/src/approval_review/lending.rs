@@ -366,57 +366,18 @@ fn klend(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Result<()
         format!("Res. {}", identity_label(reserve)),
         format!("Obl. {}", identity_label(obligation)),
     ];
-    let protocol_fee = scalar(intent, "maximum_protocol_fee_atoms")
-        .map(Quantity::new)
-        .transpose()?;
-    let expected_debt = format!(
-        "kamino:lending:{}:{}:{}:debt",
-        scalar(intent, "market").unwrap_or_default(),
-        scalar(intent, "obligation").unwrap_or_default(),
-        scalar(intent, "reserve").unwrap_or_default()
-    );
-    let wallet_resource = scalar(&prepared.binding, "wallet_address")
-        .map(|owner| format!("solana:mainnet-beta:{owner}"));
-    let is_debt_fee = |cost: &crate::CostBound| {
-        prepared.operation == "kamino.lending.borrow"
-            && matches!(&cost.location, crate::AccountingLocation::Position { resource, position, position_kind: crate::PositionKind::VariableDebt } if Some(resource.0.as_str()) == wallet_resource.as_deref() && position == &expected_debt)
-            && prepared.intent.expected.iter().any(|effect| matches!(effect,
-                EffectConstraint::OriginMovement { from, debit_asset, .. } if from == &cost.location && debit_asset == &asset))
-            && cost.treatment == crate::CostTreatment::IncludedInDebit
-            && cost.amount.asset == asset
-            && protocol_fee.as_ref().is_some_and(|fee| cost.amount.atoms.to_decimal(cost.amount.asset.decimals) == fee.to_decimal(decimals))
-    };
-    let matching_included_fee = prepared
-        .intent
-        .maximum_costs
-        .iter()
-        .filter(|cost| is_debt_fee(cost))
-        .count()
-        == 1;
-    for (key, label) in [
-        ("maximum_debt_increase_atoms", "Debt ≤"),
-        ("maximum_protocol_fee_atoms", "Fee ≤"),
-    ] {
-        if let Some(value) = scalar(intent, key) {
-            let value = Quantity::new(value)?;
-            let asset_label = asset_identity_label(prepared, &asset);
-            let label = if key == "maximum_protocol_fee_atoms" && matching_included_fee {
-                "Incl. fee ≤"
-            } else {
-                label
-            };
-            details.push(format!(
-                "{label} {} {}",
-                value.to_decimal(decimals),
-                asset_label
-            ));
-        }
+    if let Some(value) = scalar(intent, "maximum_protocol_fee_atoms") {
+        let _ = Quantity::new(value)?;
+    }
+    if let Some(value) = scalar(intent, "maximum_debt_increase_atoms") {
+        details.push(format!(
+            "Debt ≤ {} {}",
+            Quantity::new(value)?.to_decimal(decimals),
+            asset_identity_label(prepared, &asset)
+        ));
     }
     if let Some(value) = scalar(intent, "maximum_account_funding_lamports") {
-        details.push(format!(
-            "Fund ≤ {} SOL",
-            Quantity::new(value)?.to_decimal(9)
-        ));
+        let _ = Quantity::new(value)?;
     }
     let risk = &intent["risk_limits"];
     for (key, label) in [
@@ -432,26 +393,6 @@ fn klend(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Result<()
             "Debt ≤ USD {}",
             Quantity::new(value)?.to_decimal(6)
         ));
-    }
-    if review.other_details.take().is_some() {
-        for cost in &prepared.intent.maximum_costs {
-            if matching_included_fee && is_debt_fee(cost) {
-                continue;
-            }
-            let label = match cost.treatment {
-                crate::CostTreatment::VenueCalculatedAdditionalDebit => {
-                    "Venue fee not capped; reserve"
-                }
-                crate::CostTreatment::IncludedInDebit => "Incl. cost ≤",
-                crate::CostTreatment::DeductedFromCredit => "Deducted cost ≤",
-                crate::CostTreatment::AdditionalDebit => "Fee ≤",
-            };
-            details.push(format!(
-                "{label}: {} {}",
-                cost.amount.atoms.to_decimal(cost.amount.asset.decimals),
-                asset_identity_label(prepared, &cost.amount.asset)
-            ));
-        }
     }
     review.other_details = Some(details.join("; "));
     Ok(())
@@ -631,7 +572,7 @@ mod tests {
         let details = review.other_details.unwrap();
         assert!(
             details.contains("Debt ≤ 11 USDC")
-                && details.contains("Fund ≤ 0.000001 SOL")
+                && !details.contains("Fund ≤")
                 && details.contains("HF ≥ bps 15000")
         );
         let mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
@@ -675,9 +616,7 @@ mod tests {
         assert_eq!(displayed.name, "Es9vMF…wNYB");
         let details = review.other_details.unwrap();
         assert!(details.contains("Debt ≤ 11 Es9vMF…wNYB") && !details.contains("Spoofed"));
-        assert!(
-            details.contains("Incl. fee ≤ 0.01 Es9vMF…wNYB") && !details.contains("Incl. cost ≤")
-        );
+        assert!(!details.to_lowercase().contains("fee") && !details.contains("cost ≤"));
         for changed in 0..5 {
             let mut different = p.clone();
             let cost = &mut different.intent.maximum_costs[0];
@@ -698,12 +637,7 @@ mod tests {
                 }
             }
             let details = approval_review(&different).unwrap().other_details.unwrap();
-            assert!(details.contains("Fee ≤ 0.01 Es9vMF…wNYB"));
-            assert!(details.contains(if changed == 2 {
-                "Fee ≤:"
-            } else {
-                "Incl. cost ≤:"
-            }));
+            assert!(!details.to_lowercase().contains("fee") && !details.contains("cost ≤"));
         }
         let mut repay = p.clone();
         repay.operation = "kamino.lending.repay".into();
@@ -718,9 +652,7 @@ mod tests {
             resource: ResourceId("owner".into()),
         };
         let repay_details = approval_review(&repay).unwrap().other_details.unwrap();
-        assert!(
-            repay_details.contains("Fee ≤ 0.01") && repay_details.contains("Incl. cost ≤: 0.01")
-        );
+        assert!(!repay_details.to_lowercase().contains("fee") && !repay_details.contains("cost ≤"));
         let hash = crate::binding_hash(&crate::authorization_binding(&p)).unwrap();
         p.binding["intent"]["token"]["mint"] =
             json!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYC");

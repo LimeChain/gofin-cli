@@ -1,0 +1,2847 @@
+[
+  {
+    "id": "outcome.identity-recovery",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI and EVM adapter recover an accepted submission after response loss and broker restart, without another approval or broadcast.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.identity-recovery.json"
+    },
+    "evidence": "{artifacts}/outcome.identity-recovery.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "lost_broadcast_recovers_after_broker_restart_from_sqlite_through_backup_without_resending"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a5",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Unreadable historical record stays non-replayable across broker restart while same-account and different-account writes are admitted. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a5.json"
+    },
+    "evidence": "{artifacts}/outcome.a5.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a5.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a5.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.kraken.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.kraken.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "corrupt_history_remains_incomplete_while_unrelated_transfer_executes"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a5.json",
+        "{artifacts}/outcome.a5.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a5.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a5.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "malformed_exchange_history_is_isolated_from_new_orders",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a5",
+        "{artifacts}/outcome.a5.json",
+        "{artifacts}/outcome.a5.base.json",
+        "{artifacts}/outcome.a5.anvil.json",
+        "{artifacts}/outcome.a5.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a26",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI synthetic cancellation; no submission or approval on observation, and unrelated accounts continue. Native approval rendering runs separately in the security/release validation job.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a26.json"
+    },
+    "evidence": "{artifacts}/outcome.a26.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "cancelled_approval_dispatches_nothing_and_status_never_prompts"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a6",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Concurrent real CLI requests race one ID and distinct same-account/different-account writes while an accepted provider response is stalled; exact nonces and submission counts are asserted.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a6.json",
+      "GOFIN_KAMINO_CLI": "{artifacts}/kamino-cli",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-a6-cli"
+    },
+    "evidence": "{artifacts}/outcome.a6.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kamino-build",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kamino-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-a6-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "concurrent_requests_preserve_one_identity_and_distinct_evm_nonces"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kamino_workflow",
+          "--quiet",
+          "solana_distinct_memo_bound_actions_advance_while_first_response_stalls"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a6.json",
+        "{artifacts}/outcome.a6.evm-solana.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a6.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "stalled_kraken_order_does_not_block_independent_cli_orders"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a6",
+        "{artifacts}/outcome.a6.json",
+        "{artifacts}/outcome.a6.evm-solana.json",
+        "{artifacts}/outcome.a6.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a23",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Synthetic authorized dismissal boundary plus real CLI open/status checks preserve original identity and non-replayability; unrelated wallets continue. Native human approval is separate. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a23.json"
+    },
+    "evidence": "{artifacts}/outcome.a23.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a23.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a23.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.kraken.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.kraken.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "human_dismissal_hides_unconfirmed_without_changing_financial_facts"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a23.json",
+        "{artifacts}/outcome.a23.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a23.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a23.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "human_dismissed_exchange_order_remains_unsafe_to_replay",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a23",
+        "{artifacts}/outcome.a23.json",
+        "{artifacts}/outcome.a23.base.json",
+        "{artifacts}/outcome.a23.anvil.json",
+        "{artifacts}/outcome.a23.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a2",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Provider accepts one transaction then loses its response; real CLI polls original identity without duplicate approval or dispatch while same/different-wallet probes proceed. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a2.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a2"
+    },
+    "evidence": "{artifacts}/outcome.a2.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a2.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a2.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a2.kraken",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a2.kraken",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "corrupt_history_remains_incomplete_while_unrelated_transfer_executes"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a2.json",
+        "{artifacts}/outcome.a2.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a2.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a2.kraken.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a2.kraken",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "accepted_order_lost_response_reconciles_without_replay_or_observation_approval",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a2",
+        "{artifacts}/outcome.a2.json",
+        "{artifacts}/outcome.a2.base.json",
+        "{artifacts}/outcome.a2.anvil.json",
+        "{artifacts}/outcome.a2.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a3",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Delayed EVM confirmation exposes in-progress and next-check cadence, then converges by polling; same/different-account probes proceed. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a3.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a3"
+    },
+    "evidence": "{artifacts}/outcome.a3.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a3.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a3.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a3.kraken",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a3.kraken",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "corrupt_history_remains_incomplete_while_unrelated_transfer_executes"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a3.json",
+        "{artifacts}/outcome.a3.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a3.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a3.kraken.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a3.kraken",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "pending_exchange_order_polls_with_guidance_and_does_not_block_other_actions",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a3",
+        "{artifacts}/outcome.a3.json",
+        "{artifacts}/outcome.a3.base.json",
+        "{artifacts}/outcome.a3.anvil.json",
+        "{artifacts}/outcome.a3.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a1",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A missing informational valuation does not block a native transfer, while an unavailable required Uniswap quote fails before approval or submission. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a1.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a1",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli"
+    },
+    "evidence": "{artifacts}/outcome.a1.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a1.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a1.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.binance.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a1.binance",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.binance.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a1.binance",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.kraken.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.kraken.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "corrupt_history_remains_incomplete_while_unrelated_transfer_executes"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_protocol_quote_outage_fails_before_authorization",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a1.json",
+        "{artifacts}/outcome.a1.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a1.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.binance.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a1.binance",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "native_exchange_transfer_completes_without_usd_and_does_not_block_probes",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a1.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_exchange_market_metadata_stops_before_approval_and_submission",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a1",
+        "{artifacts}/outcome.a1.json",
+        "{artifacts}/outcome.a1.base.json",
+        "{artifacts}/outcome.a1.anvil.json",
+        "{artifacts}/outcome.a1.binance.json",
+        "{artifacts}/outcome.a1.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a22",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A similar unconfirmed transfer is shown in the financial approval review and does not block either same-account or different-account activity. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a22.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a22"
+    },
+    "evidence": "{artifacts}/outcome.a22.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a22.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a22.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.kraken.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.kraken.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "similar_unconfirmed_operation_is_shown_to_human_without_blocking_approval"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a22.json",
+        "{artifacts}/outcome.a22.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a22.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a22.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "uncertain_exchange_order_is_shown_on_later_same_account_approval",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a22",
+        "{artifacts}/outcome.a22.json",
+        "{artifacts}/outcome.a22.base.json",
+        "{artifacts}/outcome.a22.anvil.json",
+        "{artifacts}/outcome.a22.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a7",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A verified native transfer with missing receipt fee reports executed with partial accounting and exact transfer, without inventing a cost. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a7.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a7"
+    },
+    "evidence": "{artifacts}/outcome.a7.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a7.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a7.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.binance.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a7.binance",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.binance.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a7.binance",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "corrupt_history_remains_incomplete_while_unrelated_transfer_executes"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a7.json",
+        "{artifacts}/outcome.a7.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a7.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a7.binance.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a7.binance",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "native_exchange_transfer_completes_without_usd_and_does_not_block_probes",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a7",
+        "{artifacts}/outcome.a7.json",
+        "{artifacts}/outcome.a7.base.json",
+        "{artifacts}/outcome.a7.anvil.json",
+        "{artifacts}/outcome.a7.binance.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a18",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "The real CLI advances guarded owned-fork CCTP stages under refreshed native fees, asks once for increased remainder authority, and admits same-wallet and distinct-wallet probes.",
+    "requires": [
+      "cargo",
+      "anvil",
+      "lsof",
+      "python3"
+    ],
+    "env": {
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a18.json"
+    },
+    "evidence": "{artifacts}/outcome.a18.json",
+    "run": [
+      [
+        "python3",
+        "scripts/verify-cctp-fork.py",
+        "--chain",
+        "1",
+        "--outcome-a18"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a17",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI against a controlled CCTP provider spends independently available destination funds while the original source transfer remains in transit, with a separate source transfer probe. Includes independent destination funds through an exchange withdrawal.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-cctp-build",
+      "GOFIN_CCTP_CLI": "{artifacts}/cctp-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a17.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a17"
+    },
+    "evidence": "{artifacts}/outcome.a17.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/cctp-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a17.binance.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a17.binance.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "cctp_lifecycle",
+          "--quiet",
+          "cli_compound_cctp_refreshes_fee_after_allowance_without_reapproval",
+          "--",
+          "--include-ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a17.json",
+        "{artifacts}/outcome.a17.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a17.binance.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "binance_roundtrip",
+          "--quiet",
+          "available_wallet_funds_can_fund_a_new_action_while_withdrawal_correlation_is_unconfirmed",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a17",
+        "{artifacts}/outcome.a17.json",
+        "{artifacts}/outcome.a17.base.json",
+        "{artifacts}/outcome.a17.binance.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a25",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "A genuine schema-25 Hyperliquid SOL favorable sell is observed through the CLI with its original approval and submission, while independent wallet probes proceed.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a25.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a25"
+    },
+    "evidence": "{artifacts}/outcome.a25.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "legacy_hyperliquid_favorable_fill_is_observed_without_new_trade"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-store",
+          "--test",
+          "outcome_migration",
+          "--quiet",
+          "legacy_hyperliquid_favorable_sol_sell_keeps_approval_and_original_fill"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a24",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Schema-25 identity, plan, grant, resolution, bridge, and over-limit run fixtures migrate and remain observable while independent writes proceed; finite config and interrupted migrations are verified. Protected runtime-update interruption fixtures run separately in the lifecycle/release validation job.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a24.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a24"
+    },
+    "evidence": "{artifacts}/outcome.a24.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "legacy_journals_remain_observable_and_do_not_block_new_writes"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-store",
+          "--test",
+          "outcome_migration",
+          "--quiet"
+        ],
+        "expected_tests": 20
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "legacy_policy_migration",
+          "--quiet"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-engine",
+          "--lib",
+          "--quiet",
+          "retired_run_rejects_new_admission_but_observes_original_identity"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a8",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "A correlated UniswapX fill below the approved minimum remains executed with discrepancy; same and different wallets continue.",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a8.json"
+    },
+    "evidence": "{artifacts}/outcome.a8.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_adverse_uniswapx_fill_is_reported_as_executed_discrepancy",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a10",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "An owned Anvil transaction really reverts after admission, burns gas, and reports retry requiring new approval while other accounts proceed.",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a10.json"
+    },
+    "evidence": "{artifacts}/outcome.a10.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_anvil_revert_burns_gas_without_replay",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a4",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "An unconfirmed operation remains observable and does not replay or block same- and different-account writes; separate synthetic configuration and update fixtures exercise maintenance with pending history. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a4.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a4"
+    },
+    "evidence": "{artifacts}/outcome.a4.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a4.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a4.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a4.kraken",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a4.kraken",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "human_dismissal_hides_unconfirmed_without_changing_financial_facts"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-engine",
+          "--lib",
+          "--quiet",
+          "configuration_requires_human_route_and_observes_original_uncertain_submission"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "python3",
+          "scripts/test-rust-macos-runtime-update.py",
+          "RuntimeUpdateFixture.test_execution_upgrade_preserves_pending_submission_without_gate"
+        ]
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a4.json",
+        "{artifacts}/outcome.a4.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a4.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a4.kraken.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a4.kraken",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "missing_kraken_order_stays_uncertain_without_replay",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a4",
+        "{artifacts}/outcome.a4.json",
+        "{artifacts}/outcome.a4.base.json",
+        "{artifacts}/outcome.a4.anvil.json",
+        "{artifacts}/outcome.a4.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a21",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Development-only Yolo gate admits one action before disable, rejects another before admission, and keeps the admitted identity observable; help discloses no personal limits.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a21.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a21"
+    },
+    "evidence": "{artifacts}/outcome.a21.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "disabling_yolo_preserves_admitted_submission_and_rejects_unadmitted_authority"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--lib",
+          "--quiet",
+          "yolo_authority_is_generation_bound_across_disable_and_reenable"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-cli",
+          "--bin",
+          "gofin",
+          "--quiet",
+          "yolo_commands_are_discoverable_and_admin_writes_are_human_only"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a20",
+    "group": "outcome",
+    "environment": "mock",
+    "description": "Real CLI processes disconnect at preparation, before admission, after admitted broadcast and after confirmation; restarted brokers recover the original facts without duplicate writes. Includes public CLI exchange-mock and owned-Anvil evidence.",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-rpc-recovery-build",
+      "GOFIN_RPC_RECOVERY_CLI": "{artifacts}/outcome-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a20.json",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a20"
+    },
+    "evidence": "{artifacts}/outcome.a20.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a20.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.anvil.json",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+        "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a20.anvil",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.anvil.json",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a20.kraken",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+        "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.kraken.json",
+        "GOFIN_OUTCOME_SCENARIO=outcome.a20.kraken",
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "outcome_workflow",
+          "--quiet",
+          "cli_disconnect_",
+          "--",
+          "--test-threads=1",
+          "--include-ignored"
+        ],
+        "expected_tests": 3
+      },
+      [
+        "cp",
+        "{artifacts}/outcome.a20.json",
+        "{artifacts}/outcome.a20.base.json"
+      ],
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-uniswap-build",
+          "GOFIN_UNISWAP_CLI={artifacts}/anvil-outcome-cli",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a20.anvil",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.anvil.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "disconnect_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_KRAKEN_PLAN_CLI={artifacts}/kraken-outcome-cli",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a20.kraken.json",
+          "GOFIN_OUTCOME_SCENARIO=outcome.a20.kraken",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "exchange_cli_disconnect_restart_preserves_each_admission_boundary",
+          "--",
+          "--nocapture"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a20",
+        "{artifacts}/outcome.a20.json",
+        "{artifacts}/outcome.a20.base.json",
+        "{artifacts}/outcome.a20.anvil.json",
+        "{artifacts}/outcome.a20.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a12",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil drops an original transaction and finalizes a different transaction at its nonce; proof permits a newly approved retry and unrelated wallets remain usable.",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a12.json"
+    },
+    "evidence": "{artifacts}/outcome.a12.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_anvil_finalized_nonce_replacement_proves_nonexecution",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a11",
+    "group": "outcome",
+    "environment": "surfpool",
+    "description": "Owned offline Surfpool advances an original signed Solana blockhash past expiry; correlated full local block history proves absence, with independent wallet probes.",
+    "requires": [
+      "cargo",
+      "git"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build",
+      "GOFIN_KAMINO_CLI": "{artifacts}/kamino-cli",
+      "GOFIN_SURFPOOL_BIN": "{artifacts}/surfpool/surfpool",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a11.json"
+    },
+    "evidence": "{artifacts}/outcome.a11.json",
+    "prepare": [
+      [
+        "python3",
+        "scripts/e2e/install-surfpool.py",
+        "{artifacts}/surfpool",
+        "--expiry-proof"
+      ],
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kamino-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kamino_workflow",
+          "--quiet",
+          "public_cli_real_surfpool_blockhash_expiry_preserves_original_signature",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a9.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Real CLI on owned Anvil refreshes an expired native fee estimate within original approval and rejects a higher fee above the approved ceiling; both cases admit independent transfers on the same and another wallet.",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a9.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a9.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_expired_fee_candidate_refreshes_within_native_authority",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a9",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Real CLI quote-expiry refresh on owned Anvil and Kraken: valid native authority permits refreshed candidates, fees above the original ceiling fail before dispatch, and same/different protected accounts remain usable.",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/uniswap-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a9.anvil.json",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-outcome-cli"
+    },
+    "evidence": "{artifacts}/outcome.a9.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/uniswap-cli"
+      ],
+      [
+        "env",
+        "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "public_cli_expired_fee_candidate_refreshes_within_native_authority",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      },
+      {
+        "argv": [
+          "env",
+          "GOFIN_DEV_BUILD_ID=synthetic-kraken-build",
+          "GOFIN_OUTCOME_EVIDENCE={artifacts}/outcome.a9.kraken.json",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_outcome_workflow",
+          "--quiet",
+          "expired_kraken_candidate_refreshes_with_one_approval"
+        ],
+        "expected_tests": 1
+      },
+      [
+        "{python}",
+        "{repo}/scripts/e2e/aggregate-outcome-evidence.py",
+        "outcome.a9",
+        "{artifacts}/outcome.a9.json",
+        "{artifacts}/outcome.a9.anvil.json",
+        "{artifacts}/outcome.a9.kraken.json"
+      ]
+    ]
+  },
+  {
+    "id": "outcome.a1.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: native authority with unavailable optional USD estimates",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a1.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a1.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a1.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a2.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: accepted transaction with lost response",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a2.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a2.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a2.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a3.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: pending observation and durable identity",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a3.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a3.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a3.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a4.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: injected observation horizon and independent admission",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a4.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a4.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a4.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a5.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: corrupt record isolation",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a5.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a5.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a5.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a7.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: verified completion with partial reporting",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a7.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a7.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a7.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a20.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: disconnect at approval, accepted dispatch and confirmed reporting barriers",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a20.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a20.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a20.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "disconnect_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a22.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: uncertain prior action advisory",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a22.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a22.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a22.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "outcome.a23.anvil",
+    "group": "outcome",
+    "environment": "anvil",
+    "description": "Owned Anvil chain, public CLI and isolated RPC faults: human dismissal never authorizes replay",
+    "requires": [
+      "cargo",
+      "anvil"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_UNISWAP_CLI": "{artifacts}/anvil-outcome-cli",
+      "GOFIN_OUTCOME_SCENARIO": "outcome.a23.anvil",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/outcome.a23.anvil.json"
+    },
+    "evidence": "{artifacts}/outcome.a23.anvil.json",
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/anvil-outcome-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "uniswap_api_positive",
+          "--quiet",
+          "generic_outcomes_on_owned_anvil",
+          "--",
+          "--ignored"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  }
+]

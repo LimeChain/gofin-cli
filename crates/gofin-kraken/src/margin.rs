@@ -1452,7 +1452,8 @@ impl KrakenProfile {
                 },
                 &intent.maximum_costs,
             )
-            .await?;
+            .await
+            .ok();
         let mut prepared = PreparedOperation {
             operation: endpoint.operation().into(),
             input: input.clone(),
@@ -1470,7 +1471,7 @@ impl KrakenProfile {
             warnings,
             observed_at: gofin_domain::now(),
             expires_at: (Utc::now() + Duration::seconds(90)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             action_deadline: None,
             operation_version: 1,
@@ -1485,7 +1486,7 @@ impl KrakenProfile {
                     "Margin anchors failed to serialize.",
                 )
             })?;
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
 }
@@ -2332,8 +2333,13 @@ impl KrakenProfile {
         if b["_finBatchCostScope"] != true
             && crate::unresolved_consumption::costs_exceed_bounds(&effects, &cost_bounds)?
         {
-            return crate::unresolved_consumption::cost_overrun(
+            return crate::unresolved_consumption::proven_cost_overrun(
                 submission,
+                if terminal {
+                    Status::Completed
+                } else {
+                    Status::Pending
+                },
                 &effects,
                 json!({"code":"KRAKEN_MARGIN_COST_BOUND_EXCEEDED","orders":evidence,"closedPositions":closed_positions,"proofEvents":events}),
             );
@@ -2823,7 +2829,7 @@ impl KrakenProfile {
             prepared.warnings.push("The requested quantity is below independently observed existing fills. Kraken clamps the live native quantity to executed volume and cancels its remaining order; prior fills and full loan principal remain with the original operation.".into());
         }
         warnings_from_fee_evidence(&mut prepared, &fee_admission);
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
     pub(crate) async fn prepare_margin_legacy_edit(

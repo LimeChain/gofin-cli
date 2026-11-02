@@ -358,7 +358,7 @@ impl KrakenProfile {
             full.intent = child.scope.intent.clone();
             full.binding = child.scope.binding.clone();
             full.valuation = Some(valuation.clone());
-            gofin_domain::value_bounds::bind(&mut full);
+
             child.scope.binding = full.binding;
         }
         let mut patches = Vec::new();
@@ -518,13 +518,6 @@ impl KrakenProfile {
             rows.len(),
             owner.operation_id
         );
-        if current
-            .valuation
-            .as_ref()
-            .is_some_and(|v| !v.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut current);
-        }
         Ok(current)
     }
     pub(crate) async fn reconcile_derivative_grouped_edits(

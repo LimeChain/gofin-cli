@@ -371,10 +371,10 @@ impl MeteoraAdapter {
             preview_details,
             secondary_signer_refs,
         )?;
-        prepared.valuation = Some(
-            self.valuation(&intent, &pool, &candidate, &candidate.quote)
-                .await?,
-        );
+        prepared.valuation = self
+            .valuation(&intent, &pool, &candidate, &candidate.quote)
+            .await
+            .ok();
         Ok(prepared)
     }
 
@@ -1270,11 +1270,18 @@ impl Adapter for MeteoraAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason}),

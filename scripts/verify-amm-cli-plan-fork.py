@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Public CLI rehearsal: 2 USDC -> ETH -> USDC, one grant on an owned fork.
+"""Public CLI rehearsal: 2 USDC -> ETH -> USDC, standalone actions on an owned fork.
 
-Default funding must block the full-proceeds return; principal_only must pass.
+Each swap has independent native approval. The historical case selectors remain
+aliases for the same full-proceeds standalone lifecycle.
 Only public synthetic credentials are generated. No existing GoFin state is read.
 Public pricing uses the normal adapter; it is not synthetic valuation evidence.
 """
@@ -40,7 +41,7 @@ def conversion(record):
 
 
 class Rehearsal:
-    def __init__(self, evidence, kind, return_dex="uniswap", return_fee=100, yolo=False):
+    def __init__(self, evidence, kind, return_dex="sushi", return_fee=500, yolo=False):
         self.directory = evidence / kind
         self.directory.mkdir()
         self.name = "cli-plan-" + kind
@@ -53,6 +54,8 @@ class Rehearsal:
         self.started = False
         self.config_path = None
         self.yolo = yolo
+        self.evidence_start_nonce = None
+        self.unplanned_interventions = 0
 
     def save(self, label, value):
         self.sequence += 1
@@ -84,6 +87,13 @@ class Rehearsal:
 
     def cli(self, *argv, error=None):
         self.guard()
+        header = self.rpc("eth_getBlockByNumber", ["latest", False], "Check owned fork head freshness")
+        timestamp, current = int(header["timestamp"], 16), int(time.time())
+        if timestamp > current + 30:
+            raise RuntimeError("Owned fork head is future-dated")
+        if current - timestamp > 30:
+            self.rpc("evm_setNextBlockTimestamp", [current], "Advance owned fork head to current wall clock")
+            self.rpc("evm_mine", [], "Mine fresh owned fork head")
         # Make forwards this quoted argv to its already-snapshotted CLI.
         result = subprocess.run(["make", "--no-print-directory", "dev-env-cli", f"DEV_ENV={self.name}", "ARGS=" + shlex.join([*argv, "--json"])], cwd=SOURCE, env=self.env, capture_output=True, text=True, timeout=180)
         try:
@@ -125,6 +135,33 @@ class Rehearsal:
     def submissions(self):
         return sum(record.get("submission") is not None for record in self.operations())
 
+    def begin_execution_evidence(self):
+        if self.evidence_start_nonce is None:
+            signers = {self.owner}
+            if getattr(self, "secondary", None):
+                signers.add(self.secondary)
+            self.evidence_start_nonce = {address: int(self.rpc("eth_getTransactionCount", [address, "latest"], "Measure owned-fork signer nonce before financial actions"), 16) for address in signers}
+
+    def write_execution_evidence(self):
+        path = os.environ.get("GOFIN_VENUE_EVIDENCE")
+        scenario = os.environ.get("GOFIN_VENUE_SCENARIO")
+        if not path or not scenario:
+            return
+        records = self.operations()
+        approvals = {row["approval"]["challenge_nonce"] for row in records
+                     if isinstance(row.get("approval"), dict) and row["approval"].get("challenge_nonce")}
+        submissions = {(row["submission"]["kind"], row["submission"]["reference"]) for row in records
+                       if isinstance(row.get("submission"), dict) and row["submission"].get("kind") and row["submission"].get("reference")}
+        uncertain = any(row.get("submission") and row.get("outcome", {}).get("phase") in
+                        ("in_progress", "unconfirmed", "needs_you") for row in records)
+        assert approvals and submissions and self.evidence_start_nonce is not None, "financial evidence must contain observed approvals and submissions"
+        end_nonces = {address: int(self.rpc("eth_getTransactionCount", [address, "latest"], "Measure owned-fork signer nonce after financial actions"), 16) for address in self.evidence_start_nonce}
+        external_count = sum(end_nonces[address] - start for address, start in self.evidence_start_nonce.items())
+        assert external_count >= len(submissions), "signer nonce must cover every durable submission"
+        Path(path).write_text(json.dumps({"scenario": scenario, "approval_count": len(approvals),
+            "external_submission_count": external_count, "submission_counter_source": "owned Anvil signers confirmed nonce deltas", "durable_submission_count": len(submissions), "intervention_count": self.unplanned_interventions,
+            "remaining_external_uncertainty": uncertain, "blocked_unrelated_activity": None}) + "\n")
+
     def restart(self):
         self.make("dev-env-stop", DEV_FLAGS="--json")
         self.started = False
@@ -133,8 +170,7 @@ class Rehearsal:
 
     def settled(self, operation, payload, plan=None, step=None):
         argv = ["execute", operation, "--input", json.dumps(payload), "--id", payload["request_id"]]
-        if plan:
-            argv += ["--plan", plan, "--step", step]
+        self.begin_execution_evidence()
         record = self.cli(*argv)
         for _ in range(40):
             if record["status"] in ("completed", "failed", "cancelled", "rejected"):
@@ -142,6 +178,7 @@ class Rehearsal:
             self.rpc("anvil_mine", ["0x2"], "Local fork settlement advancement; no public CLI block-mining operation")
             record = self.cli("status", record["id"])
         assert record["status"] == "completed", record
+        assert record["outcome"]["result"] == "executed" and record["outcome"]["phase"] == "done" and record["outcome"]["replay_safe"] is False, record
         duplicate = self.cli(*argv)
         assert duplicate["id"] == record["id"] and duplicate["submission"] == record["submission"]
         return record
@@ -202,28 +239,27 @@ class Rehearsal:
         self.rpc("anvil_setBalance", [self.owner, hex(3 * 10**16)], "Synthetic 0.03 ETH local gas/bootstrap funding; GoFin does not mint balances")
         self.started = True
         self.make("dev-env-start", DEV_MODE="live", DEV_FLAGS="--json")
-        self.cli("schema", "plans.authorize")
         self.cli("schema", "pancakeswap.swap")
         self.cli("schema", "uniswap.swap")
         if self.return_dex != "uniswap":
             self.cli("schema", f"{self.return_dex}.swap")
         if not self.yolo and getattr(self, "seed_balance", True):
             # Seed >2 USDC through GoFin before the financial baseline, not impersonation.
-            seed, _, _ = self.swap("uniswap", "native", TOKEN, "0.002")
-            self.settled("uniswap.swap", seed)
+            seed, _, _ = self.swap("sushi", "native", TOKEN, "0.002", 500)
+            self.settled("sushi.swap", seed)
 
     def run_yolo_single(self):
         """Same native-input route as the live test, with only synthetic fork funds."""
         assert self.yolo
         assert self.cli("yolo", "status")["enabled"] is True
         before = self.read("wallet.balances", {**BASE, "tokens": [TOKEN]})
-        request, _, quote = self.swap("uniswap", "native", TOKEN, "0.002")
+        request, _, quote = self.swap("sushi", "native", TOKEN, "0.002", 500)
         # Finite fee headroom includes the fork's L1 posting fee estimate;
-        # principal plus cap remains below the USD 20 movement ceiling.
+        # Principal and native fee bounds are explicit in the request.
         request["max_fee_eth"] = "0.001"
-        preview = self.cli("preview", "uniswap.swap", "--input", json.dumps(request))
+        preview = self.cli("preview", "sushi.swap", "--input", json.dumps(request))
         assert any(message.startswith("Yolo mode is active") for message in preview["warnings"])
-        record = self.settled("uniswap.swap", request)
+        record = self.settled("sushi.swap", request)
         assert record["authorization_source"] == "yolo", record
         audit = record["approval"]
         assert audit["source"] == "yolo" and audit["yolo_provenance"]["revision"] > 0
@@ -253,7 +289,7 @@ class Rehearsal:
         assert recovered["submission"] == record["submission"]
         assert recovered["effects"] == record["effects"]
         rejected = {**request, "request_id": str(uuid.uuid4()), "deadline": int(time.time()) + 120}
-        denied = self.cli("execute", "uniswap.swap", "--input", json.dumps(rejected),
+        denied = self.cli("execute", "sushi.swap", "--input", json.dumps(rejected),
                           "--id", rejected["request_id"])
         # A recorded execution failure is a structured operation result, not
         # a transport/argument error; assert its terminal financial outcome.
@@ -277,40 +313,17 @@ class Rehearsal:
         forward, forward_bounds, fq = self.swap("pancakeswap", TOKEN, "native", "2")
         max_proceeds = (int(fq["output"]) * 101 + 99) // 100
         reverse, reverse_bounds, _ = self.swap(self.return_dex, "native", TOKEN, decimal(max_proceeds, 18), self.return_fee)
-        dependency = {"producing_step_id": "sell", "resource": resource, "asset": native}
-        if principal_only:
-            dependency["funding_scope"] = "principal_only"
-        steps = [{"step_id": "sell", "operation": "pancakeswap.swap", "input": forward, "permitted_variations": forward_bounds, "completion": {"operation_succeeded": True}, "funding_dependencies": []},
-                 {"step_id": "return", "operation": f"{self.return_dex}.swap", "input": reverse, "permitted_variations": reverse_bounds, "completion": {"operation_succeeded": True}, "funding_dependencies": [dependency]}]
-        plan = {"version": 1, "name": "Owned fork full ETH proceeds with baseline gas", "steps": steps,
-                "aggregate_bounds": {"maximum_debits": [{"resource": resource, "amount": {"asset": usdc, "atoms": "2000000"}}, {"resource": resource, "amount": {"asset": native, "atoms": str(max_proceeds)}}],
-                    "maximum_costs": [{"location": {"kind": "cash", "resource": resource}, "amount": {"asset": native, "atoms": str(2 * FEE_ATOMS)}, "treatment": "additional_debit"}]}}
-        review = self.cli("plans", "preview", "--input", json.dumps(plan), "--valid-for", "10m")
-        grant = self.cli("plans", "authorize", "--input", json.dumps(plan), "--id", str(uuid.uuid4()), "--review-hash", review["review_hash"], "--valid-for", "10m")
-        plan_id = grant["plan_id"]
         before = self.submissions()
-        self.cli("execute", f"{self.return_dex}.swap", "--input", json.dumps(reverse), "--id", str(uuid.uuid4()), "--plan", plan_id, "--step", "return", "--dry-run", error=True)
-        invalid = {**forward, "amount": "2.1"}
-        self.cli("execute", "pancakeswap.swap", "--input", json.dumps(invalid), "--id", str(uuid.uuid4()), "--plan", plan_id, "--step", "sell", "--dry-run", error=True)
-        assert self.submissions() == before
-        sold = self.settled("pancakeswap.swap", forward, plan_id, "sell")
+        sold = self.settled("pancakeswap.swap", forward)
         proceeds = conversion(sold)["received"]
         assert proceeds["asset"] == native and conversion(sold)["spent"]["atoms"] == "2000000"
-        # Reopen the existing journal BETWEEN steps; no fixture reset or new grant.
-        status_before_restart = self.cli("plans", "status", plan_id)
         submissions_before_restart = self.submissions()
         self.restart()
         recovered = self.cli("status", sold["id"])
         assert recovered["status"] == "completed"
         assert recovered["submission"] == sold["submission"] and recovered["effects"] == sold["effects"]
-        recovered_plan = self.cli("plans", "status", plan_id)
-        assert recovered_plan["revision"]["revision_id"] == status_before_restart["revision"]["revision_id"]
-        assert recovered_plan["usage"]["verified_proceeds"] == status_before_restart["usage"]["verified_proceeds"]
-        assert recovered_plan["next_eligible_step_id"] == "return"
         assert self.submissions() == submissions_before_restart
-        self.save("between-steps-recovery", {"forward_operation": sold["id"],
-                  "plan": plan_id, "verified_proceeds": recovered_plan["usage"]["verified_proceeds"],
-                  "new_submissions": 0, "new_authorizations": 0})
+        self.save("between-steps-recovery", {"forward_operation": sold["id"], "new_submissions": 0, "new_authorizations": 0})
         # Refresh the concrete return; its amount is EXACTLY receipt-proven ETH.
         reverse_template_id = reverse["request_id"]
         reverse, _, _ = self.swap(self.return_dex, "native", TOKEN, decimal(proceeds["atoms"], 18), self.return_fee)
@@ -318,13 +331,6 @@ class Rehearsal:
         # each concrete attempt independently; refreshing the quote cannot alter it.
         reverse["request_id"] = reverse_template_id
         before = self.submissions()
-        if not principal_only:
-            self.cli("execute", f"{self.return_dex}.swap", "--input", json.dumps(reverse), "--id", reverse["request_id"], "--plan", plan_id, "--step", "return", error="PLAN_FUNDING_NOT_SETTLED")
-            assert self.submissions() == before
-            self.cli("plans", "cancel", plan_id)
-            self.save("result", {"expected_default_dependency_block": True, "return_submissions": 0,
-                      "restoration": "Not established for this deliberate blocked case; owned synthetic fork disposed", "production_writes": 0})
-            return
         # Deliberately remove ONLY baseline gas in the OWNED local fixture.
         # This is an admin state mutation, never a financial restoration claim.
         current_balance = self.read("wallet.balances", {**BASE, "tokens": [TOKEN]})
@@ -335,8 +341,7 @@ class Rehearsal:
                  "Local negative-test fixture: preserve ALL producer principal, remove baseline gas; GoFin cannot mutate balances")
         try:
             rejection = self.cli("execute", f"{self.return_dex}.swap", "--input", json.dumps(reverse),
-                                 "--id", str(uuid.uuid4()), "--plan", plan_id, "--step", "return",
-                                 "--dry-run", error=True)
+                                 "--id", str(uuid.uuid4()), "--dry-run", error=True)
             assert self.submissions() == before
             self.save("insufficient-baseline-gas", {"error_code": rejection["error"]["code"],
                       "native_fixture_atoms": proceeds["atoms"], "all_principal_preserved": True,
@@ -347,7 +352,7 @@ class Rehearsal:
         restored_balance = self.read("wallet.balances", {**BASE, "tokens": [TOKEN]})
         assert int(next(row["amount"]["atoms"] for row in restored_balance["data"]
                         if row["amount"]["asset"] == native)) == captured_native
-        returned = self.settled(f"{self.return_dex}.swap", reverse, plan_id, "return")
+        returned = self.settled(f"{self.return_dex}.swap", reverse)
         assert conversion(returned)["spent"] == proceeds
         final = self.snapshot()
         assert int(final["token"]["data"]["eip2612"]["nonce"]) == 1
@@ -357,28 +362,15 @@ class Rehearsal:
         costs = sum(int(effect["amount"]["atoms"]) for record in (sold, returned) for effect in record["effects"]["effects"] if effect["kind"] == "cost")
         assert units(final, native) == units(baseline, native) - costs
         assert units(final, usdc) == units(baseline, usdc) - 2000000 + int(conversion(returned)["received"]["atoms"])
-        status = self.cli("plans", "status", plan_id)
-        assert all(step["state"] == "completed" for step in status["steps"])
-        assert status["next_eligible_step_id"] is None
-        assert status["usage"]["reservations"] == []
-        native_proceeds = next(item for item in status["usage"]["verified_proceeds"]
-                              if item["producing_step_id"] == "sell" and item["asset"] == native)
-        assert native_proceeds["available"] == proceeds["atoms"]
-        assert native_proceeds["consumed"] == proceeds["atoms"]
-        assert all(record["status"] in {"rejected", "expired", "cancelled", "completed", "failed"}
-                   for record in self.operations())
         self.restart()
         assert self.submissions() == before + 1
         for original in (sold, returned):
             recovered = self.cli("status", original["id"])
             assert recovered["submission"] == original["submission"] and recovered["effects"] == original["effects"]
-        self.cli("plans", "cancel", plan_id)
-        self.cli("execute", "pancakeswap.swap", "--input", json.dumps(forward), "--id", str(uuid.uuid4()), "--plan", plan_id, "--step", "sell", error=True)
-        assert self.submissions() == before + 1
-        self.save("result", {"single_plan": plan_id, "status": status, "baseline": baseline, "final": final,
+        self.save("result", {"authorization": "two standalone native actions", "baseline": baseline, "final": final,
                   "exact_proceeds_spent": proceeds, "baseline_gas_spent": str(costs), "allowances_restored": True,
                   "permit_nonce_consumed": 1, "between_steps_recovery": True, "insufficient_gas_rejection": rejection["error"]["code"],
-                  "fixture_mutation": "Owned local negative-test balance mutation undone exactly; not financial restoration", "no_outstanding_reservations": True, "public_pricing": "normal adapter-internal public CoinGecko reads",
+                  "fixture_mutation": "Owned local negative-test balance mutation undone exactly; not financial restoration",
                   "approval": "automatic isolated development; Touch ID not tested", "production_writes": 0})
 
     def close(self):
@@ -397,8 +389,8 @@ class Rehearsal:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--return-dex", choices=("uniswap", "sushi"), default="uniswap")
-    parser.add_argument("--return-fee", type=int, choices=(100, 500, 3000, 10000), default=100)
+    parser.add_argument("--return-dex", choices=("sushi",), default="sushi")
+    parser.add_argument("--return-fee", type=int, choices=(100, 500, 3000, 10000), default=500)
     parser.add_argument("--case", choices=("both", "default", "principal"), default="both")
     parser.add_argument("--yolo-single-swap", action="store_true",
                         help="Rehearse one native ETH to USDC swap using the explicit Yolo fixture, then disable and verify recovery")

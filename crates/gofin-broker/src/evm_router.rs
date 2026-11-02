@@ -257,6 +257,50 @@ impl EvmNetworkRouter {
 }
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
+    fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
+        record
+            .preview
+            .as_ref()
+            .and_then(|prepared| self.prepared(prepared).ok())
+            .and_then(|adapter| adapter.observation_horizon(record))
+            .or(Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)))
+    }
+
+    async fn evm_nonce_scope(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> gofin_domain::Result<Option<(String, u64)>> {
+        self.prepared(prepared)?.evm_nonce_scope(prepared).await
+    }
+    fn apply_claimed_evm_nonce(
+        &self,
+        prepared: &PreparedOperation,
+        nonce: u64,
+    ) -> gofin_domain::Result<PreparedOperation> {
+        self.prepared(prepared)?
+            .apply_claimed_evm_nonce(prepared, nonce)
+    }
+
+    fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
+        self.prepared(prepared)
+            .is_ok_and(|adapter| adapter.supports_approved_reprepare(prepared))
+    }
+
+    fn validate_approved_candidate(
+        &self,
+        approved: &PreparedOperation,
+        candidate: &PreparedOperation,
+    ) -> gofin_domain::Result<()> {
+        let original_adapter = self.prepared(approved)?;
+        let candidate_adapter = self.prepared(candidate)?;
+        if !Arc::ptr_eq(original_adapter, candidate_adapter) {
+            return Err(GoFinError::validation(
+                "Fresh candidate changed the approved EVM network.",
+            ));
+        }
+        original_adapter.validate_approved_candidate(approved, candidate)
+    }
+
     fn attach_execution_state(
         &self,
         state: Arc<dyn gofin_domain::execution_state::ExecutionState>,
@@ -710,14 +754,14 @@ mod tests {
         let mut prepared = PreparedOperation {
             operation: "wallet.transfer".into(),
             input: json!({"chain_id":42161}),
-            binding: json!({"transaction":{"chain_id":4663}}),
+            binding: json!({"transaction":{"chain_id":4663,"sender":"0x1111111111111111111111111111111111111111","to":"0x2222222222222222222222222222222222222222","value":"1","calldata":"0x","nonce":1,"gas":21000,"max_fee_per_gas":"2","max_priority_fee_per_gas":"1"}}),
             summary: "Synthetic routing fixture only".into(),
             checks: vec![],
             warnings: vec![],
             observed_at: now(),
             expires_at: now(),
             valuation: None,
-            intent: Default::default(),
+            intent: serde_json::from_value(json!({"debits":[],"maximum_costs":[{"location":{"kind":"cash","resource":"ethereum:4663:0x1111111111111111111111111111111111111111"},"amount":{"asset":{"network":"ethereum:4663","reference":"native","decimals":18},"atoms":"100000"},"treatment":"additional_debit"}],"expected":[],"locks":[]})).unwrap(),
             operation_version: 1,
             action_deadline: None,
         };
@@ -727,6 +771,25 @@ mod tests {
         );
         prepared.input["chain_id"] = json!(4663);
         assert_eq!(router.prepared(&prepared).unwrap().config.chain_id, 4663);
+        prepared.binding["transaction"]["nonce"] = json!(1);
+        assert!(
+            router
+                .validate_approved_candidate(&prepared, &prepared)
+                .is_ok()
+        );
+        let mut fresh = prepared.clone();
+        fresh.binding["transaction"]["nonce"] = json!(2);
+        assert!(
+            router
+                .validate_approved_candidate(&prepared, &fresh)
+                .is_ok()
+        );
+        fresh.binding["transaction"]["chain_id"] = json!(42161);
+        assert!(
+            router
+                .validate_approved_candidate(&prepared, &fresh)
+                .is_err()
+        );
     }
     #[test]
     fn uniswap_api_binding_routes_without_transaction_and_rejects_chain_or_provider_changes() {

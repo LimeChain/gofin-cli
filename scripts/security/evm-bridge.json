@@ -69,7 +69,7 @@
       "strict_abi_rejects_unknown_selectors_trailing_bytes_and_wrong_arguments",
       "merkl_settlement_rejects_unexpected_duplicate_and_noncanonical_events",
       "swap_execute_rejects_unapproved_dex_and_changed_asset_identity",
-      "boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_excess_or_identity_changes"
+      "approved_transfer_candidate_refreshes_fee_within_native_bound"
     ]
   },
   {

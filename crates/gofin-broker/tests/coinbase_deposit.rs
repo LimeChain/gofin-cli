@@ -748,31 +748,47 @@ async fn shared_coinbase_address_deposits_settle_only_on_the_selected_usdc_chain
             token
         );
         assert!(
-            prepared.binding["inner"]["binding"]["_gofin_usd_ceiling_v1"]["prices"]
-                .as_array()
-                .unwrap()
+            prepared.binding["inner"]["binding"]
+                .get("_gofin_usd_ceiling_v1")
+                .is_none()
+        );
+        assert!(
+            prepared
+                .intent
+                .maximum_costs
                 .iter()
                 .any(
-                    |price| price["asset"]["network"] == format!("ethereum:{chain_id}")
-                        && price["asset"]["reference"] == "native"
-                        && price["asset"]["decimals"] == 18
+                    |cost| cost.amount.asset.network == format!("ethereum:{chain_id}")
+                        && cost.amount.asset.reference == "native"
+                        && cost.amount.asset.decimals == 18
+                        && !cost.amount.atoms.is_zero()
                 ),
-            "{name} gas must be valued in the exact 18-decimal native asset"
+            "{name} gas retains exact native units"
         );
         if chain_id == 5042 {
             assert_eq!(
                 prepared.binding["inner"]["binding"]["transaction"]["value"], "5000000000000000000",
                 "Arc's native-USDC principal is a native-value transfer"
             );
-            let bounds = &prepared.binding["_gofin_usd_ceiling_v1"];
-            assert_eq!(bounds["movement_usd_micros"], "5000000");
             assert!(
-                bounds["maximum_fee_usd_micros"]
-                    .as_str()
-                    .and_then(|value| value.parse::<u128>().ok())
-                    .unwrap_or(0)
-                    > 0,
-                "Arc principal and native gas fee must retain separate bounded amounts"
+                prepared
+                    .intent
+                    .debits
+                    .iter()
+                    .any(|debit| debit.amount.asset.network == "ethereum:5042"
+                        && debit.amount.asset.reference == "native"
+                        && debit.amount.atoms.to_decimal(18) == "5")
+            );
+            assert!(
+                prepared
+                    .intent
+                    .maximum_costs
+                    .iter()
+                    .any(|cost| cost.amount.asset.network == "ethereum:5042"
+                        && cost.amount.asset.reference == "native"
+                        && cost.treatment == CostTreatment::AdditionalDebit
+                        && !cost.amount.atoms.is_zero()),
+                "Arc native principal and additional gas remain separately bounded"
             );
         }
 
@@ -1236,10 +1252,7 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
     *api.receive_status.lock().unwrap() = "completed".into();
     let settled = recovered.status(&id).await;
     assert_eq!(settled["status"], "completed", "{settled}");
-    let record: OperationRecord = serde_json::from_value(settled).unwrap();
-    let effects = record
-        .effects
-        .expect("completed result must persist typed effects");
+    let effects: VerifiedEffects = serde_json::from_value(settled["effects"].clone()).unwrap();
     assert!(effects.effects.iter().any(|effect| matches!(effect,
         FinancialEffect::Transfer { to, debit, credit, .. }
             if to == &ResourceId("coinbase:portfolio:portfolio-uuid".into())
@@ -1290,6 +1303,8 @@ async fn deposit_revalidation_preserves_legacy_fin_binding_and_rejects_duplicate
     let (adapter, _, _) = fixture();
     let input = json!({"account":"coinbase","wallet":"wallet","accountId":"usdc-account","addressId":"base-address","amount":"5","requestId":"synthetic-legacy-deposit","maxFeeEth":"0.001"});
     let mut prepared = adapter.prepare("coinbase.deposit", &input).await.unwrap();
+    // Reconstruct a historical explicitly USD-bound approval; new candidates have no USD ceiling.
+    gofin_domain::value_bounds::bind(&mut prepared);
     let ceiling = prepared
         .binding
         .as_object_mut()
@@ -1366,6 +1381,14 @@ async fn positive_coinbase_base_deposit_through_public_cli() {
         )
         .await;
     assert_eq!(result["status"], "pending", "{result}");
+    assert_eq!(result["outcome"]["next_action"]["code"], "wait_and_check");
+    assert!(
+        result["outcome"]["next_action"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Coinbase App")
+    );
+    assert_ne!(result["outcome"]["attention"]["kind"], "action_required");
     api.credited.store(true, Ordering::SeqCst);
     *api.hash.lock().unwrap() = rpc.hash.lock().unwrap().clone();
     *api.receive_amount.lock().unwrap() = "2".into();

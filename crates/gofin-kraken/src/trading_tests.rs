@@ -514,6 +514,7 @@ async fn legacy_edit_proves_successor_then_original_owner_retains_predecessor_fi
     };
     let result = a.reconcile_with_context(&original, &context).await.unwrap();
     assert_eq!(result.status, Status::Pending);
+    assert_eq!(result.evidence["outcome_live_order"], true);
     let proof = result.verified.unwrap();
     assert_eq!(proof.submission, original.submission.unwrap());
     assert_eq!(proof.evidence["proofEvents"][0], old_events[0]);
@@ -915,14 +916,14 @@ async fn beneficial_sell_price_with_unexpected_fee_excess_preserves_receipt_and_
         run_id: None,
     };
     let record = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(record.status, Status::Unknown);
+    assert_eq!(record.status, Status::Completed);
     assert!(record.submission.is_some());
     assert!(record.dispatch_evidence.is_some());
     assert_eq!(
-        record.last_reconciliation_evidence.as_ref().unwrap()["observations"]["code"],
+        record.last_reconciliation_evidence.as_ref().unwrap()["code"],
         "KRAKEN_FEE_BOUND_EXCEEDED"
     );
-    assert!(record.effects.is_none());
+    assert!(record.effects.is_some());
     let again = engine.execute(request).await.unwrap();
     assert_eq!(again.id, record.id);
     assert_eq!(
@@ -1588,118 +1589,6 @@ async fn conditional_child_uses_proven_entry_credit_with_only_fee_reserve_across
             .count(),
         1
     );
-}
-
-#[tokio::test]
-async fn conditional_exact_named_plan_consumes_external_principal_and_preserves_both_gross_legs() {
-    let (a, _) = conditional_setup(2, false);
-    let prepared = a
-        .prepare(
-            KrakenEndpoint::KrakenPrivatePostAddOrder.operation(),
-            &conditional_input(),
-        )
-        .await
-        .unwrap();
-    let credits = prepared
-        .intent
-        .expected
-        .iter()
-        .flat_map(|e| match e {
-            gofin_domain::EffectConstraint::Conversion {
-                resource, output, ..
-            } => vec![json!({"resource":resource,"asset":output})],
-            gofin_domain::EffectConstraint::ConversionSequence { scope } => scope
-                .legs
-                .iter()
-                .map(|leg| json!({"resource":scope.resource,"asset":leg.output}))
-                .collect(),
-            _ => vec![],
-        })
-        .collect::<Vec<_>>();
-    let engine = gofin_engine::Engine::new(
-        gofin_store::Store::in_memory().unwrap(),
-        vec![Arc::new(ObservedAdapter {
-            venue: a,
-            base_balance: "1",
-        })],
-        Arc::new(SyntheticApproval),
-        gofin_engine::EngineOptions {
-            max_movement_and_cost_usd_micros: "500000000".into(),
-            max_run_allocation_usd_micros: "500000000".into(),
-            allow_unpriced_exchange_assets: false,
-        },
-    )
-    .unwrap();
-    let spec = gofin_domain::financial_plans::FinancialPlanSpec {
-        summary: None,
-        version: 1,
-        name: "Synthetic exact entry and conditional close".into(),
-        steps: vec![gofin_domain::financial_plans::FinancialPlanStepSpec {
-            step_id: "entry-close".into(),
-            operation: prepared.operation.clone(),
-            input: conditional_input(),
-            permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":credits}),
-            completion: gofin_domain::financial_plans::FinancialStepCompletion {
-                principal_spend: None,
-                minimum_net_receipt: None,
-                operation_succeeded: true,
-            },
-            funding_dependencies: vec![],
-            action_deadline_seconds: None,
-        }],
-        aggregate_bounds: gofin_domain::financial_plans::FinancialPlanBounds {
-            maximum_debits: prepared.intent.debits.clone(),
-            maximum_costs: prepared.intent.maximum_costs.clone(),
-        },
-    };
-    let consent = engine
-        .authorize_financial_plan(
-            gofin_domain::financial_plans::FinancialPlanAuthorizationRequest {
-                request_id: "synthetic-conditional-consent".into(),
-                plan: spec,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            },
-        )
-        .await
-        .unwrap();
-    let record = engine
-        .execute_financial_plan_step(
-            &consent.plan_id,
-            "entry-close",
-            gofin_domain::OperationRequest {
-                request_id: "synthetic-plan-conditional-attempt".into(),
-                operation: prepared.operation,
-                input: conditional_input(),
-                run_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(record.status, Status::Completed, "{:?}", record.error);
-    let consumed = engine
-        .financial_plan_status(&consent.plan_id)
-        .await
-        .unwrap();
-    assert_eq!(consumed.usage.consumed_debits.len(), 1);
-    assert!(
-        consumed
-            .usage
-            .consumed_debits
-            .iter()
-            .any(|d| d.amount.asset.reference == "ZUSD"
-                && d.amount.atoms == Quantity::from_decimal("100", 36).unwrap())
-    );
-    assert!(
-        consumed
-            .usage
-            .consumed_costs
-            .iter()
-            .any(|cost| cost.amount.asset.reference == "ZUSD"
-                && cost.amount.atoms == Quantity::from_decimal("0.38", 36).unwrap())
-    );
-    assert!(record.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,FinancialEffect::ConversionSequence {execution}if execution.legs.len()==2)));
 }
 
 struct OldClientWire {
@@ -2703,13 +2592,6 @@ async fn atomic_below_fill_amendment_engine_recovers_and_original_keeps_all_prov
         amended.error,
         amended.last_reconciliation_evidence
     );
-    assert!(
-        gofin_store::Store::open(&path)
-            .unwrap()
-            .reservation_count(&original.id)
-            .unwrap()
-            > 0
-    );
     drop(engine);
     wire.visible.store(true, Ordering::SeqCst);
     let engine = make();
@@ -2887,3 +2769,35 @@ fn cash_trade_zero_leverage_and_zero_margin_are_native_cash_evidence() {
 
 #[path = "history_recovery_tests.rs"]
 mod history_recovery_tests;
+
+#[tokio::test]
+async fn spot_order_native_terms_do_not_require_reporting_prices() {
+    let (_, fixture) = setup("open", "0", "0", "0", false, false, false);
+    let account = KrakenAccount {
+        name: "spot".into(),
+        resource: ResourceId("kraken:synthetic:spot".into()),
+        credential_ref: "synthetic-only".into(),
+        physical_identity: "synthetic-uid".into(),
+        wallet_account_id: None,
+        default_wallet_account_id: None,
+        identity_verified: true,
+        product: KrakenProduct::Spot,
+    };
+    let adapter = ExchangeAdapter::new(
+        KrakenProfile::new(KrakenProduct::Spot, vec![account], fixture).unwrap(),
+    );
+    let prepared = adapter.prepare("kraken.add-order", &input()).await.unwrap();
+    assert!(prepared.valuation.is_none());
+    assert!(
+        prepared
+            .binding
+            .get(gofin_domain::value_bounds::KEY)
+            .is_none()
+    );
+    assert!(!prepared.intent.debits.is_empty());
+    assert!(!prepared.intent.maximum_costs.is_empty());
+    let refreshed = adapter.revalidate(&prepared).await.unwrap();
+    assert_eq!(refreshed.input, prepared.input);
+    assert_eq!(refreshed.intent, prepared.intent);
+    assert!(refreshed.valuation.is_none());
+}

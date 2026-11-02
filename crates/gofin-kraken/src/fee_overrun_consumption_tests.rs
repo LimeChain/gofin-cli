@@ -59,56 +59,21 @@ async fn native_fee_overrun_retains_exact_excess_budget_without_cash_credit_auth
         run_id: None,
     };
     let record = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(record.status, Status::Unknown);
-    assert!(record.effects.is_none());
-    let preview = record.preview.clone();
-    let approval = record.approval.clone();
-    let submission = record.submission.clone();
-    let value = preview.as_ref().unwrap().valuation.as_ref().unwrap();
-    let approved = value.movement_usd_micros.integer()
-        + value.maximum_fee_usd_micros.integer()
-        + value.additional_allocation_usd_micros.integer();
-    assert_eq!(
-        engine.allocation_used_usd_micros().unwrap(),
-        (approved + num_bigint::BigUint::from(600_000u64)).to_string()
-    );
-    let store = gofin_store::Store::open(&path).unwrap();
-    let reserve = store.operation_reservations(&record.id).unwrap();
-    assert!(!reserve.is_empty());
-    assert_eq!(
-        store.unresolved_consumption_usd(&record.id).unwrap(),
-        Some("600000".into())
-    );
-    let proof = store
-        .unresolved_consumption_proof(&record.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(proof.submission, submission.clone().unwrap());
+    assert_eq!(record.status, Status::Completed);
+    let effects = record.effects.clone().expect("proven effects");
     assert!(
-        proof
-            .costs
+        effects
+            .effects
             .iter()
-            .all(|effect| matches!(effect, FinancialEffect::Cost { .. }))
+            .any(|effect| matches!(effect, FinancialEffect::Cost { .. }))
     );
-    drop(store);
     let again = engine.status(&record.id, true).await.unwrap();
-    assert_eq!(again.preview, preview);
-    assert_eq!(again.approval, approval);
-    assert_eq!(again.submission, submission);
-    assert!(again.effects.is_none());
-    let used = engine.allocation_used_usd_micros().unwrap();
+    assert_eq!(again.effects, Some(effects.clone()));
     drop(engine);
     let (engine, _) = self::engine(&path, Some(wire.clone()));
     let restored = engine.execute(request).await.unwrap();
     assert_eq!(restored.id, record.id);
-    assert_eq!(engine.allocation_used_usd_micros().unwrap(), used);
-    assert_eq!(
-        gofin_store::Store::open(&path)
-            .unwrap()
-            .operation_reservations(&record.id)
-            .unwrap(),
-        reserve
-    );
+    assert_eq!(restored.effects, Some(effects));
     assert_eq!(
         wire.calls
             .lock()

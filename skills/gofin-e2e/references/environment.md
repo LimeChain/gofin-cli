@@ -85,7 +85,7 @@ accounts; a successful SPL transfer does not establish Token-2022 coverage.
 Jupiter is keyless by default; never supply a shared API key or import a CEX
 credential as its service key.
 
-Discover the current `wallet.*`, `jupiter.*` and plan schemas. Require finalized,
+Discover the current `wallet.*` and `jupiter.*` schemas. Require finalized,
 verified effects for terminal settlement. Confirmed inclusion is progress;
 Trigger/perp order creation and keeper requests can remain pending. After a
 timeout or restart, reconcile the saved operation, transaction and provider
@@ -98,18 +98,11 @@ current capabilities and synthetic rehearsals. Honor the current task's explicit
 budget, slippage, leverage, restoration and live-scope limits; the existence of
 this wallet does not widen them. For a CEX round trip, independently verify
 withdrawal debit, finalized wallet receipt, return transaction and exchange
-deposit credit. Reuse of capital still consumes gross rolling budget on each
-leg.
+deposit credit. Track each leg and its fees against the skill's finite test budget.
 
-## Align development policy with the scenario
+## Track the finite test budget
 
-The selected same-user development environment is agent-controlled. Configure finite financial limits that permit the scenario and any documented test-budget override; this setup does not need a human approval. Read current policy/usage through `policy show --json` and inspect only the selected environment's configuration when necessary. Stop that environment before editing its `config.json`, preserve credentials, identities, journal and unrelated settings, then restart with `DEV_MODE=live` and verify the effective limits through the CLI.
-
-The current development profile supports an optional `policy` object (`BrokerPolicy`); its amount fields are decimal strings in USD micros. `max_movement_usd_micros` controls each movement; the legacy-named `max_run_allocation_usd_micros` controls rolling gross movement, not capital allocated to this test. Size that limit for the scenario's total gross movements/cost bounds plus already consumed and reserved usage. For example, moving $20 out and back reuses capital but counts as $40 of gross movement before costs. Retain the skill's separate allocation accounting.
-
-An optional `policy_limits` object further tightens the effective policy; it cannot raise it and currently validates against the legacy $100 maximum. Do not try to configure the $200 allocation through that field. For a profile controlled by this task, use the supported `policy` configuration and reconcile any task-owned optional clamp with the scenario, including removing that optional clamp when the finite `policy` is the intended limit. Preserve explicit human-imposed restrictions and other tasks' configuration. Never disable the engine's checks, set unlimited limits, alter the protected installation or erase financial history to make a test fit.
-
-Use normal GoFin commands to create or revise the operation/plan authority for the selected amounts. The development authorizer approves automatically. Configuration changes do not rewrite an existing grant or justify replaying an uncertain submission; keep the original identity and reconcile first.
+The skill's movement and allocation budget is agent-side verification accounting. Record amounts, estimated value, actual fees and retained exposure privately before each write. GoFin enforces each approved action's native terms; personal USD settings and the unpriced-asset exception are retired. Do not edit old policy values or clamps to escape a failed action. A protocol-critical quote or venue constraint still needs its required evidence.
 
 ## Lifecycle failures
 
@@ -124,4 +117,4 @@ Use normal GoFin commands to create or revise the operation/plan authority for t
 | Permission/network/minimum failure | Inspect discovery/reads, fix defects or report the specific prerequisite; never substitute production credentials. |
 | Pending/uncertain operation | Reconcile the original ID after rebuilding; don't reimport, reset or resubmit. |
 
-Never reset live state. Stop/start preserves credentials, reservations and submission identities. Different environments may share live accounts with no cross-environment nonce locks, duplicate prevention or budget accounting. The human coordinates concurrent tests; don't infer exclusivity from an environment name. Reuse known coordination and ask only when an actual conflict prevents testing.
+Never reset live state. Stop/start preserves credentials, observations and submission identities. Different environments may share live accounts with no cross-environment nonce locks, duplicate prevention or budget accounting. The human coordinates concurrent tests; don't infer exclusivity from an environment name. Reuse known coordination and ask only when an actual conflict prevents testing.

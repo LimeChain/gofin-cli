@@ -274,7 +274,7 @@ impl KlendAdapter {
             rent_observations.push(json!({"account":address,"context_slot":response["context"]["slot"],"observed_at":Utc::now().to_rfc3339(),"commitment":"finalized","account_absence_proven":true}));
         }
         candidate.metadata["account_funding_observations"] = json!(rent_observations);
-        let valuation = self.valuation(&intent, &candidate.quote).await?;
+        let valuation = self.valuation(&intent, &candidate.quote).await.ok();
         (candidate.blockhash, candidate.last_valid_block_height) =
             common::latest_blockhash(&wallet.runtime()).await?;
         let frozen = wallet
@@ -303,7 +303,7 @@ impl KlendAdapter {
             fee,
             context,
         )?;
-        prepared.valuation = Some(valuation);
+        prepared.valuation = valuation;
         Ok(prepared)
     }
     async fn freeze(

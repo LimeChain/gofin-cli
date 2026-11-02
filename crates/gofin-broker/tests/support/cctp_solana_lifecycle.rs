@@ -298,15 +298,15 @@ fn harness() -> Harness {
         Some(solana),
     )
 }
-async fn quote(h: &Harness) -> (String, Vec<Value>, FinancialPlanSpec) {
-    quote_amount(h, 10_000_000, true).await
+async fn start_cross_vm(h: &Harness, request_id: &str) -> (String, String) {
+    Box::pin(start_cross_vm_amount(h, request_id, 10_000_000, true)).await
 }
-async fn quote_amount(
+async fn start_cross_vm_amount(
     h: &Harness,
+    request_id: &str,
     atoms: u64,
     fast: bool,
-) -> (String, Vec<Value>, FinancialPlanSpec) {
-    let solana = h.solana.as_ref().unwrap();
+) -> (String, String) {
     let mut bounds = h.bounds();
     for cap in &mut bounds.fee_caps {
         if cap.asset.network == "ethereum:1" {
@@ -347,213 +347,158 @@ async fn quote_amount(
             .fee_caps
             .retain(|cap| cap.kind != FeeKind::WithheldFromOutput);
     }
-    let q=h.read("bridge.quotes",json!({"provider":"cctp","cctp":{"transferMode":if fast {"fast"} else {"standard"}},"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":usdc_asset(8453).unwrap().token},"solanaDestination":{"network":gofin_solana::NETWORK,"wallet":"model-solana","mint":protocol::USDC_MINT},"recipient":solana.owner,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":atoms.to_string()},"bounds":bounds})).await;
-    assert_eq!(q["transfers"].as_array().map(Vec::len), Some(1), "{q}");
-    let transfer = q["transfers"][0]["transfer_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let links: Vec<BridgeStepLink> =
-        serde_json::from_value(q["transfers"][0]["steps"].clone()).unwrap();
-    let inputs:Vec<_>=links.iter().map(|link|json!({"transferId":transfer,"stepId":link.step_id,"stepKind":link.kind,"bounds":bounds})).collect();
-    let mut spec = h.plan(&inputs, fast);
-    let dest = ResourceId(format!("{}:{}", gofin_solana::NETWORK, solana.owner));
-    spec.steps
-        .last_mut()
-        .unwrap()
-        .completion
-        .minimum_net_receipt = Some(gofin_domain::ResourceAmount {
-        resource: dest.clone(),
-        amount: gofin_domain::Amount {
-            asset: protocol::asset(),
-            atoms: Quantity::from_u64(if fast { atoms - 5_000 } else { atoms }),
-        },
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(atoms),
+        maximum: Quantity::from_u64(atoms),
     });
-    spec.aggregate_bounds
-        .maximum_costs
-        .retain(|c| c.amount.asset.network == "ethereum:1");
-    for cap in &mut spec.aggregate_bounds.maximum_costs {
-        cap.amount.asset.network = "ethereum:8453".into();
-        cap.location = gofin_domain::AccountingLocation::Cash {
-            resource: ResourceId(format!("ethereum:8453:{}", h.wallet)),
-        };
+    bounds.maximum_source_debit = Some(Quantity::from_u64(atoms));
+    bounds.minimum_net_receipt = Some(gofin_domain::Amount {
+        asset: protocol::asset(),
+        atoms: Quantity::from_u64(atoms - if fast { 5_000 } else { 0 }),
+    });
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
     }
-    spec.aggregate_bounds.maximum_debits[0] = gofin_domain::ResourceAmount {
-        resource: ResourceId(format!("ethereum:8453:{}", h.wallet)),
-        amount: usdc_asset(8453).unwrap().amount(Quantity::from_u64(atoms)),
+    let solana = h.solana.as_ref().unwrap();
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":usdc_asset(8453).unwrap().token},"solanaDestination":{"network":gofin_solana::NETWORK,"wallet":"model-solana","mint":protocol::USDC_MINT},"recipient":solana.owner,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":atoms.to_string(),"maximum":atoms.to_string()}},"allowedProviders":["cctp"],"cctp":{"transferMode":if fast {"fast"} else {"standard"}},"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: request_id.into(),
+        operation: "bridge.execute".into(),
+        input: input.clone(),
+        run_id: None,
     };
-    spec.aggregate_bounds
-        .maximum_costs
-        .push(gofin_domain::CostBound {
-            location: gofin_domain::AccountingLocation::Cash { resource: dest },
-            amount: gofin_domain::Amount {
-                asset: AssetId {
-                    network: gofin_solana::NETWORK.into(),
-                    reference: "native".into(),
-                    decimals: 9,
-                },
-                atoms: Quantity::from_u64(2_100_000),
-            },
-            treatment: gofin_domain::CostTreatment::AdditionalDebit,
-        });
-    (transfer, inputs, spec)
-}
-#[tokio::test]
-async fn cross_vm_plan_burn_mint_and_finalized_usdc_credit() {
-    let h = harness();
-    let (transfer, inputs, spec) = quote(&h).await;
-    let plan = h.authorize(spec).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
-    assert_ne!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
-    h.chain.lock().unwrap().attestation_ready = true;
-    assert_eq!(
-        h.status(&transfer).await["provider_status"]["status"],
-        "mint_ready"
-    );
-    let op = h
-        .execute_public(
-            &plan,
-            "stage-2",
-            OperationRequest {
-                request_id: "solana-mint".into(),
-                operation: "bridge.transfer".into(),
-                input: inputs[2].clone(),
-                run_id: None,
-            },
+    let result = h
+        .call(
+            args(&[
+                "execute",
+                "bridge.execute",
+                "--input",
+                &input.to_string(),
+                "--id",
+                request_id,
+                "--json",
+            ]),
+            BrokerRequest::Execute { request },
         )
         .await;
-    h.settle(op).await;
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
+    assert!(result["error"].is_null(), "{result}");
+    (
+        result["id"].as_str().unwrap().into(),
+        result["preview"]["binding"]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+    )
+}
+#[tokio::test]
+async fn cross_vm_compound_burn_mint_and_finalized_usdc_credit() {
+    Box::pin(async {
+        let h = harness();
+        let (id, transfer) = Box::pin(start_cross_vm(&h, "cross-vm")).await;
+        assert_ne!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
+        h.chain.lock().unwrap().attestation_ready = true;
+        assert_eq!(
+            h.status(&transfer).await["provider_status"]["status"],
+            "mint_ready"
+        );
+        let result = h.continue_compound(&id).await;
+        assert!(result["error"].is_null(), "{result}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
+    })
+    .await
 }
 
 async fn burn(h: &Harness) -> (String, Vec<Value>, String) {
-    let (transfer, inputs, spec) = quote(h).await;
-    let plan = h.authorize(spec).await;
-    for (i, input) in inputs.iter().enumerate().take(2) {
-        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
-    }
+    let (id, transfer) = Box::pin(start_cross_vm(h, "cross-vm-burn")).await;
+    let parent = h
+        .engine
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|op| op.id == id)
+        .unwrap();
+    let saved = h.state.transfer(&transfer).unwrap().unwrap();
+    let inputs=saved.steps.iter().map(|step|json!({"transferId":transfer,"stepId":step.step_id,"stepKind":step.kind,"bounds":parent.input["bounds"]})).collect();
     h.chain.lock().unwrap().attestation_ready = true;
-    (transfer, inputs, plan)
+    (transfer, inputs, id)
+}
+async fn mint(h: &Harness, id: &str, transfer: &str) -> gofin_domain::OperationRecord {
+    let _ = Box::pin(h.continue_compound(id)).await;
+    let saved = h.state.transfer(transfer).unwrap().unwrap();
+    let op = saved
+        .steps
+        .iter()
+        .find(|step| step.kind == gofin_domain::BridgeStepKind::Mint)
+        .and_then(|step| step.operation_id.as_ref())
+        .unwrap();
+    h.engine
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|row| &row.id == op)
+        .unwrap()
 }
 
 #[tokio::test]
 async fn cross_vm_mint_freezes_execution_hash_after_slow_preparation() {
-    let h = harness();
-    let (_transfer, inputs, _plan) = burn(&h).await;
-    let fixture = h.solana.as_ref().unwrap();
-    {
-        let mut state = fixture.state.lock().unwrap();
-        // Each controlled read advances beyond an entire blockhash lifetime.
-        // No wall-clock sleeps or weakened expiry checks are needed.
-        state.advance_on_balance = 200;
-        state.advance_on_fee = 200;
-        state.latest_blockhash_commitments.clear();
-    }
-    let prepared = h
-        .bridge
-        .prepare("bridge.transfer", &inputs[2])
-        .await
-        .unwrap();
-    assert_eq!(prepared.binding["solana_last_valid_block_height"], 550);
-    assert_eq!(prepared.binding["solana_maximum_network_fee_lamports"], FEE);
-    assert_eq!(
-        fixture.state.lock().unwrap().latest_blockhash_commitments,
-        ["confirmed", "confirmed"]
-    );
-    let validated = h.bridge.revalidate(&prepared).await.unwrap();
-    assert_eq!(
-        validated.binding["solana_message_sha256"],
-        prepared.binding["solana_message_sha256"]
-    );
-    assert_eq!(validated.binding["solana_last_valid_block_height"], 550);
-    fixture.state.lock().unwrap().block_height = 551;
-    assert_eq!(
-        h.bridge.revalidate(&validated).await.unwrap_err().code,
-        "SOLANA_BLOCKHASH_EXPIRED"
-    );
-    assert_eq!(fixture.state.lock().unwrap().sends, 0);
+    Box::pin(async {
+        let h = harness();
+        let (_transfer, inputs, _plan) = Box::pin(burn(&h)).await;
+        let fixture = h.solana.as_ref().unwrap();
+        {
+            let mut state = fixture.state.lock().unwrap();
+            // Each controlled read advances beyond an entire blockhash lifetime.
+            // No wall-clock sleeps or weakened expiry checks are needed.
+            state.advance_on_balance = 200;
+            state.advance_on_fee = 200;
+            state.latest_blockhash_commitments.clear();
+        }
+        let prepared = h
+            .bridge
+            .prepare("bridge.transfer", &inputs[2])
+            .await
+            .unwrap();
+        assert_eq!(prepared.binding["solana_last_valid_block_height"], 550);
+        assert_eq!(prepared.binding["solana_maximum_network_fee_lamports"], FEE);
+        assert_eq!(
+            fixture.state.lock().unwrap().latest_blockhash_commitments,
+            ["confirmed", "confirmed"]
+        );
+        let validated = h.bridge.revalidate(&prepared).await.unwrap();
+        assert_eq!(
+            validated.binding["solana_message_sha256"],
+            prepared.binding["solana_message_sha256"]
+        );
+        assert_eq!(validated.binding["solana_last_valid_block_height"], 550);
+        fixture.state.lock().unwrap().block_height = 551;
+        assert_eq!(
+            h.bridge.revalidate(&validated).await.unwrap_err().code,
+            "SOLANA_BLOCKHASH_EXPIRED"
+        );
+        assert_eq!(fixture.state.lock().unwrap().sends, 0);
+    })
+    .await
 }
 
 #[tokio::test]
 async fn cross_vm_pending_response_loss_restarts_without_duplicate_mint() {
-    let h = harness();
-    let (transfer, inputs, plan) = burn(&h).await;
-    {
-        let mut state = h.solana.as_ref().unwrap().state.lock().unwrap();
-        state.hidden = true;
-        state.lose_response = true;
-    }
-    let op = h.execute(&plan, 2, &inputs[2]).await.unwrap();
-    assert!(op.submission.is_some(), "{:?}", op.error);
-    assert_ne!(op.status, Status::Completed);
-    let h = h.restart();
-    let pending = h.status(&transfer).await;
-    assert_ne!(pending["state"], "completed");
-    assert!(
-        h.state
-            .transfer(&transfer)
-            .unwrap()
-            .unwrap()
-            .transit
-            .is_some()
-    );
-    h.solana.as_ref().unwrap().state.lock().unwrap().hidden = false;
-    let settled = h.settle(op).await;
-    let status = h.status(&transfer).await;
-    assert_eq!(status["state"], "completed");
-    let proof = &status["settlement"]["proof"];
-    assert_eq!(proof["native_cost_accounting"]["kind"], "gofin_operation");
-    assert_eq!(proof["native_cost_accounting"]["operation_id"], settled.id);
-    assert_eq!(proof["native_costs"][0]["amount"]["atoms"], FEE.to_string());
-    assert_eq!(
-        proof["native_costs"][1]["amount"]["atoms"],
-        RENT.to_string()
-    );
-    let h = h.restart();
-    let repeated = h.status(&transfer).await;
-    assert_eq!(
-        repeated["settlement"]["proof"]["native_costs"],
-        proof["native_costs"]
-    );
-    assert_eq!(
-        repeated["settlement"]["proof"]["native_cost_accounting"],
-        proof["native_cost_accounting"]
-    );
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(8453, 2)])
-    );
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn cross_vm_wrong_credit_or_circle_event_cannot_settle() {
-    for wrong_credit in [true, false] {
+    Box::pin(async {
         let h = harness();
-        let (transfer, inputs, plan) = burn(&h).await;
+        let (transfer, _inputs, plan) = Box::pin(burn(&h)).await;
         {
             let mut state = h.solana.as_ref().unwrap().state.lock().unwrap();
-            state.wrong_credit = wrong_credit;
-            state.wrong_event = !wrong_credit;
+            state.hidden = true;
+            state.lose_response = true;
         }
-        let op = h.execute(&plan, 2, &inputs[2]).await.unwrap();
+        let op = Box::pin(mint(&h, &plan, &transfer)).await;
         assert!(op.submission.is_some(), "{:?}", op.error);
-        let observed = h.operation_status(&op.id).await;
-        assert_ne!(observed.status, Status::Completed);
-        let observed = h
-            .bridge
-            .read("bridge.status", &json!({"transferId":transfer}))
-            .await;
-        match observed {
-            Ok(status) => assert_ne!(status["state"], "completed"),
-            Err(error) => assert_eq!(error.code, "CCTP_VALIDATION_FAILED"),
-        }
+        assert_ne!(op.status, Status::Completed);
+        let h = h.restart();
+        let pending = h.status(&transfer).await;
+        assert_ne!(pending["state"], "completed");
         assert!(
             h.state
                 .transfer(&transfer)
@@ -562,181 +507,163 @@ async fn cross_vm_wrong_credit_or_circle_event_cannot_settle() {
                 .transit
                 .is_some()
         );
+        h.solana.as_ref().unwrap().state.lock().unwrap().hidden = false;
+        let settled = h.settle(op).await;
+        let status = h.status(&transfer).await;
+        assert_eq!(status["state"], "completed");
+        let proof = &status["settlement"]["proof"];
+        assert_eq!(proof["native_cost_accounting"]["kind"], "gofin_operation");
+        assert_eq!(proof["native_cost_accounting"]["operation_id"], settled.id);
+        assert_eq!(proof["native_costs"][0]["amount"]["atoms"], FEE.to_string());
+        assert_eq!(
+            proof["native_costs"][1]["amount"]["atoms"],
+            RENT.to_string()
+        );
+        let h = h.restart();
+        let repeated = h.status(&transfer).await;
+        assert_eq!(
+            repeated["settlement"]["proof"]["native_costs"],
+            proof["native_costs"]
+        );
+        assert_eq!(
+            repeated["settlement"]["proof"]["native_cost_accounting"],
+            proof["native_cost_accounting"]
+        );
         assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
-    }
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(8453, 2)])
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    })
+    .await
 }
 
 #[tokio::test]
-async fn cross_vm_gas_shortage_and_revocation_block_new_mint() {
-    let h = harness();
-    let (transfer, inputs, plan) = burn(&h).await;
-    h.solana.as_ref().unwrap().state.lock().unwrap().gas_missing = true;
-    assert!(
-        h.bridge
-            .prepare("bridge.transfer", &inputs[2])
-            .await
-            .is_err()
-    );
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
-    assert!(
-        h.state
-            .transfer(&transfer)
-            .unwrap()
-            .unwrap()
-            .transit
-            .is_some()
-    );
-    h.solana.as_ref().unwrap().state.lock().unwrap().gas_missing = false;
-    h.engine.revoke_financial_plan(&plan).await.unwrap();
-    assert!(h.execute(&plan, 2, &inputs[2]).await.is_err());
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
-}
-
-#[tokio::test]
-async fn named_binance_transfer_base_withdrawal_cctp_solana_uses_one_approval() {
-    let chain = Arc::new(Mutex::new(ChainState::default()));
-    let signer = LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap();
-    let owner = lower_address(signer.address());
-    let fixture = SolanaFixture::new(chain.clone());
-    let price_api = pricing::enable(&fixture);
-    assert!(
-        fixture
-            .binance
-            .set(binance::BinanceFixture::new(chain.clone(), owner))
-            .is_ok()
-    );
-    let h = Harness::build_with_solana(
-        tempfile::tempdir().unwrap(),
-        chain.clone(),
-        Arc::new(Approvals::default()),
-        Arc::new(Iris::new(chain)),
-        Some(fixture),
-    );
-    let (transfer, inputs, mut spec) = quote_amount(&h, 9_800_000, false).await;
-    let coin = AssetId {
-        network: "binance".into(),
-        reference: "USDC".into(),
-        decimals: 36,
-    };
-    let main = ResourceId("binance:uid:1001:SPOT".into());
-    let child = ResourceId("binance:uid:1002:SPOT".into());
-    let wallet = ResourceId(format!("ethereum:8453:{}", h.wallet));
-    let base_asset = usdc_asset(8453).unwrap().asset_id();
-    let qty = Quantity::from_decimal("10", 36).unwrap();
-    let child_debit = json!({"resource":child,"amount":{"asset":coin,"atoms":qty}});
-    let main_debit = json!({"resource":main,"amount":{"asset":coin,"atoms":qty}});
-    let withdrawal_fee = json!({"location":{"kind":"cash","resource":main},"amount":{"asset":coin,"atoms":Quantity::from_decimal("0.2",36).unwrap()},"treatment":"included_in_debit"});
-    let transfer_input = json!({"requestId":"child-main-template","authority":"model-main","from":"model-child","to":"model-main","coin":"USDC","amount":"10","fromWallet":"SPOT","toWallet":"SPOT"});
-    let withdraw_input = json!({"requestId":"withdraw-template","account":"model-main","destination":"model-wallet","coin":"USDC","amount":"10","network":"BASE","walletType":"SPOT","maxFee":"0.2","minReceiveAmount":"9.8"});
-    let first: FinancialPlanStepSpec=serde_json::from_value(json!({"step_id":"consolidate","operation":"binance.transfer","input":transfer_input,"permitted_variations":{"mode":"exact","maximum_debits":[child_debit],"maximum_costs":[],"possible_credits":[{"resource":main,"asset":coin}]},"completion":{"operation_succeeded":true,"minimum_net_receipt":main_debit},"funding_dependencies":[]})).unwrap();
-    let second: FinancialPlanStepSpec=serde_json::from_value(json!({"step_id":"withdraw","operation":"binance.withdraw","input":withdraw_input,"permitted_variations":{"mode":"exact","maximum_debits":[main_debit],"maximum_costs":[withdrawal_fee],"possible_credits":[{"resource":wallet,"asset":base_asset}]},"completion":{"operation_succeeded":true,"minimum_net_receipt":{"resource":wallet,"amount":{"asset":base_asset,"atoms":"9800000"}}},"funding_dependencies":[{"producing_step_id":"consolidate","resource":main,"asset":coin,"funding_scope":"principal_only"}]})).unwrap();
-    spec.steps[1].funding_dependencies=serde_json::from_value(json!([{"producing_step_id":"withdraw","resource":wallet,"asset":base_asset,"funding_scope":"principal_only"}])).unwrap();
-    spec.steps.splice(0..0, [first, second]);
-    spec.aggregate_bounds.maximum_debits.extend([
-        serde_json::from_value(child_debit).unwrap(),
-        serde_json::from_value(main_debit).unwrap(),
-    ]);
-    spec.aggregate_bounds
-        .maximum_costs
-        .push(serde_json::from_value(withdrawal_fee).unwrap());
-    spec.name = "Synthetic Binance child to main to Base to Solana".into();
-    let plan = h.authorize(spec).await;
-    let premature = h
-        .runtime
-        .handle(BrokerRequest::ExecutePlanStep {
-            plan_id: plan.clone(),
-            step_id: "withdraw".into(),
-            request: OperationRequest {
-                request_id: "premature-withdraw".into(),
-                operation: "binance.withdraw".into(),
-                input: withdraw_input.clone(),
-                run_id: None,
-            },
-        })
-        .await;
-    assert!(
-        !premature.ok,
-        "An uncredited child transfer cannot fund the withdrawal"
-    );
-    assert_eq!(h.chain.lock().unwrap().source_balance, U256::ZERO);
-    for (id, operation, input) in [
-        ("consolidate", "binance.transfer", transfer_input),
-        ("withdraw", "binance.withdraw", withdraw_input),
-    ] {
-        let op = h
-            .execute_public(
-                &plan,
-                id,
-                OperationRequest {
-                    request_id: format!("execute-{id}"),
-                    operation: operation.into(),
-                    input,
-                    run_id: None,
-                },
-            )
-            .await;
-        h.settle(op).await;
-    }
-    assert_eq!(
-        h.chain.lock().unwrap().source_balance,
-        U256::from(9_800_000)
-    );
-    for (i, input) in inputs.iter().enumerate() {
-        if i == 2 {
-            h.chain.lock().unwrap().attestation_ready = true;
+async fn cross_vm_wrong_credit_or_circle_event_cannot_settle() {
+    Box::pin(async {
+        for wrong_credit in [true, false] {
+            let h = harness();
+            let (transfer, _inputs, plan) = Box::pin(burn(&h)).await;
+            {
+                let mut state = h.solana.as_ref().unwrap().state.lock().unwrap();
+                state.wrong_credit = wrong_credit;
+                state.wrong_event = !wrong_credit;
+            }
+            let op = Box::pin(mint(&h, &plan, &transfer)).await;
+            assert!(op.submission.is_some(), "{:?}", op.error);
+            let observed = h.operation_status(&op.id).await;
+            assert_ne!(observed.status, Status::Completed);
+            let observed = h
+                .bridge
+                .read("bridge.status", &json!({"transferId":transfer}))
+                .await;
+            match observed {
+                Ok(status) => assert_ne!(status["state"], "completed"),
+                Err(error) => assert_eq!(error.code, "CCTP_VALIDATION_FAILED"),
+            }
+            assert!(
+                h.state
+                    .transfer(&transfer)
+                    .unwrap()
+                    .unwrap()
+                    .transit
+                    .is_some()
+            );
+            assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
         }
-        let op = h
-            .execute_public(
-                &plan,
-                &format!("stage-{i}"),
-                OperationRequest {
-                    request_id: format!("bridge-{i}"),
-                    operation: "bridge.transfer".into(),
-                    input: input.clone(),
-                    run_id: None,
-                },
+    })
+    .await
+}
+
+#[tokio::test]
+async fn cross_vm_gas_shortage_and_expiry_block_new_mint() {
+    Box::pin(async {
+        let h = harness();
+        let (transfer, inputs, id) = Box::pin(burn(&h)).await;
+        h.solana.as_ref().unwrap().state.lock().unwrap().gas_missing = true;
+        assert!(
+            Box::pin(h.bridge.prepare("bridge.transfer", &inputs[2]))
+                .await
+                .is_err()
+        );
+        assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
+        assert!(
+            h.state
+                .transfer(&transfer)
+                .unwrap()
+                .unwrap()
+                .transit
+                .is_some()
+        );
+        h.solana.as_ref().unwrap().state.lock().unwrap().gas_missing = false;
+        h.clock.freeze();
+        h.clock.advance(std::time::Duration::from_secs(601));
+        let status = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
             )
             .await;
-        h.settle(op).await;
-    }
-    assert_eq!(h.status(&transfer).await["state"], "completed");
-    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        h.chain.lock().unwrap().broadcasts,
-        BTreeMap::from([(8453, 2)])
-    );
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
-    assert_eq!(
-        price_api.count(),
-        2,
-        "Full review, approval and five writes reuse fresh SOL and USDC prices"
-    );
+        assert_eq!(
+            status["outcome"]["next_action"]["code"], "reauthorize",
+            "{status}"
+        );
+        assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
+    })
+    .await
+}
+
+#[tokio::test]
+async fn binance_transfer_withdrawal_and_cctp_solana_use_separate_native_actions() {
+    Box::pin(async {
+        let chain=Arc::new(Mutex::new(ChainState::default()));
+        let signer=LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap();let owner=lower_address(signer.address());
+        let fixture=SolanaFixture::new(chain.clone());let _price_api=pricing::enable(&fixture);
+        assert!(fixture.binance.set(binance::BinanceFixture::new(chain.clone(),owner)).is_ok());
+        let h=Harness::build_with_solana(tempfile::tempdir().unwrap(),chain.clone(),Arc::new(Approvals::default()),Arc::new(Iris::new(chain)),Some(fixture));
+        let transfer_input=json!({"requestId":"consolidate","authority":"model-main","from":"model-child","to":"model-main","coin":"USDC","amount":"10","fromWallet":"SPOT","toWallet":"SPOT"});
+        let withdraw_input=json!({"requestId":"withdraw","account":"model-main","destination":"model-wallet","coin":"USDC","amount":"10","network":"BASE","walletType":"SPOT","maxFee":"0.2","minReceiveAmount":"9.8"});
+        for (id,operation,input) in [("consolidate","binance.transfer",transfer_input),("withdraw","binance.withdraw",withdraw_input)] {
+            let request=OperationRequest{request_id:id.into(),operation:operation.into(),input:input.clone(),run_id:None};
+            let value=h.call(args(&["execute",operation,"--input",&input.to_string(),"--id",id,"--json"]),BrokerRequest::Execute{request}).await;
+            let operation_id=value["id"].as_str().unwrap();let op=h.engine.operations().unwrap().into_iter().find(|row|row.id==operation_id).unwrap();h.settle(op).await;
+        }
+        assert_eq!(h.chain.lock().unwrap().source_balance,U256::from(9_800_000));
+        let (id,transfer)=Box::pin(start_cross_vm_amount(&h,"bridge-after-withdraw",9_800_000,false)).await;
+        h.chain.lock().unwrap().attestation_ready=true;let _=h.continue_compound(&id).await;
+        assert_eq!(h.status(&transfer).await["state"],"completed");assert_eq!(h.approvals.0.load(Ordering::SeqCst),3);
+        assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(8453,2)]));assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends,1);
+    }).await
 }
 
 #[tokio::test]
 async fn cross_vm_used_nonce_without_finalized_receipt_does_not_create_credit() {
-    let h = harness();
-    let (transfer, inputs, _) = burn(&h).await;
-    {
-        let mut s = h.solana.as_ref().unwrap().state.lock().unwrap();
-        s.signature = Some(bs58::encode([7u8; 64]).into_string());
-        s.hidden = true;
-    }
-    let status = h.status(&transfer).await;
-    assert_ne!(status["state"], "completed");
-    assert!(
-        h.state
-            .transfer(&transfer)
-            .unwrap()
-            .unwrap()
-            .transit
-            .is_some()
-    );
-    assert!(
-        h.bridge
-            .prepare("bridge.transfer", &inputs[2])
-            .await
-            .is_err()
-    );
-    assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
+    Box::pin(async {
+        let h = harness();
+        let (transfer, inputs, _) = Box::pin(burn(&h)).await;
+        {
+            let mut s = h.solana.as_ref().unwrap().state.lock().unwrap();
+            s.signature = Some(bs58::encode([7u8; 64]).into_string());
+            s.hidden = true;
+        }
+        let status = h.status(&transfer).await;
+        assert_ne!(status["state"], "completed");
+        assert!(
+            h.state
+                .transfer(&transfer)
+                .unwrap()
+                .unwrap()
+                .transit
+                .is_some()
+        );
+        assert!(
+            h.bridge
+                .prepare("bridge.transfer", &inputs[2])
+                .await
+                .is_err()
+        );
+        assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 0);
+    })
+    .await
 }

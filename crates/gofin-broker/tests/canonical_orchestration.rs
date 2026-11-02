@@ -624,54 +624,15 @@ impl Harness {
             ..Default::default()
         }
     }
-    async fn grant(&self, t: &str, s: &str) -> String {
-        let mut bounds = serde_json::to_value(self.bounds()).unwrap();
-        fn strip(v: &mut Value) {
-            match v {
-                Value::Object(m) => {
-                    m.retain(|_, x| !x.is_null());
-                    for x in m.values_mut() {
-                        strip(x)
-                    }
-                }
-                Value::Array(a) => {
-                    for x in a {
-                        strip(x)
-                    }
-                }
-                _ => {}
-            }
-        }
-        strip(&mut bounds);
-        self.engine
-            .authorize_boundary(gofin_domain::boundaries::BoundaryAuthorizationRequest {
-                request_id: format!("authorize-{t}"),
-                operation: "bridge.transfer".into(),
-                input: self.transfer_input(t, s),
-                bounds,
-                valid_for_seconds: 600,
-                replaces: None,
-            })
-            .await
-            .unwrap()
-            .id
-    }
 }
 
 #[tokio::test]
 async fn canonical_source_locator_child_settlement_and_recovery_work_on_both_children() {
     for destination in [42161, 4663] {
         let h = Harness::new(destination);
-        // The quote is only a read hint; the later grant selects explicit
-        // bounds and must freeze those independently for refresh/execute.
-        let (transfer, step) = h
-            .quote_with_bounds(
-                "5000000000000000",
-                None,
-                gofin_bridge::BridgeBounds::default(),
-            )
-            .await;
-        let grant = h.grant(&transfer, &step).await;
+        // Quote bounds constrain route refresh; financial approval is requested
+        // only for the concrete native action below.
+        let (transfer, step) = h.quote("5000000000000000", None).await;
         let outside = h
             .adapter
             .read(
@@ -695,21 +656,14 @@ async fn canonical_source_locator_child_settlement_and_recovery_work_on_both_chi
             input: input.clone(),
             run_id: None,
         };
-        let first = h
-            .engine
-            .execute_boundary(&grant, request.clone())
-            .await
-            .unwrap();
+        let first = h.engine.execute(request.clone()).await.unwrap();
         assert_eq!(
             first.status,
             Status::Completed,
             "source proof must settle before child transit: {:?}",
             first.error
         );
-        assert_eq!(
-            h.engine.execute_boundary(&grant, request).await.unwrap().id,
-            first.id
-        );
+        assert_eq!(h.engine.execute(request).await.unwrap().id, first.id);
         assert_eq!(
             h.chain.lock().unwrap().broadcasts,
             1,
@@ -1310,7 +1264,15 @@ async fn cli_canonical_deposit(destination: u64) {
     );
     let h = Harness::new(destination);
     let client = Client::new(h.runtime.clone(), h._tmp.path()).await;
-    let input = serde_json::to_value(h.quote_input("4500000000000000", None)).unwrap();
+    let mut input = serde_json::to_value(h.quote_input("4500000000000000", None)).unwrap();
+    for key in [
+        "input_usd_micros",
+        "source_usd_per_unit_micros",
+        "maximum_total_usd_micros",
+        "authorization_seconds",
+    ] {
+        input["bounds"].as_object_mut().unwrap().remove(key);
+    }
     let quote = client
         .call(
             args(&[
@@ -1334,7 +1296,15 @@ async fn cli_canonical_deposit(destination: u64) {
     let step = quote["transfers"][0]["steps"][0]["step_id"]
         .as_str()
         .unwrap();
-    let input = h.transfer_input(&transfer, step);
+    let mut input = h.transfer_input(&transfer, step);
+    for key in [
+        "input_usd_micros",
+        "source_usd_per_unit_micros",
+        "maximum_total_usd_micros",
+        "authorization_seconds",
+    ] {
+        input["bounds"].as_object_mut().unwrap().remove(key);
+    }
     let id = format!("canonical-positive-{destination}");
     let request = OperationRequest {
         request_id: id.clone(),
@@ -1371,6 +1341,9 @@ async fn cli_canonical_deposit(destination: u64) {
             .await;
     }
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     let status_input = json!({"transferId":transfer});
     let status = client
         .call(
@@ -1398,6 +1371,15 @@ async fn cli_canonical_deposit(destination: u64) {
         "4500000000000000"
     );
     assert_eq!(h.chain.lock().unwrap().broadcasts, 1);
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        let scenario = if destination == 42161 {
+            "canonical-ethereum-arbitrum"
+        } else {
+            "canonical-ethereum-robinhood"
+        };
+        std::fs::write(path,serde_json::to_vec(&json!({"scenario":scenario,"approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":h.chain.lock().unwrap().broadcasts,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }
 
 #[tokio::test]

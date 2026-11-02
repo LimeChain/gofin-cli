@@ -1,5 +1,13 @@
 name: Automated financial regressions
-on: [push, workflow_dispatch]
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      e2e_profile:
+        description: Positive scenario coverage
+        type: choice
+        options: [ci, full]
+        default: ci
 concurrency:
   group: gofin-regressions-${{ github.ref }}
   cancel-in-progress: true
@@ -70,6 +78,8 @@ jobs:
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
           python3 scripts/test-ci-e2e-reuse.py
+          python3 scripts/test-e2e-outcome-evidence.py
+          python3 scripts/test-e2e-profiles.py
           python3 scripts/test-surfpool-installer.py
           python3 scripts/test-meteora-native-loading.py
 
@@ -100,6 +110,8 @@ jobs:
     needs: e2e_lookup
     if: ${{ !cancelled() && (needs.e2e_lookup.result != 'success' || needs.e2e_lookup.outputs.run_id == '') }}
     uses: ./.github/workflows/e2e.yml
+    with:
+      profile: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e_profile || 'ci' }}
 
   rust:
     # Keep the required-check name. Only verified E2E reuse permits a skip.

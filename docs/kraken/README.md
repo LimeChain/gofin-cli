@@ -125,21 +125,20 @@ publishes a private file without replacing existing files or symlinks.
   market identities with independent USD observations, never symbol parity.
 - Persist submission identity before dispatch. Lost responses, partial batches,
   edits and cancellations reconcile without replay. Immutable deduplicated proofs
-  own fills; terminal status alone never releases unresolved reservations or erases
+  own fills; terminal status alone never establishes missing effects or erases
   consumed costs. Additive migrations preserve approvals, submissions, proofs,
   nonce state and cost watermarks without dispatch.
 - Amendments require fresh exact authority linked to the original fill owner;
-  legacy edits retain predecessor/successor identities. Value and reserve positive
-  increments separately without netting reductions. Child outcomes, revisions and
-  reservations commit atomically; unknown children retain allocation. Cancellation
+  legacy edits retain predecessor/successor identities. Account for positive
+  increments separately without netting reductions. Child outcomes and revisions
+  preserve their original identities; unknown children remain unresolved. Cancellation
   grants no additional authority.
 - Parent-funded conditional legs require verified usable proceeds. Starting holdings
   cover external initial principal and fees, while all legs count toward gross
   turnover. Margin accounting retains full loan principal and rollover liabilities;
   derivative contract exposure is not a cash balance.
-- Ordinary Spot cash orders and withdrawals receive plan-feasibility checks for
-  market, permissions, fees and recipients. Future balances and other shapes remain
-  explicitly deferred until execution. Fee-currency flags are preferences: cap both
+- Ordinary Spot cash orders and withdrawals check market, permissions, fees
+  and recipients at execution. Fee-currency flags are preferences: cap both
   traded assets and account for base fees in minimum receipts. Numeric USD drift
   may refresh at most twice only for proved-unsubmitted, zero-effect candidates
   within the same active authority. Uncertain writes, changed identities and actual
@@ -172,7 +171,7 @@ publishes a private file without replacing existing files or symlinks.
   balance increase, empty history or elapsed time alone proves no usable credit.
 - Withdrawals require independent destination receipts by default. Unsupported
   observers require explicit `verificationRequirement: "venue_only"` bound into
-  approval and plan scope. Results disclose unverified delivery and account only
+  the action’s approval scope. Results disclose unverified delivery and account only
   for proven source debit and fees. An enrolled destination must resolve to the
   exact network/address; external delivery does not create a GoFin custody holding.
 - Serialize Earn mutations per account/strategy because status reports the last
@@ -211,16 +210,8 @@ action. A confirmed source transaction alone does not complete a deposit:
 correlated usable Kraken credit and ledger evidence are also required. Missing
 history remains pending under the original identity, including after restart.
 
-New EVM deposit candidates reserve a disclosed 1% USD pricing buffer, rounded
-up to cents, for both the nested wallet transfer and the complete deposit.
-Exact principal, destination, token/network identity and native fee limits do not
-increase. Protected policy checks and reservations use the buffered ceilings;
-fresh prices keep their real timestamps and source identities. Revalidation
-checks fresh values against the original candidate's ceilings without buffering
-them again. Existing saved candidates retain their original ceilings. An active
-named plan can prepare a replacement candidate within its reviewed financial
-scope and protected policy without another approval; a buffer is not authority
-to exceed either.
+EVM deposits retain exact principal, destination, token/network identity and
+native fee limits through approval and dispatch.
 
 Solana funding live-write acceptance is separate from the earlier exchange
 SOL/USDC trading evidence below.

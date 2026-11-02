@@ -1,12 +1,14 @@
 //! Coinbase spot buy-and-reverse named-plan rehearsal through Engine, Store,
 //! the protocol socket, and optionally the public fin-dev CLI binary.
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
     compose_runtime_with_clock,
 };
-use gofin_coinbase::{CoinbaseAccount, CoinbaseProduct, CoinbaseProfile, institutional};
-use gofin_domain::{clock::Clock, financial_plans::*, *};
+use gofin_coinbase::{CoinbaseAccount, CoinbaseProduct, CoinbaseProfile};
+use gofin_domain::{clock::Clock, *};
 use gofin_exchange::{ExchangeAdapter, coinbase::*};
 use gofin_protocol::BrokerRequest;
 use gofin_store::Store;
@@ -91,6 +93,7 @@ struct Venue {
     hbar_path_step: AtomicUsize,
     native_funding_errors: std::sync::atomic::AtomicBool,
     native_create_rejection: std::sync::atomic::AtomicBool,
+    lose_first_order: std::sync::atomic::AtomicBool,
     progressive_settlement: std::sync::atomic::AtomicBool,
     progressive_order_reads: AtomicUsize,
     progressive_fill_reads: AtomicUsize,
@@ -291,6 +294,9 @@ impl CoinbaseApi for Venue {
             }
             CoinbaseRoute::Orders => {
                 let body: Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+                if self.lose_first_order.swap(false, Ordering::SeqCst) {
+                    return Err(CoinbaseError::Transport);
+                }
                 if self.native_create_rejection.load(Ordering::SeqCst) {
                     return Self::response(json!({
                         "success":false,
@@ -769,70 +775,8 @@ fn international_runtime(
 }
 include!("support/coinbase_plan_client.rs");
 
-fn exact_step(
-    id: &str,
-    prepared: &PreparedOperation,
-    input: Value,
-    credits: Value,
-    dependencies: Vec<FinancialPlanFundingDependency>,
-) -> FinancialPlanStepSpec {
-    FinancialPlanStepSpec {
-        step_id: id.into(),
-        operation: prepared.operation.clone(),
-        input,
-        permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":credits}),
-        funding_dependencies: dependencies,
-        action_deadline_seconds: None,
-        completion: FinancialStepCompletion {
-            operation_succeeded: true,
-            principal_spend: None,
-            minimum_net_receipt: None,
-        },
-    }
-}
-
-fn aggregate_cost_bounds(costs: impl IntoIterator<Item = CostBound>) -> Vec<CostBound> {
-    let mut aggregate: Vec<CostBound> = Vec::new();
-    for cost in costs {
-        if let Some(existing) = aggregate.iter_mut().find(|existing| {
-            existing.location == cost.location
-                && existing.amount.asset == cost.amount.asset
-                && existing.treatment == cost.treatment
-        }) {
-            existing.amount.atoms = existing
-                .amount
-                .atoms
-                .checked_add(&cost.amount.atoms)
-                .unwrap();
-        } else {
-            aggregate.push(cost);
-        }
-    }
-    aggregate
-}
-
-fn aggregate_debit_bounds(
-    debits: impl IntoIterator<Item = gofin_domain::ResourceAmount>,
-) -> Vec<gofin_domain::ResourceAmount> {
-    let mut aggregate: Vec<gofin_domain::ResourceAmount> = Vec::new();
-    for debit in debits {
-        if let Some(existing) = aggregate.iter_mut().find(|existing| {
-            existing.resource == debit.resource && existing.amount.asset == debit.amount.asset
-        }) {
-            existing.amount.atoms = existing
-                .amount
-                .atoms
-                .checked_add(&debit.amount.atoms)
-                .unwrap();
-        } else {
-            aggregate.push(debit);
-        }
-    }
-    aggregate
-}
-
 #[test]
-fn coinbase_named_plan_executes_buy_then_reverse_with_one_approval_and_restart_identity() {
+fn coinbase_standalone_buy_then_reverse_with_two_approvals_and_restart_identity() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -850,7 +794,7 @@ fn coinbase_named_plan_executes_buy_then_reverse_with_one_approval_and_restart_i
 }
 
 #[test]
-fn default_movement_cap_rejects_one_hundred_dollars_plus_fee_before_approval_or_dispatch() {
+fn retired_movement_cap_does_not_block_native_bounded_action() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -886,7 +830,7 @@ fn coinbase_sell_creates_verified_net_quote_for_following_hbar_buy_from_zero_quo
 }
 
 #[test]
-fn coinbase_exchange_sell_funds_a_later_order_through_broker_plan() {
+fn coinbase_exchange_sell_funds_a_later_standalone_order() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -913,105 +857,18 @@ async fn rehearse_exchange_future_funding() {
         ("BTC".into(), "0".into()),
     ]);
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let adapter = exchange_adapter(venue.clone());
     let sell = json!({"account":"synthetic-exchange","requestId":"exchange-sell-hbar","productId":"HBAR-USDC","side":"SELL","baseSize":"25","limitPrice":"0.10","timeInForce":"FOK","maximumSpend":"25","minimumReceive":"2.49","maximumFee":"0.01"});
     let buy = json!({"account":"synthetic-exchange","requestId":"exchange-buy-btc","productId":"BTC-USDC","side":"BUY","baseSize":"0.023","limitPrice":"100","timeInForce":"FOK","maximumSpend":"2.3","minimumReceive":"0.022","maximumFee":"0.01"});
-    let sell_prepared = adapter
-        .prepare("coinbaseexchange.create-order", &sell)
-        .await
-        .unwrap();
-    let buy_prepared = institutional::prepare_order_for_plan(
-        adapter.profile(),
-        "coinbaseexchange.create-order",
-        &buy,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let usdc = AssetId {
-        network: "coinbaseexchange".into(),
-        reference: "USDC".into(),
-        decimals: 36,
-    };
-    let btc = AssetId {
-        network: "coinbaseexchange".into(),
-        reference: "BTC".into(),
-        decimals: 36,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Exchange HBAR sale funds a BTC purchase".into(),
-        summary: Some("Sell the enrolled HBAR balance, then use only verified fee-net USDC proceeds for the BTC order.".into()),
-        steps: vec![
-            exact_step("sell-hbar", &sell_prepared, sell.clone(), json!([{"resource":EXCHANGE_ACCOUNT,"asset":usdc}]), vec![]),
-            exact_step("buy-btc", &buy_prepared, buy.clone(), json!([{"resource":EXCHANGE_ACCOUNT,"asset":btc}]), vec![FinancialPlanFundingDependency { producing_step_id:"sell-hbar".into(), resource:ResourceId(EXCHANGE_ACCOUNT.into()), asset:usdc, funding_scope:None, maximum_fraction_bps: None }]),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: aggregate_debit_bounds(sell_prepared.intent.debits.iter().chain(&buy_prepared.intent.debits).cloned()),
-            maximum_costs: aggregate_cost_bounds(sell_prepared.intent.maximum_costs.iter().chain(&buy_prepared.intent.maximum_costs).cloned()),
-        },
-    };
     let client = Client::new(
         exchange_runtime(&path, venue.clone(), approval.clone()),
         temp.path(),
     )
     .await;
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "coinbase-exchange-future-funding-plan".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: authorization.clone(),
-            },
-            true,
-        )
-        .await;
-    authorization.expected_review_hash = Some(
-        preview["review_hash"]
-            .as_str()
-            .expect("plan preview succeeds with explicit future funding")
-            .into(),
+    assert_eq!(
+        venue.exchange_balances.lock().unwrap().get("USDC").unwrap(),
+        "0"
     );
-    let approved = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "coinbase-exchange-future-funding-plan",
-                "--review-hash",
-                authorization.expected_review_hash.as_deref().unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan {
-                request: authorization,
-            },
-            true,
-        )
-        .await;
-    let plan_id = approved["plan_id"]
-        .as_str()
-        .expect("plan authorization succeeds")
-        .to_owned();
-    for (step, operation_input) in [("sell-hbar", sell), ("buy-btc", buy)] {
+    for (_step, operation_input) in [("sell-hbar", sell), ("buy-btc", buy)] {
         let result = client
             .call(
                 args(&[
@@ -1021,15 +878,9 @@ async fn rehearse_exchange_future_funding() {
                     &operation_input.to_string(),
                     "--id",
                     operation_input["requestId"].as_str().unwrap(),
-                    "--plan",
-                    &plan_id,
-                    "--step",
-                    step,
                     "--json",
                 ]),
-                BrokerRequest::ExecutePlanStep {
-                    plan_id: plan_id.clone(),
-                    step_id: step.into(),
+                BrokerRequest::Execute {
                     request: OperationRequest {
                         request_id: operation_input["requestId"].as_str().unwrap().into(),
                         operation: "coinbaseexchange.create-order".into(),
@@ -1042,7 +893,7 @@ async fn rehearse_exchange_future_funding() {
             .await;
         assert_eq!(result["status"], "completed", "{result}");
     }
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
     assert_eq!(
         venue.exchange_balances.lock().unwrap().get("HBAR").unwrap(),
@@ -1082,90 +933,11 @@ async fn rehearse_btc_eur_fok() {
     let venue = Arc::new(Venue::default());
     venue.btc_eur_fok_path.store(true, Ordering::SeqCst);
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let adapter = adapter(venue.clone());
     let buy = json!({"account":"synthetic-portfolio","requestId":"btc-eur-fok-buy","productId":"BTC-EUR","side":"BUY","orderConfiguration":{"limit_limit_fok":{"base_size":"0.001","limit_price":"1990.00"}},"maximumSpend":"1.99","minimumReceive":"0.00099","maximumFee":"0.01"});
     let sell = json!({"account":"synthetic-portfolio","requestId":"btc-eur-fok-sell","productId":"BTC-EUR","side":"SELL","orderConfiguration":{"limit_limit_fok":{"base_size":"0.001","limit_price":"2010.00"}},"maximumSpend":"0.001","minimumReceive":"2.00","maximumFee":"0.01"});
-    let buy_prepared = adapter
-        .prepare("coinbase.create-order", &buy)
-        .await
-        .unwrap();
-    let sell_prepared = adapter
-        .prepare("coinbase.create-order", &sell)
-        .await
-        .unwrap();
-    let btc = AssetId {
-        network: "coinbase".into(),
-        reference: "BTC".into(),
-        decimals: 36,
-    };
-    let eur = AssetId {
-        network: "coinbase".into(),
-        reference: "EUR".into(),
-        decimals: 36,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "BTC-EUR FOK buy then verified-proceeds sell".into(),
-        summary: Some("Buy within a finite EUR principal and fee cap, then sell only the verified BTC credit.".into()),
-        steps: vec![
-            exact_step("buy", &buy_prepared, buy.clone(), json!([{"resource":ACCOUNT,"asset":btc}]), vec![]),
-            exact_step("sell", &sell_prepared, sell.clone(), json!([{"resource":ACCOUNT,"asset":eur}]), vec![FinancialPlanFundingDependency { producing_step_id: "buy".into(), resource: ResourceId(ACCOUNT.into()), asset: btc, funding_scope: None, maximum_fraction_bps: None }]),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: aggregate_debit_bounds(buy_prepared.intent.debits.iter().chain(&sell_prepared.intent.debits).cloned()),
-            maximum_costs: aggregate_cost_bounds(buy_prepared.intent.maximum_costs.iter().chain(&sell_prepared.intent.maximum_costs).cloned()),
-        },
-    };
     let client = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "btc-eur-fok-plan".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: authorization.clone(),
-            },
-            true,
-        )
-        .await;
-    authorization.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let authorized = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "btc-eur-fok-plan",
-                "--review-hash",
-                authorization.expected_review_hash.as_deref().unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan {
-                request: authorization,
-            },
-            true,
-        )
-        .await;
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
     let mut saved = Vec::new();
-    for (step, request_id, input) in [
+    for (_step, request_id, input) in [
         ("buy", "btc-eur-fok-buy", buy),
         ("sell", "btc-eur-fok-sell", sell),
     ] {
@@ -1182,21 +954,12 @@ async fn rehearse_btc_eur_fok() {
             &input.to_string(),
             "--id",
             request_id,
-            "--plan",
-            &plan_id,
-            "--step",
-            step,
             "--json",
         ]);
-        let call = BrokerRequest::ExecutePlanStep {
-            plan_id: plan_id.clone(),
-            step_id: step.into(),
-            request,
-        };
+        let call = BrokerRequest::Execute { request };
         let result = client.call(argv.clone(), call.clone(), true).await;
         assert_eq!(result["status"], "completed", "{result}");
-        let record: OperationRecord = serde_json::from_value(result.clone()).unwrap();
-        assert!(record.submission.is_some());
+        assert!(result["submission"].is_object());
         saved.push((argv, call, result));
     }
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
@@ -1211,7 +974,7 @@ async fn rehearse_btc_eur_fok() {
             "each native preview must have a new ID: {preview_ids:?}"
         );
     }
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     drop(client);
     let resumed = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
     for (argv, call, previous) in saved {
@@ -1224,7 +987,7 @@ async fn rehearse_btc_eur_fok() {
         2,
         "restart reuses the original submission without replaying either order"
     );
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     let requests = venue.calls.lock().unwrap();
     let order_bodies = requests
         .iter()
@@ -1246,166 +1009,14 @@ async fn rehearse_zero_quote_hbar_funding() {
     let venue = Arc::new(Venue::default());
     venue.sell_then_hbar.store(true, Ordering::SeqCst);
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let adapter = adapter(venue.clone());
     let sell_hbar = json!({"account":"synthetic-portfolio","requestId":"sell-hbar","productId":"HBAR-USDC","side":"SELL","orderConfiguration":{"market_market_ioc":{"base_size":"25"}},"maximumSpend":"25","minimumReceive":"2.40","maximumFee":"0.10"});
     let buy_btc = json!({"account":"synthetic-portfolio","requestId":"buy-btc","productId":"BTC-USDC","side":"BUY","orderConfiguration":{"market_market_ioc":{"quote_size":"2.30"}},"maximumSpend":"2.30","minimumReceive":"0.022","maximumFee":"0.10"});
     let sell_btc = json!({"account":"synthetic-portfolio","requestId":"sell-btc","productId":"BTC-USDC","side":"SELL","orderConfiguration":{"market_market_ioc":{"base_size":"0.023"}},"maximumSpend":"0.023","minimumReceive":"2.20","maximumFee":"0.10"});
     let buy_hbar = json!({"account":"synthetic-portfolio","requestId":"buy-hbar","productId":"HBAR-USDC","side":"BUY","orderConfiguration":{"market_market_ioc":{"quote_size":"2.10"}},"maximumSpend":"2.10","minimumReceive":"20","maximumFee":"0.10"});
-    let prepared = [
-        adapter
-            .prepare("coinbase.create-order", &sell_hbar)
-            .await
-            .unwrap(),
-        adapter
-            .prepare("coinbase.create-order", &buy_btc)
-            .await
-            .unwrap(),
-        adapter
-            .prepare("coinbase.create-order", &sell_btc)
-            .await
-            .unwrap(),
-        adapter
-            .prepare("coinbase.create-order", &buy_hbar)
-            .await
-            .unwrap(),
-    ];
     let inputs = vec![sell_hbar, buy_btc, sell_btc, buy_hbar];
-    let usdc = AssetId {
-        network: "coinbase".into(),
-        reference: "USDC".into(),
-        decimals: 36,
-    };
-    let btc = AssetId {
-        network: "coinbase".into(),
-        reference: "BTC".into(),
-        decimals: 36,
-    };
-    let hbar = AssetId {
-        network: "coinbase".into(),
-        reference: "HBAR".into(),
-        decimals: 36,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Coinbase HBAR-USDC-BTC-USDC-HBAR verified funding path".into(),
-        summary: Some("Four sequential spot trades use only verified fee-net proceeds.".into()),
-        steps: vec![
-            exact_step(
-                "sell-hbar",
-                &prepared[0],
-                inputs[0].clone(),
-                json!([{"resource":ACCOUNT,"asset":usdc}]),
-                vec![],
-            ),
-            exact_step(
-                "buy-btc",
-                &prepared[1],
-                inputs[1].clone(),
-                json!([{"resource":ACCOUNT,"asset":btc}]),
-                vec![FinancialPlanFundingDependency {
-                    producing_step_id: "sell-hbar".into(),
-                    resource: ResourceId(ACCOUNT.into()),
-                    asset: usdc.clone(),
-                    funding_scope: None,
-                    maximum_fraction_bps: None,
-                }],
-            ),
-            exact_step(
-                "sell-btc",
-                &prepared[2],
-                inputs[2].clone(),
-                json!([{"resource":ACCOUNT,"asset":usdc}]),
-                vec![FinancialPlanFundingDependency {
-                    producing_step_id: "buy-btc".into(),
-                    resource: ResourceId(ACCOUNT.into()),
-                    asset: btc,
-                    funding_scope: None,
-                    maximum_fraction_bps: None,
-                }],
-            ),
-            exact_step(
-                "buy-hbar",
-                &prepared[3],
-                inputs[3].clone(),
-                json!([{"resource":ACCOUNT,"asset":hbar}]),
-                vec![FinancialPlanFundingDependency {
-                    producing_step_id: "sell-btc".into(),
-                    resource: ResourceId(ACCOUNT.into()),
-                    asset: usdc,
-                    funding_scope: None,
-                    maximum_fraction_bps: None,
-                }],
-            ),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: aggregate_debit_bounds(
-                prepared
-                    .iter()
-                    .flat_map(|item| item.intent.debits.iter())
-                    .cloned(),
-            ),
-            maximum_costs: aggregate_cost_bounds(
-                prepared
-                    .iter()
-                    .flat_map(|item| item.intent.maximum_costs.iter())
-                    .cloned(),
-            ),
-        },
-    };
     venue.native_funding_errors.store(true, Ordering::SeqCst);
     let client = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
-    let request = FinancialPlanAuthorizationRequest {
-        request_id: "hbar-usdc-btc-usdc-hbar-plan".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(1800),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: request.clone(),
-            },
-            true,
-        )
-        .await;
-    assert!(
-        preview.to_string().contains("BTC") && preview.to_string().contains("USDC"),
-        "{preview}"
-    );
-    let mut request = request;
-    request.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let approved = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "hbar-usdc-btc-usdc-hbar-plan",
-                "--review-hash",
-                request.expected_review_hash.as_deref().unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request },
-            true,
-        )
-        .await;
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    let plan_id = approved["plan_id"].as_str().unwrap().to_owned();
-    for (step_id, input) in ["sell-hbar", "buy-btc", "sell-btc", "buy-hbar"]
+    for (_step_id, input) in ["sell-hbar", "buy-btc", "sell-btc", "buy-hbar"]
         .into_iter()
         .zip(inputs)
     {
@@ -1418,15 +1029,9 @@ async fn rehearse_zero_quote_hbar_funding() {
                     &input.to_string(),
                     "--id",
                     input["requestId"].as_str().unwrap(),
-                    "--plan",
-                    &plan_id,
-                    "--step",
-                    step_id,
                     "--json",
                 ]),
-                BrokerRequest::ExecutePlanStep {
-                    plan_id: plan_id.clone(),
-                    step_id: step_id.into(),
+                BrokerRequest::Execute {
                     request: OperationRequest {
                         request_id: input["requestId"].as_str().unwrap().into(),
                         operation: "coinbase.create-order".into(),
@@ -1440,7 +1045,7 @@ async fn rehearse_zero_quote_hbar_funding() {
         assert_eq!(response["status"], "completed", "{response}");
     }
     assert_eq!(venue.writes.load(Ordering::SeqCst), 4);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 4);
     let orders = venue.orders.lock().unwrap();
     assert_eq!(orders.len(), 4);
     for (side, product) in [
@@ -1482,80 +1087,9 @@ async fn rehearse_progressive_settlement() {
     let venue = Arc::new(Venue::default());
     venue.progressive_settlement.store(true, Ordering::SeqCst);
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let adapter = adapter(venue.clone());
     let input = json!({"account":"synthetic-portfolio","requestId":"progressive-order","productId":"BTC-USD","side":"BUY","orderConfiguration":{"market_market_ioc":{"quote_size":"50"}},"maximumSpend":"50","minimumReceive":"0.49","maximumFee":"0.20"});
-    let prepared = adapter
-        .prepare("coinbase.create-order", &input)
-        .await
-        .unwrap();
-    let step = exact_step(
-        "buy",
-        &prepared,
-        input.clone(),
-        json!([{"resource":ACCOUNT,"asset":{"network":"coinbase","reference":"BTC","decimals":36}}]),
-        vec![],
-    );
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Progressively reconcile one Coinbase order".into(),
-        summary: Some("Persist each fill once; resume the original order without replay.".into()),
-        steps: vec![step],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: aggregate_debit_bounds(prepared.intent.debits.clone()),
-            maximum_costs: aggregate_cost_bounds(prepared.intent.maximum_costs.clone()),
-        },
-    };
     let client = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "progressive-plan".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: authorization.clone(),
-            },
-            true,
-        )
-        .await;
-    authorization.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let authorized = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "progressive-plan",
-                "--review-hash",
-                authorization.expected_review_hash.as_deref().unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan {
-                request: authorization,
-            },
-            true,
-        )
-        .await;
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
-    let run_step = || BrokerRequest::ExecutePlanStep {
-        plan_id: plan_id.clone(),
-        step_id: "buy".into(),
+    let run_step = || BrokerRequest::Execute {
         request: OperationRequest {
             request_id: "progressive-order".into(),
             operation: "coinbase.create-order".into(),
@@ -1572,10 +1106,6 @@ async fn rehearse_progressive_settlement() {
                 &input.to_string(),
                 "--id",
                 "progressive-order",
-                "--plan",
-                &plan_id,
-                "--step",
-                "buy",
                 "--json",
             ]),
             run_step(),
@@ -1584,9 +1114,8 @@ async fn rehearse_progressive_settlement() {
         .await;
     assert_eq!(first["status"], "pending", "{first}");
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
-    let first_record: OperationRecord = serde_json::from_value(first.clone()).unwrap();
     assert_eq!(
-        first_record.effects.as_ref().unwrap().evidence["settlement_progress"]["sequence"],
+        first["effects"]["evidence"]["settlement_progress"]["sequence"],
         1
     );
     let second = client
@@ -1598,10 +1127,6 @@ async fn rehearse_progressive_settlement() {
                 &input.to_string(),
                 "--id",
                 "progressive-order",
-                "--plan",
-                &plan_id,
-                "--step",
-                "buy",
                 "--json",
             ]),
             run_step(),
@@ -1615,8 +1140,8 @@ async fn rehearse_progressive_settlement() {
         "resume must reconcile, not POST again"
     );
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    let final_record: OperationRecord = serde_json::from_value(second.clone()).unwrap();
-    let verified = final_record.effects.unwrap();
+    let verified: gofin_domain::VerifiedEffects =
+        serde_json::from_value(second["effects"].clone()).unwrap();
     assert_eq!(verified.evidence["settlement_progress"]["sequence"], 2);
     assert_eq!(verified.evidence["fillCount"], 2);
     let effects = serde_json::to_value(verified.effects).unwrap();
@@ -1645,7 +1170,7 @@ async fn rehearse_progressive_settlement() {
     assert_eq!(fees[0]["amount"]["atoms"], format!("2{}", "0".repeat(35)));
     let stored = Store::open(&path)
         .unwrap()
-        .get_record(&final_record.id)
+        .get_record(second["id"].as_str().unwrap())
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1654,7 +1179,7 @@ async fn rehearse_progressive_settlement() {
     );
     assert_eq!(
         stored["submission"]["reference"],
-        first_record.submission.unwrap().reference
+        first["submission"]["reference"]
     );
 }
 
@@ -1668,190 +1193,222 @@ async fn rehearse_default_cap() {
         .prepare("coinbase.create-order", &input)
         .await
         .unwrap();
-    let step = exact_step("buy", &prepared, input, json!([]), vec![]);
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Default cap fee-inclusive rejection".into(),
-        summary: None,
-        steps: vec![step],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: prepared.intent.debits.clone(),
-            maximum_costs: prepared.intent.maximum_costs.clone(),
-        },
-    };
+    assert!(
+        prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .any(|cost| !cost.amount.atoms.is_zero())
+    );
     let runtime = runtime_with_policy(
         &temp.path().join("default-cap.sqlite"),
         venue.clone(),
         approval.clone(),
         BrokerPolicy::beta(),
     );
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "default-cap-plan".into(),
-        plan,
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = runtime
-        .handle(BrokerRequest::PreviewPlan {
-            request: request.clone(),
+    let executed = runtime
+        .handle(BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: "default-cap-buy".into(),
+                operation: "coinbase.create-order".into(),
+                input,
+                run_id: None,
+            },
         })
         .await;
     assert!(
-        preview.ok,
-        "preview should expose the reviewed policy check"
+        executed.ok,
+        "standalone action returns a durable record: {:?}",
+        executed.error
     );
-    request.expected_review_hash = Some(
-        preview.result.as_ref().unwrap()["review_hash"]
-            .as_str()
-            .unwrap()
-            .into(),
-    );
-    let authorized = runtime
-        .handle(BrokerRequest::AuthorizePlan {
-            request: request.clone(),
-        })
-        .await;
-    if authorized.ok {
-        let plan_id = authorized.result.as_ref().unwrap()["plan_id"]
-            .as_str()
-            .unwrap();
-        let execute = runtime
-            .handle(BrokerRequest::ExecutePlanStep {
-                plan_id: plan_id.into(),
-                step_id: "buy".into(),
+    let record = executed.result.unwrap();
+    assert_ne!(record["error"]["code"], "MOVEMENT_LIMIT", "{record}");
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires the explicitly built synthetic Coinbase development CLI"]
+async fn missing_coinbase_order_stays_uncertain_across_restart() {
+    assert!(std::env::var_os("GOFIN_COINBASE_PLAN_CLI").is_some());
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("missing-order.sqlite");
+    let venue = Arc::new(Venue::default());
+    venue.lose_first_order.store(true, Ordering::SeqCst);
+    venue.exchange_lifecycle.store(true, Ordering::SeqCst);
+    venue
+        .exchange_balances
+        .lock()
+        .unwrap()
+        .extend([("USDC".into(), "100".into()), ("BTC".into(), "0".into())]);
+    let approval = Arc::new(Approval(AtomicUsize::new(0)));
+    let make_runtime = || {
+        let transport: Arc<dyn CoinbaseApi> = venue.clone();
+        let profile = CoinbaseProfile::new(
+            vec![
+                CoinbaseAccount {
+                    name: "synthetic-portfolio".into(),
+                    resource: ResourceId(ACCOUNT.into()),
+                    credential_ref: "synthetic-credential".into(),
+                    physical_identity: "synthetic-portfolio-id".into(),
+                    identity_verified: true,
+                    portfolio_id: Some("synthetic-portfolio-id".into()),
+                    product: CoinbaseProduct::Advanced,
+                },
+                CoinbaseAccount {
+                    name: "synthetic-exchange".into(),
+                    resource: ResourceId(EXCHANGE_ACCOUNT.into()),
+                    credential_ref: "synthetic-exchange-credential".into(),
+                    physical_identity: "synthetic-exchange-profile".into(),
+                    identity_verified: true,
+                    portfolio_id: None,
+                    product: CoinbaseProduct::Exchange,
+                },
+            ],
+            BTreeMap::from([
+                ("synthetic-credential".into(), transport.clone()),
+                ("synthetic-exchange-credential".into(), transport),
+            ]),
+        )
+        .unwrap()
+        .with_prices(Arc::new(Prices));
+        compose_runtime_with_clock(
+            BrokerConfigV2 {
+                version: 2,
+                networks: NetworkConfig::reviewed_evm_networks(),
+                deployments: vec![],
+                connections: vec![],
+                policy: BrokerPolicy::beta(),
+                approver_uid: unsafe { libc::geteuid() },
+                extensions: BTreeMap::new(),
+            },
+            RuntimeDependencies {
+                store: Store::open(&path).unwrap(),
+                adapters: vec![Arc::new(ExchangeAdapter::new(profile))],
+                authorizer: approval.clone(),
+                valuator: Arc::new(SharedUsdValuator::with_source(Arc::new(Prices))),
+                bridge: None,
+            },
+            Arc::new(TestClock),
+        )
+        .unwrap()
+    };
+    let client = Client::new(make_runtime(), temp.path()).await;
+    let id = "missing-coinbase";
+    let input = json!({"account":"synthetic-portfolio","requestId":id,"productId":"BTC-USD","side":"BUY","orderConfiguration":{"limit_limit_gtc":{"base_size":"1.00","limit_price":"100.00","post_only":false}},"maximumSpend":"100.00","minimumReceive":"0.99","maximumFee":"0.10"});
+    let argv = args(&[
+        "execute",
+        "coinbase.create-order",
+        "--input",
+        &input.to_string(),
+        "--id",
+        id,
+        "--json",
+    ]);
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: id.into(),
+            operation: "coinbase.create-order".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let counters = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            venue.writes.load(Ordering::SeqCst),
+        )
+    };
+    let before_action = counters();
+    let original = client.call(argv.clone(), request.clone(), true).await;
+    let after_action = counters();
+    assert!(original["submission"].is_object(), "{original}");
+    assert_eq!(original["outcome"]["replay_safe"], false);
+    let mut probe_input = input;
+    probe_input["requestId"] = json!("coinbase-probe");
+    let before_probe = counters();
+    let probe = client
+        .call(
+            args(&[
+                "execute",
+                "coinbase.create-order",
+                "--input",
+                &probe_input.to_string(),
+                "--id",
+                "coinbase-probe",
+                "--json",
+            ]),
+            BrokerRequest::Execute {
                 request: OperationRequest {
-                    request_id: "default-cap-buy".into(),
+                    request_id: "coinbase-probe".into(),
                     operation: "coinbase.create-order".into(),
-                    input: json!({"account":"synthetic-portfolio","requestId":"default-cap-buy","productId":"BTC-USD","side":"BUY","orderConfiguration":{"market_market_ioc":{"quote_size":"100.00"}},"maximumSpend":"100.00","minimumReceive":"0.99","maximumFee":"0.10"}),
+                    input: probe_input,
                     run_id: None,
                 },
-            })
-            .await;
-        assert!(
-            execute.ok,
-            "operation failure is returned as a durable record"
-        );
-        let record = execute.result.unwrap();
-        assert_eq!(record["status"], "failed", "{record}");
-        assert_eq!(record["error"]["code"], "MOVEMENT_LIMIT", "{record}");
-    } else {
-        assert_eq!(authorized.error.unwrap().code, "MOVEMENT_LIMIT");
+            },
+            true,
+        )
+        .await;
+    assert!(probe["submission"].is_object(), "{probe}");
+    let mut probes = vec![outcome_evidence::admission_probe(
+        "same_account",
+        before_probe,
+        counters(),
+        &probe,
+    )];
+    let before_probe = counters();
+    let other = json!({"account":"synthetic-exchange","requestId":"coinbase-other","productId":"BTC-USDC","side":"BUY","baseSize":"0.1","limitPrice":"100","timeInForce":"FOK","maximumSpend":"10","minimumReceive":"0.1","maximumFee":"0.03"});
+    let different = client
+        .call(
+            args(&[
+                "execute",
+                "coinbaseexchange.create-order",
+                "--input",
+                &other.to_string(),
+                "--id",
+                "coinbase-other",
+                "--json",
+            ]),
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "coinbase-other".into(),
+                    operation: "coinbaseexchange.create-order".into(),
+                    input: other,
+                    run_id: None,
+                },
+            },
+            true,
+        )
+        .await;
+    assert!(different["submission"].is_object(), "{different}");
+    probes.push(outcome_evidence::admission_probe(
+        "different_account",
+        before_probe,
+        counters(),
+        &different,
+    ));
+    drop(client);
+    let client = Client::new(make_runtime(), temp.path()).await;
+    let repeated = client.call(argv, request, true).await;
+    assert_eq!(repeated["id"], original["id"]);
+    assert_eq!(repeated["submission"], original["submission"]);
+    assert_eq!(repeated["outcome"]["replay_safe"], false);
+    assert_eq!(venue.writes.load(Ordering::SeqCst), 3);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a13.coinbase","approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":true});
+        outcome_evidence::attach_probes(&mut evidence, &probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
-    assert!(approval.0.load(Ordering::SeqCst) <= 1);
-    assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
 }
 async fn rehearse() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("coinbase-plan.sqlite");
     let venue = Arc::new(Venue::default());
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let a = adapter(venue.clone());
     let buy = json!({"account":"synthetic-portfolio","requestId":"plan-buy","productId":"BTC-USD","side":"BUY","orderConfiguration":{"limit_limit_gtc":{"base_size":"1.00","limit_price":"100.00","post_only":false}},"maximumSpend":"100.00","minimumReceive":"0.99","maximumFee":"0.10"});
     let sell = json!({"account":"synthetic-portfolio","requestId":"plan-sell","productId":"BTC-USD","side":"SELL","orderConfiguration":{"limit_limit_gtc":{"base_size":"1.00","limit_price":"110.00","post_only":false}},"maximumSpend":"1.00","minimumReceive":"100.00","maximumFee":"0.10"});
-    let b = a.prepare("coinbase.create-order", &buy).await.unwrap();
-    let s = a.prepare("coinbase.create-order", &sell).await.unwrap();
-    let usd = AssetId {
-        network: "coinbase".into(),
-        reference: "USD".into(),
-        decimals: 36,
-    };
-    let btc = AssetId {
-        network: "coinbase".into(),
-        reference: "BTC".into(),
-        decimals: 36,
-    };
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Synthetic Coinbase buy and reverse".into(),
-        summary: Some("Buy BTC with USD, then sell the same BTC back to USD.".into()),
-        steps: vec![
-            exact_step(
-                "buy",
-                &b,
-                buy.clone(),
-                json!([{"resource":ACCOUNT,"asset":btc}]),
-                vec![],
-            ),
-            exact_step(
-                "sell",
-                &s,
-                sell.clone(),
-                json!([{"resource":ACCOUNT,"asset":usd}]),
-                vec![FinancialPlanFundingDependency {
-                    producing_step_id: "buy".into(),
-                    resource: ResourceId(ACCOUNT.into()),
-                    asset: btc,
-                    funding_scope: None,
-                    maximum_fraction_bps: None,
-                }],
-            ),
-        ],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: b
-                .intent
-                .debits
-                .iter()
-                .chain(&s.intent.debits)
-                .cloned()
-                .collect(),
-            maximum_costs: aggregate_cost_bounds(
-                b.intent
-                    .maximum_costs
-                    .iter()
-                    .chain(&s.intent.maximum_costs)
-                    .cloned(),
-            ),
-        },
-    };
     let client = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
-    let request = FinancialPlanAuthorizationRequest {
-        request_id: "synthetic-coinbase-plan".into(),
-        plan: plan.clone(),
-        valid_for_seconds: Some(1800),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: request.clone(),
-            },
-            true,
-        )
-        .await;
-    let mut request = request;
-    request.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let authorized = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                "synthetic-coinbase-plan",
-                "--review-hash",
-                request.expected_review_hash.as_ref().unwrap(),
-                "--valid-for",
-                "30m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request },
-            true,
-        )
-        .await;
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
     let mut saved = Vec::new();
     for (step, operation, input) in [
         ("buy", "coinbase.create-order", buy),
@@ -1871,26 +1428,17 @@ async fn rehearse() {
             &input.to_string(),
             "--id",
             &id,
-            "--plan",
-            &plan_id,
-            "--step",
-            step,
             "--json",
         ]);
-        let call = BrokerRequest::ExecutePlanStep {
-            plan_id: plan_id.clone(),
-            step_id: step.into(),
-            request,
-        };
+        let call = BrokerRequest::Execute { request };
         let result = client.call(argv.clone(), call.clone(), true).await;
         assert_eq!(result["status"], "completed", "{result}");
-        let record: OperationRecord = serde_json::from_value(result.clone()).unwrap();
-        assert_eq!(record.operation, "coinbase.create-order");
-        assert!(record.submission.is_some());
+        assert_eq!(result["operation"], "coinbase.create-order");
+        assert!(result["submission"].is_object());
         saved.push((argv, call, result));
     }
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
     drop(client);
     let client = Client::new(runtime(&path, venue.clone(), approval.clone()), temp.path()).await;
     for (argv, call, prior) in &saved {
@@ -1900,15 +1448,15 @@ async fn rehearse() {
     }
     let (original_argv, original_call, _) = &saved[0];
     let mut conflicting_call = original_call.clone();
-    if let BrokerRequest::ExecutePlanStep { request, .. } = &mut conflicting_call {
+    if let BrokerRequest::Execute { request } = &mut conflicting_call {
         request.input["maximumFee"] = json!("0.09");
     } else {
-        unreachable!("saved request is a named-plan operation")
+        unreachable!("saved request is a standalone operation")
     }
     let mut conflicting_argv = original_argv.clone();
     conflicting_argv[3] = match &conflicting_call {
-        BrokerRequest::ExecutePlanStep { request, .. } => request.input.to_string(),
-        _ => unreachable!("saved request is a named-plan operation"),
+        BrokerRequest::Execute { request } => request.input.to_string(),
+        _ => unreachable!("saved request is a standalone operation"),
     };
     let conflict = client.call(conflicting_argv, conflicting_call, false).await;
     assert_eq!(
@@ -1923,8 +1471,8 @@ async fn rehearse() {
     );
     assert_eq!(
         approval.0.load(Ordering::SeqCst),
-        1,
-        "the approved plan remains reusable for its named steps"
+        2,
+        "idempotent replay does not prompt again"
     );
 }
 
@@ -1934,58 +1482,9 @@ async fn rehearse_native_rejection_releases_reservation() {
     let venue = Arc::new(Venue::default());
     venue.native_create_rejection.store(true, Ordering::SeqCst);
     let approval = Arc::new(Approval(AtomicUsize::new(0)));
-    let adapter = adapter(venue.clone());
     let input = json!({"account":"synthetic-portfolio","requestId":"native-rejection-buy","productId":"BTC-USD","side":"BUY","orderConfiguration":{"limit_limit_gtc":{"base_size":"1.00","limit_price":"100.00","post_only":false}},"maximumSpend":"100.00","minimumReceive":"0.99","maximumFee":"0.10"});
-    let prepared = adapter
-        .prepare("coinbase.create-order", &input)
-        .await
-        .unwrap();
-    let step = exact_step("buy", &prepared, input.clone(), json!([]), vec![]);
-    let plan = FinancialPlanSpec {
-        version: 1,
-        name: "Coinbase native rejection proof".into(),
-        summary: None,
-        steps: vec![step],
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: prepared.intent.debits.clone(),
-            maximum_costs: prepared.intent.maximum_costs.clone(),
-        },
-    };
     let runtime = runtime(&path, venue.clone(), approval);
-    let mut auth = FinancialPlanAuthorizationRequest {
-        request_id: "native-rejection-plan".into(),
-        plan,
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = runtime
-        .handle(BrokerRequest::PreviewPlan {
-            request: auth.clone(),
-        })
-        .await;
-    assert!(preview.ok, "plan preview failed: {:?}", preview.error);
-    auth.expected_review_hash = Some(
-        preview.result.unwrap()["review_hash"]
-            .as_str()
-            .unwrap()
-            .into(),
-    );
-    let authorized = runtime
-        .handle(BrokerRequest::AuthorizePlan { request: auth })
-        .await;
-    assert!(
-        authorized.ok,
-        "plan authorization failed: {:?}",
-        authorized.error
-    );
-    let plan_id = authorized.result.unwrap()["plan_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let request = BrokerRequest::ExecutePlanStep {
-        plan_id: plan_id.clone(),
-        step_id: "buy".into(),
+    let request = BrokerRequest::Execute {
         request: OperationRequest {
             request_id: "native-rejection-buy".into(),
             operation: "coinbase.create-order".into(),
@@ -2011,7 +1510,6 @@ async fn rehearse_native_rejection_releases_reservation() {
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     let operation_id = record["id"].as_str().unwrap();
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.reservation_count(operation_id).unwrap(), 0);
     let persisted: OperationRecord =
         serde_json::from_value(store.get_record(operation_id).unwrap().unwrap()).unwrap();
     assert_eq!(persisted.status, Status::Failed);
@@ -2042,7 +1540,7 @@ async fn rehearse_native_rejection_releases_reservation() {
 }
 
 #[test]
-fn native_create_order_rejection_releases_store_reservation_without_replay() {
+fn native_create_order_rejection_is_proven_without_replay() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -2093,6 +1591,7 @@ fn positive_coinbase_exchange_order_lifecycle_via_cli() {
                 let request = OperationRequest {request_id:id.into(), operation:"coinbaseexchange.create-order".into(), input:input.clone(), run_id:None};
                 let result = client.call(args(&["execute", "coinbaseexchange.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
                 assert_eq!(result["status"], expected, "{result}");
+                if expected == "completed" { assert_eq!(result["outcome"]["phase"],"done","{result}"); }
                 if id == "rest" {
                     let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["status"] == "open").unwrap().clone();
                     assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
@@ -2123,6 +1622,7 @@ fn positive_coinbase_exchange_order_lifecycle_via_cli() {
             assert_eq!(balances["USDC"], "99.96");
             assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
             assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+            if let Ok(path)=std::env::var("GOFIN_EXECUTION_EVIDENCE") {let evidence=json!({"scenario":"coinbase-exchange-orders","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":venue.writes.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         });
     }).unwrap().join().unwrap();
 }
@@ -2162,6 +1662,7 @@ fn positive_coinbase_international_order_lifecycle_via_cli() {
                 let request = OperationRequest {request_id:id.into(), operation:"coinbaseinternational.create-order".into(), input:input.clone(), run_id:None};
                 let result = client.call(args(&["execute", "coinbaseinternational.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
                 assert_eq!(result["status"], expected, "{result}");
+                if expected == "completed" { assert_eq!(result["outcome"]["phase"],"done","{result}"); }
                 if id == "rest" {
                     let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["order_status"] == "WORKING").unwrap().clone();
                     assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
@@ -2185,6 +1686,39 @@ fn positive_coinbase_international_order_lifecycle_via_cli() {
             assert_eq!(balances["USDC"], "99.96");
             assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
             assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+            if let Ok(path)=std::env::var("GOFIN_EXECUTION_EVIDENCE") {let evidence=json!({"scenario":"coinbase-international-orders","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":venue.writes.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         });
     }).unwrap().join().unwrap();
+}
+
+#[tokio::test]
+async fn coinbase_native_order_prepare_does_not_require_reporting_price() {
+    let venue = Arc::new(Venue::default());
+    let transport: Arc<dyn CoinbaseApi> = venue;
+    let profile = CoinbaseProfile::new(
+        vec![CoinbaseAccount {
+            name: "synthetic-portfolio".into(),
+            resource: ResourceId(ACCOUNT.into()),
+            credential_ref: "synthetic-credential".into(),
+            physical_identity: "synthetic-portfolio-id".into(),
+            identity_verified: true,
+            portfolio_id: Some("synthetic-portfolio-id".into()),
+            product: CoinbaseProduct::Advanced,
+        }],
+        BTreeMap::from([("synthetic-credential".into(), transport)]),
+    )
+    .unwrap();
+    let adapter = ExchangeAdapter::new(profile);
+    let input = json!({"account":"synthetic-portfolio","requestId":"unpriced-native-order","productId":"BTC-USD","side":"BUY","orderConfiguration":{"limit_limit_gtc":{"base_size":"1.00","limit_price":"100.00","post_only":false}},"maximumSpend":"100.00","minimumReceive":"0.99","maximumFee":"0.10"});
+    let prepared = adapter
+        .prepare("coinbase.create-order", &input)
+        .await
+        .unwrap();
+    assert!(prepared.valuation.is_none());
+    assert!(!prepared.intent.debits.is_empty());
+    assert!(!prepared.intent.maximum_costs.is_empty());
+    let refreshed = adapter.revalidate(&prepared).await.unwrap();
+    assert_eq!(refreshed.input, prepared.input);
+    assert_eq!(refreshed.intent, prepared.intent);
+    assert!(refreshed.valuation.is_none());
 }

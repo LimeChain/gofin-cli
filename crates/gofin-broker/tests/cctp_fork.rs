@@ -16,9 +16,10 @@ use std::{
     time::Duration,
 };
 
-const OWNER: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+pub(crate) const OWNER: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 // Public Anvil key; valid only in disposable guarded local fixtures.
-const ATTESTER_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+pub(crate) const ATTESTER_KEY: &str =
+    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 sol! {
     interface FixtureToken {
         function approve(address spender, uint256 amount) external returns (bool);
@@ -71,7 +72,7 @@ async fn public_cctp_fork_pin() -> Result<()> {
     Ok(())
 }
 
-struct Fork {
+pub(crate) struct Fork {
     endpoint: String,
     instance: String,
     pin: Value,
@@ -79,7 +80,7 @@ struct Fork {
     ids: AtomicU64,
 }
 impl Fork {
-    async fn new(config: &Value) -> Result<Self> {
+    pub(crate) async fn new(config: &Value) -> Result<Self> {
         let endpoint = config["url"]
             .as_str()
             .ok_or_else(|| blocked("Missing owned fork URL"))?
@@ -110,10 +111,10 @@ impl Fork {
         fork.guard().await?;
         Ok(fork)
     }
-    fn chain(&self) -> u64 {
+    pub(crate) fn chain(&self) -> u64 {
         self.pin["chain_id"].as_u64().unwrap()
     }
-    async fn raw(&self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn raw(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let response = self
             .client
@@ -136,7 +137,7 @@ impl Fork {
             .cloned()
             .ok_or_else(|| blocked("Missing owned fork result"))
     }
-    async fn guard(&self) -> Result<()> {
+    pub(crate) async fn guard(&self) -> Result<()> {
         let metadata = self.raw("anvil_metadata", json!([])).await?;
         if metadata["instanceId"] != self.instance
             || metadata["chainId"] != self.pin["chain_id"]
@@ -152,7 +153,7 @@ impl Fork {
         }
         Ok(())
     }
-    async fn mutate(&self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn mutate(&self, method: &str, params: Value) -> Result<Value> {
         self.guard().await?;
         self.raw(method, params).await
     }
@@ -205,7 +206,7 @@ impl Fork {
                 .await?,
         ))
     }
-    async fn fund_usdc(&self, token: &str) -> Result<()> {
+    pub(crate) async fn fund_usdc(&self, token: &str) -> Result<()> {
         let amount = U256::from(100_000_000u64);
         for slot in 0..128u64 {
             let encoded = format!("{:0>64}{slot:064x}", &OWNER[2..]);

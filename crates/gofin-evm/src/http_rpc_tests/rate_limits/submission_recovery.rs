@@ -76,6 +76,7 @@ fn revalidation_reply(request: &Value) -> Reply {
                     .duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
         }),
         "eth_getTransactionCount" => Reply::result("0x3"),
+        "eth_blockNumber" => Reply::result("0x64"),
         "eth_call" => Reply::result("0x"),
         "eth_estimateGas" => Reply::result("0x5208"),
         "eth_getBalance" => Reply::result("0xffffffffffffffff"),
@@ -256,7 +257,7 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
         assert!(receipt.success);
         assert_eq!(receipt.block_number, 10);
         assert_eq!(receipt.confirmations, 2);
-        assert_eq!(receipt.fee, U256::from(210_000_000_000_u64));
+        assert_eq!(receipt.fee, Some(U256::from(210_000_000_000_u64)));
     }
     assert_eq!(std::fs::read(&journal.path).unwrap(), original_bytes);
     assert_eq!(*events.lock().unwrap(), vec!["sign", "persist", "accept"]);

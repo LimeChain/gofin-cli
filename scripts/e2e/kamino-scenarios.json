@@ -12,7 +12,8 @@
         "cargo"
       ],
       "env": {
-        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build",
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/kamino-lending-vault-evidence.json"
       },
       "prepare": [
         [
@@ -40,7 +41,8 @@
           "--summary",
           "{artifacts}/kamino-lending-summary.json"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/kamino-lending-vault-evidence.json"
     },
     {
       "id": "kamino-liquidity-vault",
@@ -54,7 +56,8 @@
         "cargo"
       ],
       "env": {
-        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build",
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/kamino-liquidity-vault-evidence.json"
       },
       "prepare": [
         [
@@ -82,7 +85,8 @@
           "--summary",
           "{artifacts}/kamino-liquidity-summary.json"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/kamino-liquidity-vault-evidence.json"
     },
     {
       "id": "kamino-borrowing",
@@ -96,7 +100,8 @@
         "cargo"
       ],
       "env": {
-        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build",
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/kamino-borrowing-evidence.json"
       },
       "prepare": [
         [
@@ -128,7 +133,8 @@
           "--summary",
           "{artifacts}/kamino-borrowing-summary.json"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/kamino-borrowing-evidence.json"
     }
   ]
 }

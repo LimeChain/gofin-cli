@@ -8,6 +8,8 @@ and [live-test contract](testing/README.md#live-test-contract) alongside this de
 
 ## Scope and provider choice
 
+New bridge quotes and direct stages use native asset, amount, receipt and fee bounds. Retired USD approval bounds are rejected, including when a new stage would inherit them from an older saved quote. Optional USD estimates do not gate native execution. Previously admitted submissions retain their original bindings and remain observable.
+
 The compiled provider registry includes Relay, canonical providers and CCTP V2.
 The canonical route described below is native ETH only. Relay quotes direct native-ETH and verified
 ERC-20 routes across Ethereum (1), Base (8453), Arbitrum One (42161), and Robinhood
@@ -53,12 +55,7 @@ address, whether enrolled or not. The EVM source signer remains enrolled, and
 of `source`, an enrolled Solana source wallet, an exact EVM `recipient`, the
 source base58 address as `refundTo`, and acceptable
 `allowedSolanaRefundAssets`. Both route and quote inputs use `mint:null` for
-native SOL. GoFin resolves mint ownership, precision and transfer support before
-saving an executable quote. Existing GoFin financial policy also requires a fresh,
-independent USD price for each debited or fee asset before executable authority;
-an unpriced mint fails closed even when Relay returns a route. Source swaps are
-currently rejected because only direct Solana source transaction shapes have
-complete validation.
+native SOL. GoFin resolves mint ownership, precision and transfer support before saving an executable quote. USD estimates are optional reporting; executable routes still require their native amount, fee and protocol checks. Source swaps are currently rejected because only direct Solana source transaction shapes have complete validation.
 
 The following examples are quote requests, not execution authorization. Replace
 wallet aliases and addresses with reviewed identities; a Relay route may be
@@ -113,334 +110,13 @@ policy must both hold. Fees come from Circle's route-specific fee response,
 use exact upward rounding and stay below the approved maximum. EVM gas is ETH with separate chain-qualified caps. A Solana destination uses SOL
 with distinct caps for transaction fees and permanent CCTP nonce-account rent.
 
-Quote through `bridge.quotes` with `provider: "cctp"`, exact source and destination
-native-USDC identities, `allowedRefundAssets: []`, and optional
-`cctp: {"transferMode": "fast"}` (default standard). CCTP has no refund route;
-`refundTo` must equal the source signer. The persisted quote declares finite
-allowance/reset steps if required, a source `deposit` (the CCTP burn) and a
-separate destination `mint`. Use those returned IDs without manufacturing step
-names. Each financial write is an explicit `bridge.transfer` execution under
-the active sequential plan. Status/attestation polling never submits a mint.
+Quote through `bridge.quotes` with `provider: "cctp"`, exact source and destination native-USDC identities and `allowedRefundAssets: []`. `cctp.transferMode` is `standard` by default and may be set to `fast`; it is fixed throughout the action and any remaining-stage reauthorization. CCTP has no refund route, so `refundTo` must equal the source signer.
 
-The plan binds networks/domains, exact token addresses, wallets and recipient,
-source debit, mode, fee bounds and destination receipt floor. EVM destinations use
-the same reusable EVM signer. Solana destinations bind a separate enrolled signer,
-its owner address, exact native-USDC ATA and destination caller. Both networks need
-pre-funded native fees. Approval precedes
-future funding; actual balance, allowance, gas and transaction checks happen
-when the respective step becomes eligible. A burn remains intermediate.
-GoFin persists its canonical receipt and message identity, validates attested
-immutable fields and permitted nonce/finality/fee fields, verifies signatures
-against destination attester configuration, then prepares the original mint.
-Only canonical destination `MessageReceived` and native-USDC mint evidence
-establish the receipt. Balance deltas never correlate transfers.
+Use `bridge.execute` for a single compound action. Its native intent fixes the provider, source, destination, exact amount, recipient, receipt floor and asset-denominated fee caps. `actionDeadline` is the Unix-seconds cutoff for admitting a new stage. It does not promise protocol completion; `bounds.latest_protocol_deadline` is a distinct provider-enforced term and CCTP rejects it. Discover the current schema before supplying terms. A CCTP action can declare reset/allowance, burn and mint stages under one approval. While the invocation is active the broker advances ready stages, journals each exact candidate and retains every completed stage. Polling status never dispatches a write.
 
-Delayed attestations remain pending. Insufficient destination gas requires the
-destination native token at the approved wallet before explicitly retrying an unsubmitted mint. Response
-loss or restart reconciles the original transaction/message; neither permits a
-new burn. Already-used nonces require the original destination proof. Expired or
-revoked plans permit reconciliation but block every new write, including mint.
-A replacement revision preserves prior consumption and must receive fresh
-approval. No background task refreshes financial consent.
+For an EVM-to-Solana action, specify `solanaDestination` in place of EVM destination fields. The enrolled Solana destination signer, owner, native-USDC mint and existing associated token account are bound alongside the EVM source. Supply separate source ETH, destination SOL transaction-fee and nonrefundable nonce-account funding caps. Both sides need the required native funds before their stage can execute. A burn remains intermediate: the broker persists its canonical receipt and message identity, verifies the Circle attestation and the original mint, and requires the canonical destination `MessageReceived` and native-USDC mint evidence for completion. Balance changes alone do not correlate a transfer.
 
-### EVM to Solana in one funding plan
-
-Use the same `bridge.routes`, `bridge.quotes`, `bridge.transfer`, `bridge.status`
-and `bridge.recovery` operations. Omit EVM destination fields and supply
-`solanaDestination: {"network":"solana:mainnet-beta","wallet":"solana-wallet","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}`.
-`recipient` is that wallet's exact, case-sensitive owner address. The broker derives
-and verifies its existing native-USDC associated token account; the burn's mint
-recipient is that token account. A route cannot combine EVM and Solana destination
-identities. Existing EVM quote/step JSON remains compatible.
-
-For exchange funding, one named plan contains the subaccount-to-master transfer,
-master withdrawal to the EVM wallet, all returned bridge allowance/reset stages,
-burn and Solana mint. Attach the withdrawal's verified native-USDC receipt to the
-burn's principal dependency. Existing ETH and SOL pay native fees independently.
-Binance withdrawal `amount` includes its fee: a 10-USDC debit with a 0.20-USDC fee
-funds at most a 9.80-USDC burn. Fix the downstream amount to the guaranteed receipt
-and disclose any remainder if a lower withdrawal fee delivers more.
-
-The source burn binds Circle domain 5, the deployed Solana receiver program,
-recipient token account and destination caller. Mint uses the protected Solana
-runtime's frozen message, signer, blockhash lifetime, simulation and durable
-signature-before-broadcast journal. Mint preparation finishes balance and price
-checks before acquiring its execution blockhash at confirmed commitment, then
-rechecks the fee and simulates that exact frozen message. Revalidation and dispatch
-retain the original message and enforce its block-height lifetime; an expired
-unsubmitted candidate needs a fresh attempt under current authority. This does
-not weaken destination settlement: completion requires a finalized transaction
-with the exact receive instruction, CCTP message/mint CPI events and native-USDC
-credit to the bound account. A used-nonce PDA or unrelated balance increase is
-insufficient. Nonce rent has no reviewed reclaim path and is a permanent cost.
-Reconciliation records actual SOL fee/rent separately from the USDC protocol fee.
-For GoFin submissions, these costs must settle on the original mint operation before
-bridge credit completes. A mint executed outside GoFin retains its verified native
-cost observations in the receipt proof, marked external; it does not consume or
-expand a GoFin plan grant. Historical receipt discovery precedes current program
-readiness checks, so a later pause or account closure does not erase valid evidence.
-
-Use `gofin execute ... --json --stream` for each eligible plan step and
-`gofin status ... --json --stream` while pending. Relay only observed milestones;
-status polling never performs a mint. Protected installation/update and native
-approval remain human Terminal actions; disposable automatic approval is separate.
-
-For Hyperliquid, Ethereum or Base funds first mint to the approved owner's
-Arbitrum wallet; a separate `hyperliquid.account.deposit` then sends native USDC
-to Bridge2. An Arbitrum source uses the existing deposit directly. Hyperliquid's
-[current onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/how-to-start-trading)
-still documents the EVM-owner Arbitrum-USDC flow and ETH gas. Its other deposit
-interfaces do not establish GoFin support for direct HyperCore or HyperEVM CCTP.
-The intermediate Arbitrum receipt is a funding dependency, not Hyperliquid
-completion. The final deposit must meet the 5-USDC minimum **after CCTP fees**,
-use the same owner, and finish with the existing exact ledger-credit proof.
-See [Hyperliquid deposit accounting](hyperliquid-capabilities.md).
-
-Before approval, inspect both wallet/account identities, minimum/expected net
-receipt, allowance, separate gas caps, fees, intermediate destinations, timing
-and completion conditions. CCTP quotes conservatively budget standard fallback even for fast requests:
-19 minutes for Ethereum/Arbitrum sources and 40 minutes for Base sources.
-Separate allowance/mint writes and the 15-minute Hyperliquid deposit allowance
-contribute to shared plan headroom. Select and review the whole-plan duration;
-these estimates are not settlement guarantees.
-
-### Reviewable CCTP-to-Hyperliquid plan example
-
-This example prepares a **10-USDC Ethereum burn and 9.99-USDC Hyperliquid
-deposit**, with at most 0.01 USDC withheld, 0.003 ETH total source gas,
-0.002 ETH destination-mint gas and 0.001 ETH Hyperliquid-deposit gas. These are
-illustrative ceilings, not current fee estimates. Set the enrolled owner and
-connection names before use; the same owner must sign on both EVM networks.
-Read the account's current abstraction before building the plan. The example
-selects `perpetual:primary` for separate mode and `unified:primary` for unified
-mode; it rejects unsupported modes. `plans preview` validates the enrolled
-owner and supported account mode. The generic `possible_credits` list remains
-a caller declaration: it identifies which proved credits may fund later plan
-steps, rather than proving the resource during preview. At execution, the
-deposit adapter resolves and binds the current account mode and actual cash
-destination, then requires correlated usable credit there. In unified mode,
-native spot USDC represents the shared cash balance; a zero perpetual balance
-does not imply the account is unfunded.
-
-First inspect the public contracts and prepare a bounded quote. The commands
-below require `jq` and write only local JSON files until the explicit execution
-commands later in this section.
-
-```sh
-gofin schema bridge.quotes --json
-gofin schema bridge.transfer --json
-gofin schema plans.authorize --json
-gofin schema hyperliquid.account.deposit --json
-OWNER=0x1111111111111111111111111111111111111111 # replace with enrolled owner
-WALLET=wallet
-HL_ACCOUNT=hyperliquid
-HL_INPUT=$(jq -nc --arg account "$HL_ACCOUNT" '{account:$account}')
-gofin read hyperliquid.abstraction --input "$HL_INPUT" --json > hl-abstraction.json
-gofin read hyperliquid.balances --input "$HL_INPUT" --json
-jq -n --arg owner "$OWNER" --arg wallet "$WALLET" '
-  {network:"ethereum:1",reference:"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",decimals:6} as $source |
-  {network:"ethereum:42161",reference:"0xaf88d065e77c8cc2239327c5edb3a432268e5831",decimals:6} as $destination |
-  {provider:"cctp",cctp:{transferMode:"fast"},intent:{wallet:$wallet,
-    source:{chainId:1,token:$source.reference},destinationChainId:42161,
-    destinationAssets:[{chainId:42161,token:$destination.reference}],
-    recipient:$owner,refundTo:$owner,allowedRefundAssets:[],amount:"10000000"},
-   bounds:{input:{minimum:"10000000",maximum:"10000000"},maximum_source_debit:"10000000",
-    minimum_net_receipt:{asset:$destination,atoms:"9990000"},fee_caps:[
-     {asset:{network:"ethereum:1",reference:"native",decimals:18},kind:"gas",maximum:"3000000000000000"},
-     {asset:{network:"ethereum:42161",reference:"native",decimals:18},kind:"gas",maximum:"2000000000000000"},
-     {asset:$destination,kind:"withheld_from_output",maximum:"10000"}]}}' > cctp-request.json
-gofin read bridge.quotes --input "$(cat cctp-request.json)" --json > cctp-quote.json
-```
-
-Generate every returned allowance/reset/burn/mint step in order. Provider step
-IDs come from the persisted quote; plan step IDs below are local display IDs.
-No Arbitrum USDC balance is required at the future Hyperliquid step during plan
-review. The explicit `principal_only` dependency uses the mint's proved USDC
-credit for that step's principal; pre-existing Arbitrum ETH covers its gas.
-
-```sh
-jq -n --slurpfile request cctp-request.json --slurpfile result cctp-quote.json --slurpfile abstraction hl-abstraction.json --arg account "$HL_ACCOUNT" '
-  $request[0] as $r | $result[0].transfers[0] as $t |
-  if $t == null then error("No executable CCTP quote; inspect failures") else . end |
-  ($r.intent.recipient | ascii_downcase) as $owner |
-  $abstraction[0].data as $abstraction |
-  if ($abstraction | has("dex")) and ($abstraction.dex == false or $abstraction.dex == null)
-    then . else error("Unsupported or unverified DEX abstraction") end |
-  ($abstraction.base | if type == "string" then . else .abstraction end) as $mode |
-  (if $mode == "unifiedAccount" then "unified"
-   elif $mode == "default" or $mode == "disabled" then "perpetual"
-   else error("Unsupported or unverified Hyperliquid account mode") end) as $cashWallet |
-  ("ethereum:1:"+$owner) as $src | ("ethereum:42161:"+$owner) as $dst |
-  {network:"ethereum:1",reference:$r.intent.source.token,decimals:6} as $source |
-  $r.bounds.minimum_net_receipt.asset as $destination |
-  {resource:$dst,amount:{asset:$destination,atoms:"9990000"}} as $deposit |
-  {location:{kind:"cash",resource:$dst},amount:{asset:{network:"ethereum:42161",reference:"native",decimals:18},atoms:"1000000000000000"},treatment:"additional_debit"} as $depositGas |
-  ($t.steps | to_entries | map({step_id:("cctp-"+(.key|tostring)),operation:"bridge.transfer",
-    input:{transferId:$t.transfer_id,stepId:.value.step_id,stepKind:.value.kind,bounds:$r.bounds},
-    permitted_variations:{},completion:({operation_succeeded:true} +
-      if .value.kind == "mint" then {minimum_net_receipt:$deposit} else {} end),funding_dependencies:[]})) as $bridge |
-  ($bridge | map(select(.input.stepKind == "mint"))[0].step_id) as $mint |
-  if $mint == null then error("Quote has no explicit mint") else . end |
-  {version:1,name:"Fund Hyperliquid through CCTP",
-   steps:($bridge + [{step_id:"hl-credit",operation:"hyperliquid.account.deposit",
-    input:{requestId:"hl-funding",account:$account,wallet:$r.intent.wallet,amount:"9.99",maxFeeEth:"0.001",maxAmountUsdc:"9.99"},
-    permitted_variations:{mode:"exact",maximum_debits:[$deposit],maximum_costs:[$depositGas],
-      possible_credits:[{resource:("hyperliquid:mainnet:"+$owner+":"+$cashWallet+":primary"),asset:{network:"hyperliquid:mainnet",reference:"USDC",decimals:36}}]},
-    completion:{operation_succeeded:true},funding_dependencies:[{producing_step_id:$mint,resource:$dst,asset:$destination,funding_scope:"principal_only"}]}]),
-   aggregate_bounds:{maximum_debits:[{resource:$src,amount:{asset:$source,atoms:"10000000"}},$deposit],
-    maximum_costs:[
-     {location:{kind:"cash",resource:$src},amount:{asset:{network:"ethereum:1",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"},
-     {location:{kind:"cash",resource:$dst},amount:{asset:{network:"ethereum:42161",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"}]}}' > cctp-plan.json
-gofin plans preview --input "$(cat cctp-plan.json)" --json > cctp-review.json
-```
-
-Review the named plan, whole-plan expiry, exact owner and destinations, all
-steps, receipt floor, fee caps and completion conditions. Omitted `--valid-for`
-lets GoFin budget the full sequential duration. A deliberately shorter lifetime
-must still pass the timing check; changing a bound or mode requires a new
-preview. After the human decides to authorize this exact review:
-
-```sh
-gofin plans authorize --input "$(cat cctp-plan.json)" --id cctp-approval-1 --review-hash "$(jq -r .review_hash cctp-review.json)" --json > cctp-authority.json
-PLAN_ID=$(jq -r .plan_id cctp-authority.json)
-TRANSFER_ID=$(jq -r '.transfers[0].transfer_id' cctp-quote.json)
-gofin plans status "$PLAN_ID" --json
-# Select only the next eligible index, starting at 0; do not loop over writes.
-STEP_INDEX=0
-STEP_ID=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].step_id' cctp-plan.json)
-OPERATION=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].operation' cctp-plan.json)
-STEP_INPUT=$(jq -c --argjson i "$STEP_INDEX" '.steps[$i].input' cctp-plan.json)
-gofin execute "$OPERATION" --input "$STEP_INPUT" --id "cctp-attempt-$STEP_ID-1" --plan "$PLAN_ID" --step "$STEP_ID" --json
-gofin plans status "$PLAN_ID" --json
-gofin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
-gofin read bridge.recovery --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
-```
-
-Advance the index only after the previous step's verified completion. Attestation
-polling can make the mint ready but cannot send it. Execute mint explicitly,
-wait for its canonical USDC receipt, then explicitly execute `hl-credit`.
-Keep the same attempt identity when reconciling uncertain submission; a proved
-unsubmitted/failed attempt follows the returned recovery guidance. Do not
-create another burn to resolve an attestation or mint delay. Final success is
-the exact Hyperliquid ledger credit, which can lag the Arbitrum transaction.
-
-### Human audit and acceptance
-
-Use the [existing live-verification workflow](../skills/gofin-e2e/SKILL.md) for
-any funded acceptance run. The [CCTP verification guide](testing/bridge.md#cctp-and-hyperliquid-funding)
-distinguish synthetic, deployed-contract fork, live-read and live-write results.
-Audit these points in the terminal review and observed results:
-
-1. One named plan authorizes the reviewed ordered sequence until a visible
-   expiry. Source burn, destination mint and Hyperliquid deposit remain separate
-   explicit writes; inspect each attempt's transaction identity.
-2. Source USDC debit, source/destination ETH ceilings, withheld-USDC cap,
-   intermediate Arbitrum receipt and final Hyperliquid credit are all visible.
-   A source receipt or a changed balance alone cannot complete the transfer.
-3. Pending attestation, destination gas shortage and account-credit delay keep
-   the plan incomplete with a specific next action. Restart/status reads retain
-   the original source burn and pending submission identities.
-4. An expired or cancelled plan cannot submit another write. Read-only status
-   and recovery retain access to prior evidence. Inspect `gofin plans cancel
-   PLAN_ID` only when deliberately stopping future steps; already-submitted
-   transactions still need reconciliation.
-
-## Agent-facing flow
-
-The compiled discovery schemas define the exact command fields.
-Use existing `read`, `preview`, `execute`, `authorizations`, `status`, and
-`operations` command patterns rather than a parallel CLI workflow.
-
-1. `bridge.quotes` is a read. Accept a source wallet, source/destination chains,
-   exact source asset, recipient, exact acceptable destination assets, input
-   quantity or quantity range, and optional output/fee/time preferences.
-2. Return normalized, broker-owned quotes and explicit provider coverage or
-   failures. A quote includes provider/route identity; exact input and output
-   assets; gross debit; expected and minimum net receipt; gas and provider fees
-   with units and payer; approval steps; timing estimate and finality rule;
-   source and destination settlement policy; refund terms; observation time;
-   validity; and executable versus indicative
-   classification. The returned settlement policy gives source and destination
-   confirmation/finality rules; source and destination follow network configuration.
-   Arbitrum and Robinhood require a successful receipt included in one canonical
-   sequencer-produced block; RPC finality is not required. Provider
-   arrival estimates describe timing, not finality. Unknown
-   values stay unknown. Quotes do not reserve funds or
-   authorize spending.
-3. The LLM chooses a quote and whether to involve the human in route selection.
-   GoFin does not silently choose another route. With one enabled provider, a
-   valid response may contain one quote; do not imply a market-wide comparison.
-4. `bridge.transfer` preview refers to that stored quote plus selected bounds.
-   The broker resolves physical identities, validates it independently, estimates
-   its finite steps, and explains the requested financial authority.
-5. Execute under exact step approval, or the explicitly supported bounded
-   authorization for this one transfer. Touch ID authorizes the financial intent;
-   conversation approval of a route grants no execution authority.
-6. Status reconciles source deposit, destination credit or refund, and costs.
-   Return step references and concrete next actions after partial completion.
-   For nominated Relay plans between reviewed native-ETH networks, the verified
-   source principal minus the verified final payout can establish a withheld
-   cost. `settlement_accounting` records this cost once, separately from the
-   immutable settlement proof, without reducing the already-net credit again.
-   Quoted fees alone and cross-token amount differences do not establish an
-   actual cost.
-
-Add provider implementations behind a small compiled `BridgeProvider` contract:
-capabilities, quote, validate/prepare, and reconcile. Aggregation preserves
-provider failures and deterministic quote identity. A future provider can be
-queried concurrently without changing the public financial contract.
-
-## Acceptable ranges and quote refresh
-
-Fixed fields bind the physical signer, recipient, source/destination chains and
-asset identities, provider, protocol/depository/spender, permitted step types,
-and explicitly allowed refund destinations/assets. Route identity excludes an
-individual quote's order ID, gas estimate, salt, observation time, and price.
-Changing a fixed identity requires new authorization even if the amounts fit.
-
-Exact quantities remain the default. An optional `BridgeBounds` permits:
-
-- An input interval with an exact atomic upper debit cap. USD-denominated intents
-  such as "about $10 ETH" also specify a USD interval; fresh pricing resolves a
-  concrete atomic quantity before dispatch. Never infer a tolerance from "about".
-- A minimum net destination quantity, and optionally a minimum output/input
-  ratio when input can vary. Convert scales explicitly and round conservatively.
-  An expected-output interval is a quote preference; receipt above its upper
-  end is beneficial surplus, not a failed settlement.
-- Cumulative fee caps per asset, distinguishing gas, additional debits, and fees
-  withheld from output. Optional total USD caps and price intervals use fresh
-  `gofin-pricing` evidence, with exact asset identity. Never use Relay's USD fields
-  as independent policy pricing or assume stablecoin parity.
-- An authorization duration and acceptable protocol deadline/timing preference.
-  An estimated arrival time is not an enforceable promise of chain completion.
-
-Reuse `gofin-domain::boundaries::BoundarySpec` and the engine's grant ownership,
-revocation, consumed authority, and candidate supersession. Extend the adapter
-opt-in hooks for bridging; current bounded Binance support does not already
-authorize EVM writes or multiple steps.
-
-There are three independent clocks: quote validity, authorization validity, and
-transfer settlement. Refreshing an expired quote does not require Touch ID when
-all fixed fields and bounds still hold, the grant remains valid, and no source
-deposit is submitted or uncertain. Recompute the new protocol order and concrete
-transaction, then atomically supersede the unsubmitted candidate. Its new order
-ID is an execution identity, not a widened financial intent. Keep spent fees and
-approval effects from earlier steps; refresh does not reset consumption.
-
-After an approval transaction settles, only rebuild remaining unsubmitted steps;
-an unchanged sufficient allowance need not be written again. A submitted source
-deposit is always reconciled under its original hash/order ID. Provider-side
-repricing after deposit does not authorize another GoFin deposit or weaker receipt
-floor. Out-of-bounds candidates return structured violations. The LLM can seek a
-different in-bounds candidate without reauthorization; accepting broader bounds
-or renewing an expired grant requires fresh Touch ID. Restart cannot auto-submit.
-
-One transfer grant can cover only its declared finite approval/reset/deposit
-steps and cumulative authority. It cannot approve the Binance buy, withdrawals,
-another bridge, general wallet writes, or an entire cross-system workflow.
-Allowance-reset gas and already-submitted approvals remain charged even when
-the bridge deposit is not sent. Revocation stops future writes, not external
-settlement; any allowance cleanup needs its own explicit authority.
+Delayed attestations and insufficient destination gas leave the original action pending. Follow the returned `operations continue` arguments when a stage can advance. If remaining native terms or the action deadline must change, use the returned reauthorization path with explicit revised terms and new approval; successful stages and their costs remain bound and never repeat. Response loss or restart reconciles the original transaction and message instead of sending another burn. Named plans and bounded grants are retired for new writes; their original submitted identities remain observable.
 
 ## Relay order and payment validation
 
@@ -508,92 +184,17 @@ record the upstream revision and compare against independent SDK-generated
 vectors. Do not add a Node subprocess to the protected execution runtime.
 Treat new protocol versions as unsupported until their semantics are understood.
 
-## Transfer lifetime and accounting
+## Transfer lifetime and observation
 
-Persist a versioned `BridgeTransfer` above immutable operation records. Store
-intent/bounds, grant reference, quote revisions, step dependencies, source and
-destination assets, and provider/order identities. Each approval, deposit, or
-later authorized recovery write has its own existing operation/submission record.
-Do not weaken SQLite's one-submission-per-operation invariant.
+A versioned `BridgeTransfer` persists the approved native terms, quote revisions, immutable stage identities, original submissions and source/destination proof. A source debit is represented as nonspendable transit until correlated destination credit or refund is established. Pending or uncertain submissions retain their original identity; a status read observes evidence and never signs or submits a stage.
 
-Suggested public states: `prepared`, `approval_pending`, `source_pending`,
-`in_transit`, `destination_pending`, `completed`, `refund_pending`, `refunded`,
-`failed`, and `needs_attention`. Quote/grant expiration affects permission to
-dispatch, not the identity or reconciler of an already submitted transfer.
-Expose settled steps and remaining work without marking the whole transfer done.
+Relay status supplies transaction candidates, not proof of usable receipt. The broker verifies exact chain, order correlation, recipient, asset, amount, canonical inclusion and configured finality. A balance increase or unrelated matching transfer is insufficient. Partial credit, reorganization, underpayment or missing correlation stays unresolved. Provider failure alone does not prove a refund. Relay's [refund documentation](https://docs.relay.link/references/api/api_core_concepts/refunds) describes deductions and conditions that can prevent one; review the permitted refund assets and the principal at risk before approval.
 
-Verify source deposit inclusion using the configured EVM finality rules. Release
-its wallet transaction lock once that step's debit and costs are proven; keep the
-bridge transfer unresolved and retain its unresolved financial budget. This
-lets the same Ethereum wallet fund the other test legs while Relay settles.
-Unknown source submission retains the source lock and reservation. Do not
-blindly relax `ordinary_policy`'s current unresolved-resource conflict check.
+The public operation outcome distinguishes execution, transfer progress, attention and reporting completeness. A submitted stage failure does not erase verified source or destination facts. When verified effects exceed an approved expectation, the action reports the execution and discrepancy; missing reporting data does not convert a verified execution into an unknown transaction. Separate source and destination observations retain prior verified facts when a later provider read is unavailable.
 
-Represent proven principal as non-spendable funds in transit tied to the transfer.
-Prefer existing generic resource/transfer/conversion/cost effects with an explicit
-transit resource classification; add generic typed effects only where needed.
-The shared ledger must contain no Relay-specific branches. Source debit,
-destination credit, provider deductions, source gas, and refunds settle once,
-with proof identity and idempotent digest. A bookkeeping transition into/out of
-transit must not charge the same principal twice against a grant or rolling
-allocation. Preserve its unresolved budget beyond 24 hours until reconciled.
-Introduce an explicit transfer allocation owner: atomically hand unresolved
-reservation ownership from the deposit operation to the transfer after source
-proof. Policy counts the operation or its transfer owner once, including after
-restart and the 24-hour boundary; it must not sum both records or release both.
+## Components and presentation
 
-Relay status supplies transaction candidates, not proof of usable receipt.
-Verify correlated on-chain settlement/refund evidence, exact chain, recipient,
-asset, amount, canonical inclusion and configured finality through GoFin's RPCs.
-A balance increase or unrelated matching transfer is insufficient. Partial credit,
-reorg, underpayment, or missing correlation stays unresolved with evidence.
-Do not promise a bridge pass from a transaction hash or Relay `success` alone.
-
-Set `refundTo` explicitly. Relay's [refund documentation](https://docs.relay.link/references/api/api_core_concepts/refunds)
-describes deductions and conditions that can prevent a refund. Returned orders
-can permit zero-minimum refunds and multiple refund assets/chains. Disclose the
-actual permitted paths and refund floor; a successful-fill fee cap does not
-guarantee the same cap on refund loss. Bound source principal at risk, require
-acceptable refund terms before deposit, and account for actual loss/cost with
-proof. Provider `failure` alone does not prove all financial effects are settled.
-
-## Crates and code ownership
-
-| Component | Planned change |
-| --- | --- |
-| `gofin-bridge` | Typed intents/quotes/bounds, provider interface, normalized plans, Relay HTTP/order/proof implementation, and the narrow canonical Inbox provider. |
-| `gofin-domain` | Minimal shared transfer/transit contracts and generic accounting additions, preserving exact identities and existing boundary contracts. |
-| `gofin-engine` | Finite bridge grant dispatch, step dependencies, consumed/reserved authority, and separation of transaction locks from unresolved transfer budget. |
-| `gofin-store` | Additive transfer, quote-revision, step-link and proof persistence; atomic effect/grant/budget settlement; migrations preserve all pending operations. |
-| `gofin-evm` | Reuse Alloy, frozen envelopes, gas bounds, nonce serialization, signing and receipt mechanics. Extract reusable hooks where necessary; no second wallet runtime. |
-| `gofin-broker` | Compose reviewed networks/provider, resolve wallet aliases, persist quotes, own source/destination observers and concise trusted summaries. No agent-selected endpoints. |
-| `gofin-pricing` | Reuse fresh exact identity pricing; no provider-priced or symbol-priced shortcut. |
-| `gofin-discovery`, `gofin-cli`, `gofin-protocol`, `gofin-presentation` | Typed discovery and wire contracts, existing command flow, quote/status views and machine errors. No financial logic in the client. |
-| `gofin-authorization`, native helper | Reuse real OS authorization and compact presentation; add bridge display cases rather than another approval popup. |
-
-Dependencies point from the adapter to shared contracts and `gofin-evm`, and from
-broker composition to the adapter. Domain/engine/store never import `gofin-bridge`.
-The bridge library runs inside the protected broker, not a new service. Split a
-provider into its own crate later only if its size/dependencies warrant it.
-
-## Touch ID and terminal experience
-
-Carry forward latest main's deposit UX: sanitized wallet/account aliases,
-readable network names, shortened addresses only when aliases are absent, and
-short material financial clauses. A bridge reason names amount/range, route,
-Relay, minimum receipt and maximum fee; full review includes expiry, allowance,
-refund limitations and exact technical bindings. The selected transfer grant's
-scope must remain clear. Example wording is illustrative, not a current prompt:
-
-> Bridge 10 USDC: dev-wallet Ethereum → Arbitrum via Relay. Receive ≥9.95 USDC. Max fees $0.50.
-
-Reuse native complete-clause shortening and explicit reference to terminal
-details for oversized text. Preserve complete amounts and caps; do not reuse
-deposit-only prefix stripping for a bridge without dedicated display tests.
-Keep the OS Touch ID dialog as the only approval popup. JSON output stays quiet
-and structured while OS authorization still applies. Report quote refresh,
-approval expiry, destination waiting and refund waiting distinctly. Authorization
-expiry never triggers an automatic consent renewal or replay.
+`gofin-bridge` defines provider intents, bounds and proofs; `gofin-broker` composes the configured providers and observers. `gofin-engine` enforces the reviewed action and stage authority, while `gofin-store` persists original identities and atomic stage admissions. `gofin-evm` supplies the signed envelope and receipt mechanics. The CLI presents the reviewed amount, route, receipt floor, native fees and expiry; the protected broker independently validates them. The existing OS authorization prompt remains the only financial approval dialog.
 
 ## Base provider extension
 
@@ -601,9 +202,8 @@ expiry never triggers an automatic consent renewal or replay.
 supports ETH and independently verified StandardBridge ERC-20 pairs in both
 directions. Source proof creates nonspendable transit; destination proof must
 establish exact messenger/bridge correlation and usable credit. Withdrawals
-expose separate persisted initiation, proof and finalization stages under exact
-or named-plan authority, using current portal/game readiness and cumulative fee
-budgets. Recovery preserves original message identity and all consumed costs.
+expose separate persisted initiation, proof and finalization stages under a native compound action, using current portal/game readiness and cumulative fee
+bounds. Recovery preserves original message identity and all consumed costs.
 `bridge.routes` discovers indicative provider candidates without a quote or
 financial authority. See [Base verification](testing/base.md) for the deployed
 contract references, test matrix and evidence boundaries.

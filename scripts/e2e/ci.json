@@ -1,0 +1,77 @@
+{
+  "core": [
+    "cli.discovery",
+    "cli.wallet-generation"
+  ],
+  "exchange": [
+    "binance-spot",
+    "binance-usdm-main",
+    "binance-usdm-subaccount",
+    "kraken-spot",
+    "kraken-perpetual",
+    "coinbase-advanced",
+    "coinbase-exchange-orders",
+    "coinbase-international-orders",
+    "hyperliquid-spot",
+    "hyperliquid-perpetual",
+    "kraken-funding-v1"
+  ],
+  "evm": [
+    "morpho-v2-ethereum",
+    "aave-v3-ethereum-core",
+    "uniswap-api-amm",
+    "uniswap-api-uniswapx",
+    "sushi-v3",
+    "ramses-v3"
+  ],
+  "bridge": [
+    "relay-ethereum-solana",
+    "relay-solana-ethereum",
+    "canonical-ethereum-arbitrum",
+    "canonical-ethereum-robinhood",
+    "canonical-ethereum-base",
+    "canonical-base-ethereum",
+    "cctp-base-arbitrum",
+    "cctp-arbitrum-base",
+    "cross-provider-four-actions"
+  ],
+  "solana": [
+    "jupiter-swaps",
+    "jupiter-perpetuals",
+    "jupiter-quote-expiry-cli"
+  ],
+  "papertrade": [
+    "papertrade-liquidation-stake-claim",
+    "papertrade-long-close"
+  ],
+  "outcome": [
+    "outcome.identity-recovery",
+    "outcome.a5",
+    "outcome.a26",
+    "outcome.a6",
+    "outcome.a23",
+    "outcome.a2",
+    "outcome.a3",
+    "outcome.a1",
+    "outcome.a22",
+    "outcome.a7",
+    "outcome.a18",
+    "outcome.a17",
+    "outcome.a25",
+    "outcome.a24",
+    "outcome.a8",
+    "outcome.a10",
+    "outcome.a4",
+    "outcome.a21",
+    "outcome.a20",
+    "outcome.a12",
+    "outcome.a9",
+    "outcome.a13",
+    "outcome.coinbase-unresolved",
+    "outcome.a14",
+    "outcome.a19",
+    "outcome.a16",
+    "outcome.a15",
+    "outcome.a11"
+  ]
+}

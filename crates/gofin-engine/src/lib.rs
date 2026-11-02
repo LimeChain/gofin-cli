@@ -8,30 +8,33 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gofin_domain::boundaries::{
     self, BoundaryAttemptSummary, BoundaryAuthorization, BoundaryAuthorizationRecord,
-    BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundarySpec,
-    BoundaryStatus, BoundaryViolation,
+    BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundaryStatus,
 };
-use gofin_domain::financial_plans::{
-    FinancialPlanAuthorizationRecord, FinancialPlanAuthorizationStatus, FinancialPlanRevision,
-};
+use gofin_domain::financial_plans::{FinancialPlanAuthorizationRecord, FinancialPlanRevision};
 use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
     CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, ExecutionActor,
     FinancialEffect, FinancialIntent, GoFinError, LiquidityPositionEvidence, OperationKind,
     OperationRecord, OperationRequest, PlanStep, PositionAnchor, PositionAnchorBaseline,
-    PositionAnchorPredecessor, PositionKind, PreparationContext, PreparedOperation, ProjectedCash,
-    ProjectedEffect, ProjectedPosition, ProjectedRequirement, ProjectedState, QuantityInterval,
-    Reconciliation, RecoveryBinding, ResourceAmount, ResourceId, Result, ReturnRouteContext,
-    ReturnRouteProof, SnapshotScope, StateSnapshot, Status, Submission, SubmissionJournal,
-    VerifiedEffects, authorization_binding, binding_hash, now, request_fingerprint,
-    verified_effect_digest,
+    PositionAnchorPredecessor, PositionKind, PreparationContext, PreparedOperation, Reconciliation,
+    RecoveryBinding, ResourceAmount, ResourceId, Result, ReturnRouteProof, SnapshotScope,
+    StateSnapshot, Status, Submission, SubmissionJournal, VerifiedEffects, authorization_binding,
+    binding_hash, now, request_fingerprint, verified_effect_digest,
 };
+#[cfg(test)]
+use gofin_domain::{
+    ProjectedCash, ProjectedEffect, ProjectedPosition, ProjectedRequirement, ProjectedState,
+    QuantityInterval,
+};
+#[cfg(test)]
+use gofin_store::CashReservationCapacity;
 use gofin_store::{
-    CashReservationCapacity, ProgressSettlement, RecoveryReport, ReservationRow, Settlement,
-    SharedStore, Store, StoreError, SubmissionRow,
+    RecoveryReport, ReservationRow, Settlement, SharedStore, Store, StoreError, SubmissionRow,
 };
-use num_bigint::{BigInt, BigUint, Sign};
+#[cfg(test)]
+use num_bigint::Sign;
+use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -47,8 +50,9 @@ mod baseline_anchors;
 mod boundary_authorizations;
 pub use boundary_authorizations::boundary_approval_review;
 #[cfg(test)]
-mod boundary_dispatch_tests;
+mod bridge_historical_fee_tests;
 mod cash_reservation_sources;
+mod compound_driver;
 mod compound_mutations;
 mod conversion_sequences;
 #[cfg(test)]
@@ -71,14 +75,18 @@ mod mutation_batches;
 mod operation_resolutions;
 mod ordinary_policy;
 mod partial_proofs;
+#[cfg(test)]
+mod projected_provenance;
+#[cfg(test)]
+mod projected_shares;
 mod reservation_overrides;
-mod unresolved_consumption;
 #[cfg(test)]
 mod vault_observation_tests;
+use financial_plans::plan_error;
+#[cfg(test)]
+use gofin_domain::boundaries::BoundarySpec;
+#[cfg(test)]
 use ordinary_policy::reject_unpriced_run;
-mod projected_provenance;
-mod projected_shares;
-use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
 
 /// In-process evidence age, never restored from a persisted preview. Both clocks
 /// are checked so clock rollback cannot extend a candidate's reuse window.
@@ -126,6 +134,24 @@ fn observed_within_reuse_window(
     };
     let age = now.signed_duration_since(observed_at.with_timezone(&Utc));
     age >= chrono::Duration::zero() && age < window
+}
+
+fn execution_preparation_reuse_window(
+    adapter: &dyn Adapter,
+    prepared: &PreparedOperation,
+    has_boundary: bool,
+    has_plan: bool,
+) -> Option<std::time::Duration> {
+    adapter.preparation_reuse_window(prepared).or_else(|| {
+        // Only standalone execution guarantees another full revalidation under
+        // the resource lock before admission. Other routes retain their prior
+        // evidence contract, even when their metadata is stripped for adapters.
+        if !has_boundary && !has_plan {
+            adapter.pre_admission_reuse_window(prepared)
+        } else {
+            None
+        }
+    })
 }
 
 const DEFAULT_LIMIT_MICROS: u64 = gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
@@ -340,14 +366,14 @@ pub struct RunConversionDelta {
     pub atoms: gofin_domain::SignedQuantity,
 }
 
+#[derive(Clone)]
 pub struct Engine {
     store: Arc<Mutex<Store>>,
-    adapters: RwLock<HashMap<String, Arc<dyn Adapter>>>,
+    adapters: Arc<RwLock<HashMap<String, Arc<dyn Adapter>>>>,
     authorizer: Arc<dyn gofin_domain::Authorizer>,
+    #[cfg(test)]
     options: EngineOptions,
     cost_origin_price_provider: Option<Arc<dyn TrustedAssetPriceProvider>>,
-    write_queue: AsyncMutex<()>,
-    instance_id: uuid::Uuid,
     clock: Arc<dyn gofin_domain::clock::Clock>,
 }
 
@@ -357,7 +383,6 @@ pub struct Engine {
 /// intentionally non-serializable and cannot be constructed or cloned by a
 /// caller, so a `RunPlan.baseline` never becomes an authority source.
 pub struct ObservedBaseline {
-    engine_id: uuid::Uuid,
     snapshot: StateSnapshot,
 }
 
@@ -435,24 +460,15 @@ impl Engine {
                 }
             }
         }
-        store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .recover_boundary_authorization_requests(&now())
-            .map_err(map_store)?;
-        store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .recover_financial_plan_requests(&now())
-            .map_err(map_store)?;
+        #[cfg(not(test))]
+        let _ = options;
         Ok(Self {
             store,
-            adapters: RwLock::new(registry),
+            adapters: Arc::new(RwLock::new(registry)),
             authorizer,
+            #[cfg(test)]
             options,
             cost_origin_price_provider: None,
-            write_queue: AsyncMutex::new(()),
-            instance_id: uuid::Uuid::new_v4(),
             clock: Arc::new(gofin_domain::clock::SystemClock),
         })
     }
@@ -631,6 +647,7 @@ impl Engine {
                 "Use the read or configuration command for this operation.",
             ));
         }
+        self.reject_owned_bridge_transfer(operation, input)?;
         let context = self.preparation_context(run_id)?;
         gofin_domain::execution_progress::emit(gofin_domain::execution_progress::Stage::Preparing);
         let linked = self.amendment_preparation_context(input)?;
@@ -826,46 +843,31 @@ impl Engine {
         Ok(snapshot)
     }
 
-    /// Capture an observer-owned baseline for a trusted broker to inspect
-    /// before it values a run. The capture remains bound to this engine and
-    /// must be consumed; it is not a serializable or caller-constructible
-    /// replacement for the ordinary observer path.
-    pub async fn observe_run_baseline(&self, operation: &str) -> Result<ObservedBaseline> {
-        Ok(ObservedBaseline {
-            engine_id: self.instance_id,
-            snapshot: self.snapshot(operation).await?,
-        })
+    pub async fn observe_run_baseline(&self, _operation: &str) -> Result<ObservedBaseline> {
+        Err(retired_execution_interface())
     }
 
     /// Begin a bounded run using only a snapshot obtained by the registered adapter.
     /// The caller-provided `RunPlan.baseline` is replaced by the observer result.
     pub async fn begin_run_from_observer(
         &self,
-        operation: &str,
-        plan: RunPlan,
-        now_instant: DateTime<Utc>,
+        _operation: &str,
+        _plan: RunPlan,
+        _now_instant: DateTime<Utc>,
     ) -> Result<RunResult> {
-        self.begin_run_from_observer_with_asset_prices(operation, plan, vec![], now_instant)
-            .await
+        Err(retired_execution_interface())
     }
 
     /// Begin a run with baseline and prices supplied by trusted broker services.
     /// Any corresponding values in the client plan are replaced before route proof.
     pub async fn begin_run_from_observer_with_asset_prices(
         &self,
-        operation: &str,
-        plan: RunPlan,
-        trusted_asset_prices: Vec<AssetPrice>,
-        now_instant: DateTime<Utc>,
+        _operation: &str,
+        _plan: RunPlan,
+        _trusted_asset_prices: Vec<AssetPrice>,
+        _now_instant: DateTime<Utc>,
     ) -> Result<RunResult> {
-        let observed = self.observe_run_baseline(operation).await?;
-        self.begin_run_from_observed_baseline_with_asset_prices(
-            observed,
-            plan,
-            trusted_asset_prices,
-            now_instant,
-        )
-        .await
+        Err(retired_execution_interface())
     }
 
     /// Consume a baseline captured by this exact engine instance. This method
@@ -874,66 +876,12 @@ impl Engine {
     /// prove a complete route. Untrusted plan data is still overwritten.
     pub async fn begin_run_from_observed_baseline_with_asset_prices(
         &self,
-        observed: ObservedBaseline,
-        mut plan: RunPlan,
-        trusted_asset_prices: Vec<AssetPrice>,
-        now_instant: DateTime<Utc>,
+        _observed: ObservedBaseline,
+        _plan: RunPlan,
+        _trusted_asset_prices: Vec<AssetPrice>,
+        _now_instant: DateTime<Utc>,
     ) -> Result<RunResult> {
-        if observed.engine_id != self.instance_id {
-            return Err(GoFinError::new(
-                "OBSERVER_CAPTURE_INVALID",
-                "budget",
-                "The baseline capture was not created by this engine instance.",
-                "Capture a fresh baseline through the broker connected to this engine.",
-            ));
-        }
-        plan.baseline = observed.snapshot;
-        let validation_now = current_validation_time(now_instant);
-        validate_observation(&plan.baseline.observed_at, validation_now, "STALE_BASELINE")?;
-        let resources_covered = snapshot_resources_covered(&plan.baseline);
-        if !plan.baseline.complete
-            || plan.baseline.coverage.is_empty()
-            || !plan.baseline.pending.is_empty()
-            || !plan.baseline.state.in_flight.is_empty()
-            || !resources_covered
-        {
-            // Pending entries may contain private resource identities. Expose
-            // only bounded fixed-format observer codes, never the raw entries.
-            let observer_codes = plan
-                .baseline
-                .pending
-                .iter()
-                .filter_map(|entry| entry.strip_prefix("observer:"))
-                .filter(|code| {
-                    !code.is_empty()
-                        && code.len() <= 64
-                        && code
-                            .bytes()
-                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-                })
-                .take(8)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(GoFinError::new(
-                "INCOMPLETE_BASELINE",
-                "budget",
-                format!(
-                    "Authoritative snapshot refused: complete={}, coverage_count={}, pending_count={}, in_flight_count={}, resources_covered={}, observer_codes=[{}].",
-                    plan.baseline.complete,
-                    plan.baseline.coverage.len(),
-                    plan.baseline.pending.len(),
-                    plan.baseline.state.in_flight.len(),
-                    resources_covered,
-                    observer_codes,
-                ),
-                "Reconcile pending activity and retry a complete broker-captured snapshot before route preparation.",
-            ));
-        }
-        plan.asset_prices = trusted_asset_prices;
-        plan.route_proofs = self.preflight_run_plan(&plan, validation_now).await?;
-        self.begin_run(plan, current_validation_time(validation_now))
+        Err(retired_execution_interface())
     }
 
     /// Replace only the unexecuted route suffix using a newly observed state
@@ -941,283 +889,13 @@ impl Engine {
     /// ceiling remain immutable; this method never authorizes or submits a write.
     pub async fn replan_remaining_from_observer(
         &self,
-        run_id: &str,
-        observer_operation: &str,
-        replacement_steps: Vec<PlanStep>,
-        trusted_asset_prices: Vec<AssetPrice>,
-        now_instant: DateTime<Utc>,
+        _run_id: &str,
+        _observer_operation: &str,
+        _replacement_steps: Vec<PlanStep>,
+        _trusted_asset_prices: Vec<AssetPrice>,
+        _now_instant: DateTime<Utc>,
     ) -> Result<RunResult> {
-        if replacement_steps.is_empty() {
-            return Err(route_proof_error());
-        }
-        if trusted_asset_prices
-            .iter()
-            .any(gofin_domain::unpriced::is_estimate)
-        {
-            return Err(GoFinError::new(
-                "UNPRICED_ASSET",
-                "budget",
-                "A scoped acceptance return plan requires verified USD prices.",
-                "Preserve the run and use a fully priced return plan.",
-            ));
-        }
-        let mut run = self.load_run(run_id)?;
-        if run.status == RunStatus::Restored || !run.reservations.is_empty() {
-            return Err(GoFinError::new(
-                "RUN_PENDING",
-                "budget",
-                "A route can be revised only when the run has no unresolved operation.",
-                "Reconcile every original submission before revising its remaining return path.",
-            ));
-        }
-        let prefix_len = run.settled_route_steps.len();
-        if run
-            .settled_route_steps
-            .iter()
-            .enumerate()
-            .any(|(index, step)| *step as usize != index)
-            || prefix_len > run.route_proofs.len()
-        {
-            return Err(route_proof_error());
-        }
-        let current = self.snapshot(observer_operation).await?;
-        let snapshot_validation_now = current_validation_time(now_instant);
-        validate_observation(
-            &current.observed_at,
-            snapshot_validation_now,
-            "STALE_BASELINE",
-        )?;
-        if !current.complete
-            || current.coverage.is_empty()
-            || !current.pending.is_empty()
-            || !current.state.in_flight.is_empty()
-            || !snapshot_resources_covered(&current)
-        {
-            return Err(GoFinError::new(
-                "INCOMPLETE_BASELINE",
-                "budget",
-                "A fresh complete observation with no unresolved operation is required to revise a return route.",
-                "Reconcile pending work and capture complete broker-observed state before replanning cleanup.",
-            ));
-        }
-        let mut state = projected_state_with_cash(&current, &run.available)?;
-        let mut proofs = run.route_proofs[..prefix_len].to_vec();
-        let old_steps = run
-            .planned_operations
-            .iter()
-            .chain(run.unwind.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        if old_steps.len() != run.route_proofs.len() || prefix_len > old_steps.len() {
-            return Err(route_proof_error());
-        }
-        let superseded_steps = old_steps[prefix_len..].to_vec();
-        let superseded_proofs = run.route_proofs[prefix_len..].to_vec();
-        let used_cost = parse_uint(&run.spent_cost_usd_micros)?;
-        let total_cost = parse_uint(&run.return_cost_reserve_usd_micros)?;
-        let mut remaining_cost = if used_cost > total_cost {
-            return Err(route_proof_error());
-        } else {
-            total_cost - used_cost
-        };
-        let allocations = run
-            .allocations
-            .iter()
-            .map(|allocation| allocation.holding.clone())
-            .collect::<Vec<_>>();
-        let mut new_proofs = Vec::with_capacity(replacement_steps.len());
-        for (offset, step) in replacement_steps.iter().enumerate() {
-            let maximum_fee = parse_uint(&step.maximum_fee_usd_micros)?;
-            if maximum_fee > remaining_cost {
-                return Err(GoFinError::new(
-                    "RETURN_ROUTE_COST_BUDGET",
-                    "budget",
-                    "The revised remaining route exceeds the original run's unspent cost reserve.",
-                    "Keep the revised cleanup route within the original cost ceiling.",
-                ));
-            }
-            let (adapter, kind) = self.resolve(&step.operation)?;
-            if kind != OperationKind::Write {
-                return Err(route_proof_error());
-            }
-            let index = prefix_len + offset;
-            let context = ReturnRouteContext {
-                baseline: run.baseline.clone(),
-                projected: state.clone(),
-                allocations: allocations.clone(),
-                step_index: u32::try_from(index).map_err(|_| route_proof_error())?,
-                prior_proofs: proofs.clone(),
-                asset_prices: trusted_asset_prices.clone(),
-                remaining_cost_budget_usd_micros: gofin_domain::Quantity::new(
-                    remaining_cost.to_string(),
-                )?,
-            };
-            let mut proof = adapter
-                .preflight_return_route(&step.operation, &step.input, &context)
-                .await
-                .map_err(|error| {
-                    route_step_error(error, index, &step.operation, "adapter preflight")
-                })?;
-            let proof_validation_now = current_validation_time(now_instant);
-            validate_route_proof(step, &proof, index, proof_validation_now).map_err(|error| {
-                route_step_error(error, index, &step.operation, "proof validation")
-            })?;
-            validate_route_fee_bound(step, &proof, &trusted_asset_prices, proof_validation_now)
-                .map_err(|error| route_step_error(error, index, &step.operation, "cost bound"))?;
-            validate_projected_requirements(
-                &state,
-                &proof,
-                &proofs,
-                index,
-                &run.available,
-                prefix_len,
-            )
-            .map_err(|error| {
-                route_step_error(error, index, &step.operation, "projected requirement")
-            })?;
-            include_costs_in_projected_cash(&mut proof).map_err(|error| {
-                route_step_error(error, index, &step.operation, "cost projection")
-            })?;
-            validate_projected_cash_legs(&state, &proof).map_err(|error| {
-                route_step_error(error, index, &step.operation, "cash flow attribution")
-            })?;
-            state = apply_projected_effects(&state, &proof.effects, index).map_err(|error| {
-                route_step_error(error, index, &step.operation, "projected effects")
-            })?;
-            proofs.push(proof.clone());
-            new_proofs.push(proof);
-            remaining_cost -= maximum_fee;
-        }
-        let validation_now = current_validation_time(now_instant);
-        validate_observation(&current.observed_at, validation_now, "STALE_BASELINE")?;
-        validate_price_rows(
-            &trusted_asset_prices,
-            &trusted_asset_prices
-                .iter()
-                .map(|price| price.asset.clone())
-                .collect(),
-            validation_now,
-        )?;
-        for (offset, proof) in new_proofs.iter().enumerate() {
-            let index = prefix_len + offset;
-            validate_route_proof(&replacement_steps[offset], proof, index, validation_now)?;
-            validate_route_fee_bound(
-                &replacement_steps[offset],
-                proof,
-                &trusted_asset_prices,
-                validation_now,
-            )?;
-        }
-        projected_provenance::replay_seeded_suffix(
-            &run.allocations,
-            &run.provenance,
-            &projected_state_with_cash(&current, &run.available)?,
-            &new_proofs,
-            &trusted_asset_prices,
-            &parse_uint(&run.return_cost_reserve_usd_micros)?,
-            prefix_len,
-        )?;
-        validate_projected_restoration(&run.baseline, &run.allocations, &state)?;
-        run.route_revisions.push(RouteRevision {
-            changed_at: now_instant.to_rfc3339(),
-            replaced_from_step: u32::try_from(prefix_len).map_err(|_| route_proof_error())?,
-            superseded_steps,
-            superseded_proofs,
-            replacement_steps: replacement_steps.clone(),
-            replacement_proofs: new_proofs,
-        });
-        run.planned_operations = old_steps[..prefix_len].to_vec();
-        run.unwind = replacement_steps;
-        run.route_proofs = proofs;
-        run.asset_prices = trusted_asset_prices;
-        run.route_invalidated = false;
-        self.save_run(&run)?;
-        Ok(run_result(&run))
-    }
-
-    async fn preflight_run_plan(
-        &self,
-        plan: &RunPlan,
-        now_instant: DateTime<Utc>,
-    ) -> Result<Vec<ReturnRouteProof>> {
-        let selected_cash = plan
-            .allocations
-            .iter()
-            .map(|allocation| allocation.holding.clone())
-            .collect::<Vec<_>>();
-        let mut state = projected_state_with_cash(&plan.baseline, &selected_cash)?;
-        let mut proofs = Vec::new();
-        let steps = plan
-            .planned_operations
-            .iter()
-            .chain(plan.unwind.iter())
-            .collect::<Vec<_>>();
-        let mut remaining_cost = parse_uint(&plan.return_cost_reserve_usd_micros)?;
-        let allocations = plan
-            .allocations
-            .iter()
-            .map(|allocation| allocation.holding.clone())
-            .collect::<Vec<_>>();
-        for (index, step) in steps.iter().enumerate() {
-            let maximum_fee = parse_uint(&step.maximum_fee_usd_micros)?;
-            if maximum_fee > remaining_cost {
-                return Err(GoFinError::new(
-                    "RETURN_ROUTE_COST_BUDGET",
-                    "budget",
-                    "The complete planned route exceeds its reserved execution-cost budget.",
-                    "Revise the complete forward and return route within the original cost reserve.",
-                ));
-            }
-            let (adapter, kind) = self.resolve(&step.operation)?;
-            if kind != OperationKind::Write {
-                return Err(GoFinError::new(
-                    "RETURN_ROUTE_NOT_WRITABLE",
-                    "budget",
-                    "Every planned route step must be a supported financial write.",
-                    "Remove unsupported steps and obtain a reviewed proof for every remaining route step.",
-                ));
-            }
-            let context = ReturnRouteContext {
-                baseline: plan.baseline.clone(),
-                projected: state.clone(),
-                allocations: allocations.clone(),
-                step_index: u32::try_from(index)
-                    .map_err(|_| GoFinError::validation("Too many planned route steps."))?,
-                prior_proofs: proofs.clone(),
-                asset_prices: plan.asset_prices.clone(),
-                remaining_cost_budget_usd_micros: gofin_domain::Quantity::new(
-                    remaining_cost.to_string(),
-                )?,
-            };
-            let mut proof = adapter
-                .preflight_return_route(&step.operation, &step.input, &context)
-                .await
-                .map_err(|error| {
-                    route_step_error(error, index, &step.operation, "adapter preflight")
-                })?;
-            let proof_validation_now = current_validation_time(now_instant);
-            validate_route_proof(step, &proof, index, proof_validation_now).map_err(|error| {
-                route_step_error(error, index, &step.operation, "proof validation")
-            })?;
-            validate_route_fee_bound(step, &proof, &plan.asset_prices, proof_validation_now)
-                .map_err(|error| route_step_error(error, index, &step.operation, "cost bound"))?;
-            validate_projected_requirements(&state, &proof, &proofs, index, &selected_cash, 0)
-                .map_err(|error| {
-                    route_step_error(error, index, &step.operation, "projected requirement")
-                })?;
-            include_costs_in_projected_cash(&mut proof).map_err(|error| {
-                route_step_error(error, index, &step.operation, "cost projection")
-            })?;
-            validate_projected_cash_legs(&state, &proof).map_err(|error| {
-                route_step_error(error, index, &step.operation, "cash flow attribution")
-            })?;
-            state = apply_projected_effects(&state, &proof.effects, index).map_err(|error| {
-                route_step_error(error, index, &step.operation, "projected effects")
-            })?;
-            proofs.push(proof);
-            remaining_cost -= maximum_fee;
-        }
-        Ok(proofs)
+        Err(retired_execution_interface())
     }
 
     /// Return only broker-held, previously verified position anchors.
@@ -1236,49 +914,18 @@ impl Engine {
                 positions: run.position_anchors,
             });
         }
-        let mut latest = BTreeMap::<String, PositionAnchor>::new();
-        for record in self.operations()? {
-            if excluded == Some(record.id.as_str()) {
-                continue;
-            }
-            if !matches!(
-                record.status,
-                Status::Completed | Status::Pending | Status::Submitted | Status::Unknown
-            ) {
-                continue;
-            }
-            let Some(verified) = &record.effects else {
-                continue;
-            };
-            if record.submission.as_ref() != Some(&verified.submission)
-                || verified.evidence_version == 0
-                || verified.proof_digest != verified_effect_digest(verified)?
-            {
-                continue;
-            }
-            for effect in &verified.effects {
-                let anchor = match effect {
-                    FinancialEffect::PositionChange { anchor, .. }
-                    | FinancialEffect::DebtChange { anchor, .. } => anchor.as_ref(),
-                    _ => None,
-                };
-                if let Some(anchor) =
-                    anchor.filter(|a| a.evidence_version > 0 && !a.evidence.is_null())
-                {
-                    let key = position_anchor_key(anchor)?;
-                    let is_newer = latest.get(&key).is_none_or(|old| {
-                        DateTime::parse_from_rfc3339(&anchor.observed_at).ok()
-                            > DateTime::parse_from_rfc3339(&old.observed_at).ok()
-                    });
-                    if is_newer {
-                        latest.insert(key, anchor.clone());
-                    }
-                }
-            }
-        }
+        // Read only the materialized, verified position index. This avoids a
+        // history-wide preparation scan and can exclude the current operation's
+        // own partial proof while reconciling it.
+        let positions = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .current_position_anchors(excluded)
+            .map_err(map_store)?;
         Ok(PreparationContext {
             logical_operation_id: None,
-            positions: latest.into_values().collect(),
+            positions,
         })
     }
 
@@ -1308,11 +955,10 @@ impl Engine {
                 return Err(ambiguous_anchor());
             }
         }
-        // Historical anchors are authoritative. Preserve the exact anchors
-        // needed by this action in the operation's immutable reconciliation
-        // baseline, then capture only keys with no prior journal/run history.
-        // A newer snapshot must not erase accrued or otherwise recorded
-        // historical semantics.
+        // Preserve the selected anchors in the immutable reconciliation
+        // baseline, then observe only keys with no selected anchor. The merge
+        // normally prefers history; Binance futures candidates may bind their
+        // fresh native derivative observation instead.
         let mut anchors = historical
             .values()
             .filter(|anchor| {
@@ -1408,11 +1054,9 @@ impl Engine {
                     "observer_error_code": error.code,
                     "observer_error_stage": error.stage,
                 });
-                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error) {
-                    details
-                        .as_object_mut()
-                        .expect("details are an object")
-                        .extend(diagnostics);
+                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error)
+                    && let Some(object) = details.as_object_mut() {
+                    object.extend(diagnostics);
                 }
                 GoFinError::new(
                     "POSITION_BASELINE_OBSERVER_FAILED",
@@ -1607,6 +1251,18 @@ impl Engine {
             if !seen.insert(key.clone()) {
                 return Err(ambiguous_anchor());
             }
+            // This exact native observation was bound into the approved Binance
+            // futures candidate and persisted before dispatch. Reconciliation
+            // must use it even if the materialized history subsequently changes.
+            if let Some(preview) = &record.preview
+                && baseline_anchors::is_bound_fresh_binance_anchor(preview, anchor)?
+            {
+                context.positions.retain(|previous| {
+                    position_anchor_key(previous).ok().as_deref() != Some(key.as_str())
+                });
+                context.positions.push(anchor.clone());
+                continue;
+            }
             if let Some(previous) = historical.get(&key) {
                 let predecessor_matches_history = approved_predecessors.iter().any(|candidate| {
                     position_anchor_key(candidate).ok().as_deref() == Some(key.as_str())
@@ -1623,9 +1279,7 @@ impl Engine {
     }
 
     pub async fn execute(&self, request: OperationRequest) -> Result<OperationRecord> {
-        let _guard = self.write_queue.lock().await;
-        self.execute_serial(request, ExecutionRoute::Financial)
-            .await
+        Box::pin(self.execute_serial(request, ExecutionRoute::Financial)).await
     }
 
     /// Execute a reviewed human-only configuration candidate with its
@@ -1637,9 +1291,7 @@ impl Engine {
         request: OperationRequest,
         authorizer: Arc<dyn ConfigurationAuthorizer>,
     ) -> Result<OperationRecord> {
-        let _guard = self.write_queue.lock().await;
-        self.execute_serial(request, ExecutionRoute::Configuration(authorizer))
-            .await
+        Box::pin(self.execute_serial(request, ExecutionRoute::Configuration(authorizer))).await
     }
 
     async fn execute_serial(
@@ -1656,14 +1308,6 @@ impl Engine {
             ));
         }
         let (adapter, definition) = self.resolve_definition(&request.operation)?;
-        if definition.semantics["plan_only"] == true {
-            return Err(GoFinError::new(
-                "PLAN_REQUIRED",
-                "financial_plan",
-                "This operation can execute only as an approved named-plan step.",
-                "Review and authorize a plan that fixes its financial intent, then nominate the concrete route at step execution.",
-            ));
-        }
         match &route {
             ExecutionRoute::Financial
                 if definition.kind == OperationKind::Write
@@ -1703,14 +1347,16 @@ impl Engine {
                 return Err(map_store(StoreError::RequestConflict));
             }
             let original: OperationRecord = from_value(existing.record)?;
-            return if matches!(
-                original.status,
-                Status::Submitted | Status::Pending | Status::Unknown
-            ) {
-                self.reconcile_serial(original.id.clone()).await
-            } else {
-                Ok(original)
-            };
+            return self.status(&original.id, true).await;
+        }
+        self.reject_owned_bridge_transfer(&request.operation, &request.input)?;
+        if definition.semantics["plan_only"] == true
+            && !(request.operation == "bridge.execute" && request.input.get("intent").is_some())
+        {
+            return Err(retired_execution_interface());
+        }
+        if request.run_id.is_some() {
+            return Err(retired_execution_interface());
         }
         let timestamp = self.clock.now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
@@ -1774,18 +1420,10 @@ impl Engine {
         };
         if !created.created {
             let existing: OperationRecord = from_value(created.record)?;
-            return if matches!(
-                existing.status,
-                Status::Submitted | Status::Pending | Status::Unknown
-            ) {
-                self.reconcile_serial(existing.id.clone()).await
-            } else {
-                Ok(existing)
-            };
+            return self.status(&existing.id, true).await;
         }
 
         let mut record = initial;
-        #[cfg(not(test))]
         if request.run_id.is_some() {
             record.status = Status::Rejected;
             record.error = Some(GoFinError::new(
@@ -1797,9 +1435,9 @@ impl Engine {
             self.update_record(&record)?;
             return Ok(record);
         }
-        let result = self
-            .execute_new(adapter, &request, &mut record, None, None, None, route)
-            .await;
+        let result =
+            Box::pin(self.execute_new(adapter, &request, &mut record, None, route.clone(), None))
+                .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -1830,6 +1468,22 @@ impl Engine {
                     }
                 }
                 if !record.status.terminal() {
+                    let persisted_before_failure = self.load_record(&record.id)?;
+                    // Only this live execution path can attest that the
+                    // journal has no admitted submission. Historical missing
+                    // fields alone do not establish non-dispatch.
+                    let definitely_unsubmitted = record.submission.is_none()
+                        && self
+                            .store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .submission(&record.id)
+                            .map_err(map_store)?
+                            .is_none();
+                    if definitely_unsubmitted {
+                        record.last_reconciliation_evidence =
+                            Some(json!({"engine_predispatch_failure":true}));
+                    }
                     record.status = if record.submission.is_some() {
                         Status::Unknown
                     } else {
@@ -1837,7 +1491,25 @@ impl Engine {
                     };
                     record.error = Some(error);
                     record.updated_at = self.clock.now().to_rfc3339();
-                    if record.status.terminal() {
+                    let preapproval_retry = matches!(&route, ExecutionRoute::Financial)
+                        && definitely_unsubmitted
+                        && record.approval.is_none()
+                        && matches!(
+                            record.status,
+                            Status::Failed | Status::Rejected | Status::Expired
+                        );
+                    if preapproval_retry {
+                        self.store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .record_predispatch_failure_and_issue(
+                                &record.id,
+                                &to_value(&persisted_before_failure)?,
+                                &to_value(&record)?,
+                                &record.updated_at,
+                            )
+                            .map_err(map_store)?;
+                    } else if record.status.terminal() {
                         let run = self.release_unsubmitted_reservation(&record)?;
                         self.commit_terminal(
                             record.clone(),
@@ -1846,6 +1518,11 @@ impl Engine {
                             run.as_ref(),
                             None,
                         )?;
+                        if record.submission.is_none()
+                            && let Ok(mut store) = self.store.lock()
+                        {
+                            let _ = store.release_evm_nonce_if_unsubmitted(&record.id);
+                        }
                     } else {
                         self.update_record(&record)?;
                     }
@@ -1930,30 +1607,6 @@ impl Engine {
                 ));
             }
         }
-        if !prepared.intent.maximum_costs.is_empty() {
-            let valuation = prepared.valuation.as_ref().ok_or_else(cancellation_error)?;
-            let bounded_costs = prepared
-                .intent
-                .maximum_costs
-                .iter()
-                .map(|bound| FinancialEffect::Cost {
-                    location: bound.location.clone(),
-                    amount: bound.amount.clone(),
-                    category: "approved_cancellation_fee_bound".into(),
-                    treatment: bound.treatment.clone(),
-                })
-                .collect::<Vec<_>>();
-            if actual_cost_usd(&bounded_costs, valuation)?
-                > valuation.maximum_fee_usd_micros.integer()
-            {
-                return Err(GoFinError::new(
-                    "CANCELLATION_FEE_VALUATION_MISMATCH",
-                    "budget",
-                    "The cancellation fee reserve is worth more than its approved USD cost cap.",
-                    "Raise the explicit fee cap and obtain fresh approval before cancellation.",
-                ));
-            }
-        }
         Ok(true)
     }
 
@@ -1988,31 +1641,15 @@ impl Engine {
         {
             return Err(replacement_error());
         }
-        // A still-live child owns the unique replacement lease. A failed,
-        // unsubmitted child has no venue order and cannot overlap the parent.
-        let store = self
+        // Claim the exact parent atomically across processes. The store releases
+        // only terminal attempts proven to have no durable submission.
+        let mut store = self
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?;
-        for value in store.list_records().map_err(map_store)? {
-            let other: OperationRecord = from_value(value)?;
-            if other.id == child.id || other.id == parent.id {
-                continue;
-            }
-            let Some(other_preview) = &other.preview else {
-                continue;
-            };
-            let Some(other_replacement) =
-                gofin_domain::ReplacementBinding::from_prepared_binding(&other_preview.binding)?
-            else {
-                continue;
-            };
-            if other_replacement.parent_operation_id == parent.id
-                && !replacement_attempt_releases_lease(&other)
-            {
-                return Err(replacement_error());
-            }
-        }
+        store
+            .claim_replacement(&parent.id, &child.id, &replacement.parent_submission)
+            .map_err(map_store)?;
         Ok(Some(replacement))
     }
 
@@ -2094,19 +1731,14 @@ impl Engine {
         Ok(Some(recovery))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The durable request and each independently validated execution capability are passed explicitly."
-    )]
     async fn execute_new(
         &self,
         adapter: Arc<dyn Adapter>,
         request: &OperationRequest,
         record: &mut OperationRecord,
-        boundary: Option<BoundaryAuthorizationRecord>,
-        plan: Option<FinancialPlanAuthorizationRecord>,
         preprepared: Option<(PreparedOperation, PreparationStamp)>,
         route: ExecutionRoute,
+        existing_lease: Option<&gofin_store::execution_admission::StageInvocationLease>,
     ) -> Result<OperationRecord> {
         let definition = adapter
             .definitions()
@@ -2171,18 +1803,16 @@ impl Engine {
                 }
             },
         };
+        if matches!(&route, ExecutionRoute::Financial) {
+            stamp_mutation_baselines(&mut prepared, &linked, compound.as_ref())?;
+        }
         let has_venue_calculated_cost = prepared
             .intent
             .maximum_costs
             .iter()
             .any(|cost| cost.treatment == CostTreatment::VenueCalculatedAdditionalDebit);
         if has_venue_calculated_cost
-            && (request.run_id.is_some()
-                || boundary.is_some()
-                || !coinbase_venue_calculated_withdrawal(&prepared)
-                || plan.as_ref().is_some_and(|plan| {
-                    !exact_plan_covers_coinbase_venue_fee(plan, &record.id, &prepared)
-                }))
+            && (request.run_id.is_some() || !coinbase_venue_calculated_withdrawal(&prepared))
         {
             return Err(GoFinError::new(
                 "VENUE_CALCULATED_COST_SCOPE_UNSUPPORTED",
@@ -2191,208 +1821,133 @@ impl Engine {
                 "Use standalone exact approval or an exact-input named plan with explicit Coinbase fee consent and a finite reserve; scoped runs and boundary authorizations require finite fee caps.",
             ));
         }
-        let plan_attempt_hash = if let Some(plan) = &plan {
-            let linkage = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The durable plan attempt linkage is missing.",
-                        "Reconcile the original attempt before retrying.",
-                    )
-                })?;
-            let prepared_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &prepared,
-                    &plan.revision.plan_id,
-                    &plan.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if prepared_hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The prepared operation differs from the immutable plan attempt candidate.",
-                    "Preview the current candidate and submit a new attempt only after reconciliation.",
-                ));
-            }
-            self.validate_plan_candidate(
-                adapter.as_ref(),
-                &plan.revision,
-                &linkage.step_id,
-                &record.input,
-                &prepared.input,
-                &record.id,
-                &prepared,
-            )?;
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                validate_candidate_plan_caps(plan, &linkage.step_id, &prepared, &store)?;
-            }
-            financial_plans::inject_plan_marker(
-                &mut prepared,
-                plan,
-                &linkage.step_id,
-                prepared_hash.clone(),
-            )?;
-            Some(prepared_hash)
-        } else {
-            None
-        };
-        let boundary_attempt_hash = if let Some(boundary) = &boundary {
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &request.operation,
-                &prepared,
-                &boundary.authorization.expires_at,
-            )?;
-            adapter.validate_boundary_candidate(&boundary.authorization.spec, &prepared)?;
-            validate_candidate_caps(&boundary.authorization, &prepared)?;
-            prepared.summary = boundary.authorization.spec.summary.clone();
-            let attempt_hash = binding_hash(&boundaries::attempt_binding(&prepared))?;
-            inject_boundary_marker(&mut prepared, &boundary.authorization, attempt_hash.clone())?;
-            Some(attempt_hash)
-        } else {
-            None
-        };
-        let required_cost_origins =
-            self.cost_origin_assets(&prepared, request.run_id.as_deref())?;
-        self.complete_cost_origin_prices(&mut prepared, &required_cost_origins)
-            .await?;
         validate_prepared(&prepared, &request.operation, self.clock.now())?;
+        let compound_action = adapter.is_compound_action(&prepared);
+        if compound_action && !gofin_domain::execution_progress::invocation_context_present() {
+            return Err(GoFinError::validation(
+                "Compound execution requires an active foreground invocation.",
+            ));
+        }
         record.position_baseline = self
             .capture_position_baseline(&record.id, &prepared, &context)
             .await?;
+        // Pre-approval observations can outlive a concrete candidate.
+        validate_prepared(&prepared, &request.operation, self.clock.now())?;
 
         let cancellation =
             self.validate_submission_cancellation(&prepared, request.run_id.as_deref())?;
-        let replacement = self.validate_replacement_binding(
+        let _replacement = self.validate_replacement_binding(
             &prepared,
             record,
             request.run_id.as_deref(),
             replacement_enabled,
         )?;
-        let recovery = self.validate_recovery_binding(
+        let _recovery = self.validate_recovery_binding(
             adapter.as_ref(),
             &prepared,
             record,
             request.run_id.as_deref(),
             recovery_enabled,
             matches!(&route, ExecutionRoute::Financial),
-            plan.is_none() && boundary.is_none(),
+            true,
         )?;
         record.preview = Some(prepared.clone());
         record.updated_at = self.clock.now().to_rfc3339();
+        // Avoid prompting for an already conflicting or stale mutation; the
+        // same guard is repeated atomically at durable submission admission.
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_mutation_candidate(&record.id, &to_value(record)?)
+            .map_err(map_store)?;
         let amendment = self.validate_submission_amendment_for_attempt(
             &prepared,
             request.run_id.as_deref(),
-            boundary.is_some() || plan.is_some(),
+            false,
             Some(&record.id),
         )?;
 
-        let mut run_state = if cancellation {
-            None
-        } else if let Some(run_id) = &request.run_id {
-            Some(self.reserve_run_operation(run_id, record, &prepared)?)
-        } else {
-            None
-        };
-        if let Some(run) = &run_state {
-            let reservations =
-                store_reservations(record.id.as_str(), &run.reservations[&record.id])?;
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .persist_reservation(
-                    &record.id,
-                    &reservations,
-                    &to_value(record)?,
-                    &run.id,
-                    &to_value(run)?,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
-        } else if cancellation && prepared.intent.maximum_costs.is_empty() {
-            // Cancellation shares its original unresolved resource; it cannot
-            // acquire a conflicting financial reservation for a new movement.
-            self.update_record(record)?;
-        } else {
-            self.reserve_ordinary_operation(
-                record,
-                &prepared,
-                replacement
-                    .as_ref()
-                    .map(|link| link.parent_operation_id.as_str()),
-                recovery
-                    .as_ref()
-                    .map(|link| link.parent_operation_id.as_str()),
-                if cancellation {
-                    cancellation_target(&prepared.intent).map(|(id, _)| id)
-                } else {
-                    None
-                },
-            )
-            .await?;
-        }
+        // Persist the preview without acquiring a balance or accounting lock.
+        // Admission and the exact submission identity are journaled separately.
+        self.update_record(record)?;
 
-        let approved_binding = authorization_binding(&prepared);
+        let approved_binding = gofin_domain::native_authorization_binding(&prepared);
         let approved_binding_hash = binding_hash(&approved_binding)?;
-        let (audit, challenge) = if let Some(boundary) = &boundary {
-            if boundary.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&boundary.authorization.expires_at)? <= self.clock.now()
-            {
-                return Err(boundary_error(
-                    "Boundary authorization expired or was revoked before dispatch.",
-                ));
-            }
-            validate_financial_approval_source(&boundary.approval)?;
-            ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
-            let mut audit = boundary.approval.clone();
-            if !matches!(
-                audit.source,
-                Some(gofin_domain::AuthorizationSource::Yolo)
-                    | Some(gofin_domain::AuthorizationSource::Development)
-            ) {
-                audit.source = Some(gofin_domain::AuthorizationSource::BoundedGrant);
-            }
-            (audit, None)
-        } else if let Some(plan) = &plan {
-            validate_financial_approval_source(&plan.approval)?;
-            ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
-            validate_future_expiry(
-                &plan.revision.expires_at,
-                self.clock.now(),
-                "PLAN_AUTHORIZATION_EXPIRED",
-            )?;
-            let mut audit = plan.approval.clone();
-            if !matches!(
-                audit.source,
-                Some(gofin_domain::AuthorizationSource::Yolo)
-                    | Some(gofin_domain::AuthorizationSource::Development)
-            ) {
-                audit.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
-            }
-            (audit, None)
-        } else {
-            let challenge_expiry = std::cmp::min(
-                parse_time(&prepared.expires_at)?,
-                parse_time(
-                    &self
-                        .clock
-                        .now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                )? + chrono::Duration::seconds(90),
-            );
+        let (audit, challenge) = {
+            let action_deadline = if compound_action {
+                let deadline = prepared.action_deadline.as_ref().ok_or_else(|| {
+                    GoFinError::validation("A compound action requires an explicit deadline.")
+                })?;
+                DateTime::<Utc>::from_timestamp(
+                    i64::try_from(deadline.deadline_unix_seconds)
+                        .map_err(|_| GoFinError::validation("Invalid compound deadline."))?,
+                    0,
+                )
+                .ok_or_else(|| GoFinError::validation("Invalid compound deadline."))?
+                .into()
+            } else {
+                None
+            };
+            let prompt_deadline = self.clock.now() + chrono::Duration::seconds(90);
+            let challenge_expiry =
+                action_deadline.map_or(prompt_deadline, |deadline| deadline.min(prompt_deadline));
             let challenge = AuthorizationChallenge {
                 review: if matches!(&route, ExecutionRoute::Financial)
                     && self.authorizer.requires_financial_review()
                 {
-                    Some(gofin_domain::approval_review::approval_review(&prepared)?)
+                    let mut review = gofin_domain::approval_review::approval_review(&prepared)?;
+                    let resources = prepared
+                        .intent
+                        .debits
+                        .iter()
+                        .map(|d| d.resource.0.clone())
+                        .collect::<Vec<_>>();
+                    let rows = self
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|s| {
+                            s.similar_open_operation_records(&prepared.operation, &resources, 3)
+                                .ok()
+                        })
+                        .unwrap_or_default();
+                    for row in rows {
+                        let Some(id) = row.get("id").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let Some(operation) = row.get("operation").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let Some(amounts) = row.get("amounts").and_then(|v| {
+                            serde_json::from_value::<Vec<ResourceAmount>>(v.clone()).ok()
+                        }) else {
+                            continue;
+                        };
+                        let safe = |v: &str| {
+                            !v.is_empty() && v.len() <= 128 && !v.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+                        };
+                        if !safe(id)
+                            || !safe(operation)
+                            || amounts.is_empty()
+                            || amounts.len() > 10
+                            || amounts.iter().any(|a| {
+                                !safe(&a.resource.0)
+                                    || !safe(&a.amount.asset.network)
+                                    || !safe(&a.amount.asset.reference)
+                                    || a.amount.atoms.as_str().len() > 128
+                            })
+                        {
+                            continue;
+                        }
+                        review
+                            .advisories
+                            .push(gofin_domain::approval_review::ApprovalAdvisory {
+                                operation_id: id.into(),
+                                operation: operation.into(),
+                                amounts,
+                            });
+                    }
+                    Some(review)
                 } else {
                     None
                 },
@@ -2408,35 +1963,133 @@ impl Engine {
                 nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
                 expires_at: challenge_expiry.to_rfc3339(),
             };
+            if matches!(&route, ExecutionRoute::Financial) {
+                gofin_domain::execution_progress::ensure_invocation_active()?;
+            }
             gofin_domain::execution_progress::emit(
                 gofin_domain::execution_progress::Stage::AwaitingApproval,
             );
-            let audit = match &route {
+            let mut audit = match &route {
                 ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
                 ExecutionRoute::Configuration(authorizer) => {
                     authorizer.authorize_configuration(&challenge).await?
                 }
             };
-            validate_approval(&audit, &challenge, self.clock.now())?;
+            let approved_now = self.clock.now();
+            validate_approval(&audit, &challenge, approved_now)?;
+            if matches!(&route, ExecutionRoute::Financial) {
+                if let Some(deadline) = action_deadline {
+                    promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+                } else {
+                    promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+                }
+            }
             (audit, Some(challenge))
         };
         record.approval = Some(audit.clone());
         record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
+        let action_lease = if matches!(&route, ExecutionRoute::Financial) {
+            let authority = json!({"audit": audit, "intent": gofin_domain::native_authorization_binding(&prepared), "prepared": prepared});
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            store
+                .register_action_authority(
+                    &record.id,
+                    &audit.expires_at,
+                    &audit.challenge_nonce,
+                    &authority,
+                    &audit.expires_at,
+                )
+                .map_err(map_store)?;
+            store
+                .issue_action_continuation(&record.id)
+                .map_err(map_store)?;
+            if existing_lease.is_none() {
+                Some(
+                    store
+                        .try_acquire_action_lease(&record.id)
+                        .map_err(map_store)?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if compound_action {
+            gofin_domain::execution_progress::ensure_invocation_active()?;
+            record.status = Status::Pending;
+            self.update_record(record)?;
+            gofin_domain::execution_progress::ensure_invocation_active()?;
+            let continuation = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .issue_action_continuation(&record.id)
+                .map_err(map_store)?;
+            if existing_lease.is_some() {
+                // A preapproval continuation resumes the compound driver
+                // after this preparation future has returned. This keeps the
+                // nested financial futures off the same worker stack.
+                return self.load_record(&record.id);
+            }
+            let lease = existing_lease
+                .or(action_lease.as_ref())
+                .ok_or_else(|| internal("compound action lease missing"))?;
+            let _ =
+                Box::pin(self.continue_with_lease(&record.id, &continuation.token, lease)).await?;
+            return self.load_record(&record.id);
+        }
 
         let adapter_candidate = strip_plan_metadata(&prepared);
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::Revalidating,
         );
         let reuse_preparation = matches!(&route, ExecutionRoute::Financial)
-            && adapter
-                .preparation_reuse_window(&adapter_candidate)
-                .is_some_and(|window| {
-                    preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
-                })
+            && execution_preparation_reuse_window(
+                adapter.as_ref(),
+                &adapter_candidate,
+                false, // Compound execution returned above; this route is standalone.
+                false,
+            )
+            .is_some_and(|window| {
+                preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
+            })
             && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
-        let mut refreshed = if reuse_preparation {
+        let mut refreshed = if reuse_preparation
+            && adapter.supports_approved_reprepare(&adapter_candidate)
+        {
+            bounded_evidence(
+                &request.operation,
+                "revalidation",
+                PREFLIGHT_TIMEOUT,
+                adapter.revalidate(&adapter_candidate),
+            )
+            .await?
+        } else if reuse_preparation {
             adapter_candidate.clone()
+        } else if matches!(&route, ExecutionRoute::Financial)
+            && adapter.supports_approved_reprepare(&adapter_candidate)
+        {
+            let mut fresh = bounded_evidence(
+                &request.operation,
+                "fresh candidate",
+                PREFLIGHT_TIMEOUT,
+                adapter.prepare_with_context(&request.operation, &request.input, &context),
+            )
+            .await?;
+            financial_plans::carry_action_deadline(&prepared, &mut fresh)?;
+            adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &fresh)?;
+            bounded_evidence(
+                &request.operation,
+                "revalidation",
+                PREFLIGHT_TIMEOUT,
+                adapter.revalidate(&fresh),
+            )
+            .await?
         } else {
             bounded_evidence(
                 &request.operation,
@@ -2458,194 +2111,38 @@ impl Engine {
             &prepared.binding,
             &mut refreshed.binding,
         )?;
-        if !reuse_preparation {
-            self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
-                .await?;
-        }
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
-        if let Some(boundary) = &boundary {
-            let marker = refreshed.binding.as_object_mut().and_then(|object| {
-                gofin_domain::product_names::remove(object, boundaries::BOUNDARY_METADATA_KEY)
-            });
-            let refreshed_candidate_hash = binding_hash(&boundaries::attempt_binding(&refreshed))?;
-            if Some(refreshed_candidate_hash.as_str()) != boundary_attempt_hash.as_deref() {
-                return Err(GoFinError::new(
-                    "REQUEST_CHANGED",
-                    "approval",
-                    "Execution parameters changed after boundary authorization.",
-                    "Refresh the candidate and verify it remains within the approved limits.",
-                ));
-            }
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &request.operation,
-                &refreshed,
-                &boundary.authorization.expires_at,
-            )?;
-            adapter.validate_boundary_candidate(&boundary.authorization.spec, &refreshed)?;
-            validate_candidate_caps(&boundary.authorization, &refreshed)?;
-            inject_boundary_marker(
-                &mut refreshed,
-                &boundary.authorization,
-                boundary_attempt_hash.clone().unwrap_or_default(),
-            )?;
-            let _ = marker;
-        }
-        if boundary.is_none()
-            && plan.is_none()
-            && binding_hash(&authorization_binding(&refreshed))? != approved_binding_hash
-        {
-            return Err(GoFinError::new(
-                "REQUEST_CHANGED",
-                "approval",
-                "Execution parameters changed after approval.",
-                "Refresh the preview and authorize the changed operation.",
-            ));
-        }
-        if let Some(plan) = &plan {
-            let linkage = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The durable plan attempt linkage is missing.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-            let refreshed_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &refreshed,
-                    &plan.revision.plan_id,
-                    &plan.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if Some(refreshed_hash.as_str()) != plan_attempt_hash.as_deref() {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The venue candidate changed after it was bound to this plan attempt.",
-                    "Reconcile this attempt before proposing another candidate.",
-                ));
-            }
-            self.validate_plan_candidate(
-                adapter.as_ref(),
-                &plan.revision,
-                &linkage.step_id,
-                &record.input,
-                &refreshed.input,
-                &record.id,
-                &refreshed,
-            )?;
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                validate_candidate_plan_caps(plan, &linkage.step_id, &refreshed, &store)?;
-            }
-            financial_plans::inject_plan_marker(
-                &mut refreshed,
-                plan,
-                &linkage.step_id,
-                plan_attempt_hash.clone().unwrap_or_default(),
-            )?;
-        }
+        adapter.validate_approved_candidate(
+            &strip_plan_metadata(&prepared),
+            &strip_plan_metadata(&refreshed),
+        )?;
         if let Some(challenge) = &challenge {
             ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
-        if let Some(boundary) = &boundary {
-            let current = self.load_boundary_record(&boundary.authorization.id)?;
-            if current.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&current.authorization.expires_at)? <= self.clock.now()
-                || current.active_attempt.as_deref() != Some(record.id.as_str())
-            {
-                return Err(boundary_error(
-                    "Boundary authorization was revoked, expired, or replaced before dispatch.",
-                ));
-            }
-        }
-        self.bind_bridge_approved_scope(
-            &refreshed,
-            &record.id,
-            boundary.as_ref().map(|b| b.authorization.id.as_str()),
-        )?;
-        if let Some(plan) = &plan {
-            let plan_step_id = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .map(|attempt| attempt.step_id.as_str())
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The bridge plan attempt has no durable plan-step identity.",
-                        "Preserve the original operation record and reconcile its saved plan link.",
-                    )
-                })?;
-            self.validate_bridge_plan_binding(
-                &refreshed,
-                &record.id,
-                &plan.revision.plan_id,
-                &plan.revision.revision_id,
-                plan_step_id,
-            )?;
-        }
-        if let Some(plan) = &plan {
-            let current = self.load_financial_plan(&plan.revision.plan_id)?;
-            let recovery_parent_active = plan_recovery_parent_identity(&current, &record.id)
-                .filter(|(parent_id, _)| current.active_attempt_id.as_deref() == Some(parent_id))
-                .is_some_and(|(parent_id, _)| {
-                    self.load_record(&parent_id).is_ok_and(|parent| {
-                        matches!(
-                            parent.status,
-                            Status::Submitted | Status::Pending | Status::Unknown
-                        ) && parent.submission.is_some()
-                    })
-                });
-            if current.revision.revision_id != plan.revision.revision_id
-                || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= self.clock.now()
-                || (current.active_attempt_id.as_deref() != Some(record.id.as_str())
-                    && !recovery_parent_active)
-                || plan_attempt_hash.as_deref()
-                    != plan
-                        .attempts
-                        .iter()
-                        .find(|attempt| attempt.attempt_id == record.id)
-                        .map(|attempt| attempt.execution_binding_hash.as_str())
-            {
-                return Err(plan_error(
-                    "PLAN_AUTHORIZATION_INACTIVE",
-                    "Plan authority changed or expired before dispatch.",
-                    "Reconcile the attempt and obtain fresh authorization if another attempt is needed.",
-                ));
-            }
-        }
+        self.bind_bridge_approved_scope(&refreshed, &record.id, None)?;
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
-        let replacement = self.validate_replacement_binding(
+        let _replacement = self.validate_replacement_binding(
             &refreshed,
             record,
             request.run_id.as_deref(),
             replacement_enabled,
         )?;
-        let recovery = self.validate_recovery_binding(
+        let _recovery = self.validate_recovery_binding(
             adapter.as_ref(),
             &refreshed,
             record,
             request.run_id.as_deref(),
             recovery_enabled,
             matches!(&route, ExecutionRoute::Financial),
-            plan.is_none() && boundary.is_none(),
+            true,
         )?;
         if amendment.is_some()
             && self.validate_submission_amendment_for_attempt(
                 &refreshed,
                 request.run_id.as_deref(),
-                boundary.is_some() || plan.is_some(),
+                false,
                 Some(&record.id),
             )? != amendment
         {
@@ -2654,46 +2151,59 @@ impl Engine {
             ));
         }
 
-        if let (Some(run_id), Some(run)) = (&request.run_id, run_state.as_mut()) {
-            self.recheck_run_reservation(run_id, &record.id, &refreshed)?;
-            run.reservations.get_mut(&record.id).unwrap().binding_hash =
-                approved_binding_hash.clone();
-            record.preview = Some(refreshed.clone());
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .persist_reservation(
-                    &record.id,
-                    &store_reservations(&record.id, &run.reservations[&record.id])?,
-                    &to_value(record)?,
-                    run_id,
-                    &to_value(run)?,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
-        }
-        if request.run_id.is_none() && (!cancellation || !refreshed.intent.maximum_costs.is_empty())
-        {
-            self.reserve_ordinary_operation(
-                record,
-                &refreshed,
-                replacement
-                    .as_ref()
-                    .map(|link| link.parent_operation_id.as_str()),
-                recovery
-                    .as_ref()
-                    .map(|link| link.parent_operation_id.as_str()),
-                if cancellation {
-                    cancellation_target(&refreshed.intent).map(|(id, _)| id)
-                } else {
-                    None
-                },
-            )
-            .await?;
-        }
+        // Serialize only final payload construction and admission, not approval or settlement.
+        let dispatch_guard = if matches!(&route, ExecutionRoute::Financial) {
+            acquire_submission_resources(&refreshed).await
+        } else {
+            Vec::new()
+        };
+        let mut nonce_claimed = false;
         if matches!(&route, ExecutionRoute::Financial) {
+            // Another invocation may have admitted a nonce while this one was
+            // awaiting approval. Refresh under the resource lock before signing.
+            {
+                let mut current = strip_plan_metadata(&refreshed);
+                if let Some((scope, pending_nonce)) = bounded_evidence(
+                    &request.operation,
+                    "nonce observation",
+                    PREFLIGHT_TIMEOUT,
+                    adapter.evm_nonce_scope(&current),
+                )
+                .await?
+                {
+                    gofin_domain::execution_progress::ensure_invocation_active()?;
+                    let nonce = self
+                        .store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .claim_evm_nonce(&scope, &record.id, pending_nonce)
+                        .map_err(map_store)?;
+                    nonce_claimed = true;
+                    current = adapter.apply_claimed_evm_nonce(&current, nonce)?;
+                    adapter
+                        .validate_approved_candidate(&strip_plan_metadata(&prepared), &current)?;
+                }
+                let mut latest = bounded_evidence(
+                    &request.operation,
+                    "admission revalidation",
+                    PREFLIGHT_TIMEOUT,
+                    adapter.revalidate(&current),
+                )
+                .await?;
+                financial_plans::carry_action_deadline(&prepared, &mut latest)?;
+                gofin_domain::product_names::preserve_approved_spelling(
+                    &prepared.binding,
+                    &mut latest.binding,
+                )?;
+                validate_prepared(&latest, &request.operation, self.clock.now())?;
+                adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &latest)?;
+                if let Some(challenge) = &challenge {
+                    ensure_approval_fresh(&audit, challenge, self.clock.now())?;
+                }
+                refreshed = latest;
+            }
             let prior = strip_plan_metadata(&refreshed);
-            let mut finalized = bounded_evidence(
+            let finalized = bounded_evidence(
                 &request.operation,
                 "finalization",
                 PREFLIGHT_TIMEOUT,
@@ -2702,35 +2212,9 @@ impl Engine {
             .await?;
             validate_finalized_candidate(&prior, &finalized)?;
             validate_prepared(&finalized, &request.operation, self.clock.now())?;
-            if let Some(plan) = &plan {
-                let step_id = plan
-                    .attempts
-                    .iter()
-                    .find(|attempt| attempt.attempt_id == record.id)
-                    .map(|attempt| attempt.step_id.as_str())
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_ATTEMPT_MISSING",
-                            "The final candidate has no durable plan-step identity.",
-                            "Reconcile the original attempt.",
-                        )
-                    })?;
-                let attempt_hash = plan_attempt_hash.as_deref().ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The final candidate has no immutable plan-attempt binding hash.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-                financial_plans::inject_plan_marker(
-                    &mut finalized,
-                    plan,
-                    step_id,
-                    attempt_hash.to_owned(),
-                )?;
-            }
             refreshed = finalized;
         }
+        carry_mutation_baselines(&prepared, &mut refreshed)?;
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
             operation_id: record.id.clone(),
@@ -2738,18 +2222,17 @@ impl Engine {
                 ExecutionRoute::Financial => SubmissionAuthorizationRoute::Financial,
                 ExecutionRoute::Configuration(_) => SubmissionAuthorizationRoute::Configuration,
             },
-            expected_binding_hash: plan
-                .as_ref()
-                .map(|p| p.revision.approval_binding_hash.clone())
-                .unwrap_or(approved_binding_hash),
+            approved_candidate: Some(prepared.clone()),
+            compound_stage: None,
+            resource_guards: Mutex::new(Some(dispatch_guard)),
+            release_resource_guards_on_admission: nonce_claimed
+                || (refreshed.input.get("requestId").and_then(Value::as_str)
+                    == Some(request.request_id.as_str())
+                    && adapter.supports_independent_submission(&refreshed)),
+            expected_binding_hash: approved_binding_hash,
             approval: audit,
             authorizer: Some(self.authorizer.clone()),
-            boundary_authorization_id: boundary.as_ref().map(|b| b.authorization.id.clone()),
-            boundary_authorization_snapshot: boundary.clone(),
-            financial_plan_id: plan.as_ref().map(|p| p.revision.plan_id.clone()),
-            financial_plan_snapshot: plan.clone(),
             adapter: Some(adapter.clone()),
-            options: self.options.clone(),
             clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
@@ -2782,7 +2265,7 @@ impl Engine {
             *record = durable;
             return Err(error);
         }
-        let submission = submission.expect("checked result");
+        let submission = submission?;
         let persisted = journal
             .record
             .lock()
@@ -2797,7 +2280,14 @@ impl Engine {
                 "Reconcile the original submission identity; do not submit again.",
             ));
         }
-        *record = persisted;
+        journal.record_transport_acceptance(&submission)?;
+        *record = journal
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .clone();
+        // Provider response is complete; do not retain ordering guards while observing settlement.
+        drop(journal);
         record.status = Status::Pending;
         record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
@@ -2806,19 +2296,108 @@ impl Engine {
 
     pub async fn status(&self, id: &str, reconcile: bool) -> Result<OperationRecord> {
         let record = self.load_record(id)?;
+        if record
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code.eq_ignore_ascii_case("history_unreadable"))
+        {
+            return Ok(record);
+        }
+        let has_stages = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.list_stage_attempts(&record.id).ok())
+            .is_some_and(|stages| {
+                stages.iter().any(|s| {
+                    record.submission.is_none()
+                        || s.operation_id.as_deref().is_some_and(|id| id != record.id)
+                })
+            });
+        if reconcile && has_stages {
+            return Ok(bounded_evidence(
+                &record.operation,
+                "compound status observation",
+                FINANCIAL_EVIDENCE_TIMEOUT,
+                self.observe_compound_action(record.clone()),
+            )
+            .await
+            .unwrap_or(record));
+        }
         if reconcile
-            && matches!(
+            && record.submission.is_none()
+            && record.preview.as_ref().is_some_and(|p| {
+                self.adapters
+                    .read()
+                    .ok()
+                    .and_then(|a| a.get(&record.operation).cloned())
+                    .is_some_and(|adapter| adapter.is_compound_action(p))
+            })
+        {
+            return Ok(bounded_evidence(
+                &record.operation,
+                "compound status observation",
+                FINANCIAL_EVIDENCE_TIMEOUT,
+                self.observe_compound_action(record.clone()),
+            )
+            .await
+            .unwrap_or(record));
+        }
+        if reconcile
+            && (matches!(
                 record.status,
                 Status::Submitted | Status::Pending | Status::Unknown
-            )
+            ) || self.transfer_needs_observation(&record)?
+                || Self::native_fee_needs_observation(&record))
         {
-            let Ok(_guard) = self.write_queue.try_lock() else {
-                return Ok(record);
-            };
-            self.reconcile_observation_serial(id.to_owned()).await
+            match self.reconcile_observation_serial(id.to_owned()).await {
+                Ok(observed) => Ok(observed),
+                Err(error) => {
+                    let mut retained = record;
+                    let latest =
+                        json!({"code":error.code,"stage":error.stage,"message":error.message});
+                    match retained.last_reconciliation_evidence.as_mut() {
+                        Some(Value::Object(evidence)) => {
+                            evidence.insert("latestReconciliationError".into(), latest);
+                        }
+                        Some(previous) => {
+                            retained.last_reconciliation_evidence = Some(
+                                json!({"original":previous,"latestReconciliationError":latest}),
+                            );
+                        }
+                        None => {
+                            retained.last_reconciliation_evidence =
+                                Some(json!({"latestReconciliationError":latest}))
+                        }
+                    }
+                    let _ = self.update_record(&retained);
+                    Ok(retained)
+                }
+            }
         } else {
             Ok(record)
         }
+    }
+
+    fn native_fee_needs_observation(record: &OperationRecord) -> bool {
+        record.status == Status::Completed
+            && record.effects.as_ref().is_some_and(|e| {
+                e.evidence
+                    .get("native_fee_observed")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+            })
+    }
+
+    fn transfer_needs_observation(&self, record: &OperationRecord) -> Result<bool> {
+        if record.status != Status::Failed {
+            return Ok(false);
+        }
+        let view = self.operation_view(record)?;
+        Ok(matches!(
+            view.pointer("/outcome/transfer").and_then(Value::as_str),
+            Some("source_pending" | "in_transit" | "unknown")
+        ))
     }
 
     async fn reconcile_serial(&self, id: String) -> Result<OperationRecord> {
@@ -2826,15 +2405,9 @@ impl Engine {
             .await
     }
 
-    // RPC status observations may wait until caller cancellation. Other
-    // integrations retain the evidence deadline. Neither path submits again.
+    // Each status observation is bounded and never submits a financial write.
     async fn reconcile_observation_serial(&self, id: String) -> Result<OperationRecord> {
-        let evidence_timeout = if self.status_rpc_read_scope(&id)? {
-            None
-        } else {
-            Some(FINANCIAL_EVIDENCE_TIMEOUT)
-        };
-        self.reconcile_serial_with_deadline(id, evidence_timeout)
+        self.reconcile_serial_with_deadline(id, Some(FINANCIAL_EVIDENCE_TIMEOUT))
             .await
     }
 
@@ -2844,10 +2417,25 @@ impl Engine {
         evidence_timeout: Option<std::time::Duration>,
     ) -> Result<OperationRecord> {
         let record = self.load_record(&id)?;
+        let expected_record = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(&id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        let Ok(expected_typed) = from_value::<OperationRecord>(expected_record.clone()) else {
+            return Ok(record);
+        };
+        if to_value(&record)? != to_value(&expected_typed)? {
+            return self.load_record(&id);
+        }
         if !matches!(
             record.status,
             Status::Submitted | Status::Pending | Status::Unknown
-        ) {
+        ) && !self.transfer_needs_observation(&record)?
+            && !Self::native_fee_needs_observation(&record)
+        {
             return Ok(record);
         }
         let adapter = self
@@ -2869,16 +2457,16 @@ impl Engine {
             .into_iter()
             .find(|definition| definition.name == record.operation)
             .ok_or_else(|| internal("registry definition disappeared during reconciliation"))?;
-        if self.has_pending_amendment(&record.id)? {
-            return Ok(record);
-        }
         let amendment_context = self.amendment_context(&record.id)?;
         let mut adapter_record = record.clone();
         if let Some(prepared) = &record.preview {
             adapter_record.preview = Some(strip_plan_metadata(prepared));
         }
         if adapter_record.position_baseline.is_none()
-            && let Some(baseline) = self.virtual_liquidity_reconciliation_baseline(&record)?
+            && let Some(baseline) = self
+                .virtual_liquidity_reconciliation_baseline(&record)
+                .ok()
+                .flatten()
         {
             // This compatibility baseline exists only on the adapter copy.
             // The original immutable journal record is never rewritten.
@@ -2971,12 +2559,9 @@ impl Engine {
                     .reconcile_with_context(&adapter_record, &amendment_context)
                     .await
             }?;
-            let baselines = if reconciliation.status == Status::Completed {
-                adapter.verified_position_baselines(&adapter_record).await?
-            } else {
-                vec![]
-            };
-            Ok((reconciliation, baselines))
+            // Optional accounting baselines must not suppress an independently
+            // observed result when their provider is unavailable.
+            Ok((reconciliation, vec![]))
         };
         let outcome = if let Some(timeout) = evidence_timeout {
             bounded_evidence(&record.operation, "reconciliation", timeout, evidence).await
@@ -2986,6 +2571,7 @@ impl Engine {
         let (reconciliation, baselines) = match outcome {
             Ok(evidence) => evidence,
             Err(error) => {
+                let expected = expected_record.clone();
                 let mut retained = record;
                 // Keep the original submission error, but do not leave users
                 // staring at stale proof evidence when a later recovery check
@@ -3035,51 +2621,71 @@ impl Engine {
                 if retained.error.is_none() || retained.submission.is_none() {
                     retained.error = Some(error);
                 }
-                retained.updated_at = self.clock.now().to_rfc3339();
-                self.update_record(&retained)?;
-                return Ok(retained);
+                let updated = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &retained.id,
+                        &expected,
+                        &to_value(&retained)?,
+                        &retained.updated_at,
+                    )
+                    .map_err(map_store)?;
+                return if updated {
+                    Ok(retained)
+                } else {
+                    self.load_record(&retained.id)
+                };
             }
         };
         match self.apply_reconciliation_with_baselines(
             record.clone(),
             reconciliation.clone(),
             baselines,
+            expected_record.clone(),
         ) {
             Ok(record) => Ok(record),
             Err(error) if error.stage == "reconciliation" || error.stage == "budget" => {
+                let expected = expected_record;
                 let mut retained = record;
-                retained.status = if retained.submission.is_some() {
-                    Status::Unknown
-                } else {
-                    retained.status
-                };
-                if matches!(
-                    error.code.as_str(),
-                    "COST_EXCEEDS_RESERVATION"
-                        | "EFFECT_EXCEEDS_RESERVATION"
-                        | "COST_EXCEEDS_USD_RESERVATION"
-                ) {
-                    // The adapter proved what happened, but its effects exceed
-                    // authority. Preserve the exact rejected proof for inspection
-                    // without committing settlement, releasing reservations or
-                    // crediting unused authority. It is not an accepted ledger effect.
-                    retained.last_reconciliation_evidence = Some(json!({
-                        "state":"needs_attention",
-                        "reason":error.code,
-                        "reported_status":reconciliation.status,
-                        "adapter_evidence":reconciliation.evidence,
-                        "verified_effects":reconciliation.verified,
-                    }));
-                    retained.error = Some(error);
-                } else if !cost_attention_pending(&retained) {
-                    retained.last_reconciliation_evidence = Some(reconciliation.evidence);
-                    if retained.error.is_none() || retained.submission.is_none() {
-                        retained.error = Some(error);
-                    }
+                let conflicting = json!({"reported_status":reconciliation.status,
+                    "adapter_evidence":reconciliation.evidence, "verified_effects":reconciliation.verified});
+                let evidence = retained
+                    .last_reconciliation_evidence
+                    .get_or_insert_with(|| json!({}));
+                if !evidence.is_object() {
+                    *evidence = json!({"original":evidence.clone()});
                 }
-                retained.updated_at = self.clock.now().to_rfc3339();
-                self.update_record(&retained)?;
-                Ok(retained)
+                let rows = evidence
+                    .as_object_mut()
+                    .ok_or_else(|| internal("reconciliation evidence is not an object"))?
+                    .entry("conflicting_observations")
+                    .or_insert_with(|| json!([]));
+                if let Some(rows) = rows.as_array_mut()
+                    && !rows.contains(&conflicting)
+                {
+                    rows.push(conflicting);
+                }
+                if retained.error.is_none() {
+                    retained.error = Some(error);
+                }
+                let updated = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &retained.id,
+                        &expected,
+                        &to_value(&retained)?,
+                        &retained.updated_at,
+                    )
+                    .map_err(map_store)?;
+                if updated {
+                    Ok(retained)
+                } else {
+                    self.load_record(&retained.id)
+                }
             }
             Err(error) => Err(error),
         }
@@ -3091,362 +2697,290 @@ impl Engine {
         record: OperationRecord,
         reconciliation: Reconciliation,
     ) -> Result<OperationRecord> {
-        self.apply_reconciliation_with_baselines(record, reconciliation, vec![])
+        let expected = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(&record.id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        self.apply_reconciliation_with_baselines(record, reconciliation, vec![], expected)
     }
     fn apply_reconciliation_with_baselines(
         &self,
         mut record: OperationRecord,
         reconciliation: Reconciliation,
         baselines: Vec<PositionAnchor>,
+        expected_record: Value,
     ) -> Result<OperationRecord> {
-        if self.record_human_resolution_observation(&record, &reconciliation)? {
-            return Ok(record);
+        // An adapter observation establishes the external result independently of
+        // local accounting. Keep the submission correlation and proof integrity
+        // checks, but do not turn missing reporting or an exceeded bound into a
+        // different external result.
+        let _ = baselines;
+        if record.submission.is_some()
+            && matches!(reconciliation.status, Status::Completed | Status::Failed)
+            && reconciliation.verified.is_none()
+            && !(reconciliation.status == Status::Failed
+                && reconciliation
+                    .evidence
+                    .get("outcome_transfer")
+                    .and_then(Value::as_str)
+                    == Some("source_pending"))
+        {
+            return Err(reconciliation_error(
+                "Terminal status requires evidence correlated to the original submission.",
+            ));
         }
-        if let (Some(previous), Some(current)) = (&record.effects, &reconciliation.verified) {
-            let previous_progress =
-                gofin_domain::SettlementProgress::from_evidence(&previous.evidence)?;
-            let current_progress =
-                gofin_domain::SettlementProgress::from_evidence(&current.evidence)?;
-            if previous_progress.is_some() != current_progress.is_some()
-                && (previous_progress.is_some() || previous.evidence.get("proofEvents").is_some())
+        let mut evidence = reconciliation.evidence.clone();
+        if let Some(verified) = &reconciliation.verified
+            && (record.submission.as_ref() != Some(&verified.submission)
+                || verified.evidence_version == 0
+                || verified.proof_digest != verified_effect_digest(verified)?)
+        {
+            return Err(reconciliation_error(
+                "Observation does not match the original submission identity.",
+            ));
+        }
+        if evidence.get("outcome_dispatch").and_then(Value::as_str) == Some("rejected") {
+            let submission = record.submission.as_ref().ok_or_else(|| {
+                reconciliation_error("Rejection has no durable submission identity.")
+            })?;
+            if evidence
+                .get("definitive_nonexecution")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || evidence.get("submission_reference").and_then(Value::as_str)
+                    != Some(submission.reference.as_str())
+                || evidence
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
             {
                 return Err(reconciliation_error(
-                    "An unresolved submission cannot change its cumulative proof identity protocol; preserve and reconcile its original receipt events.",
+                    "Rejection does not prove non-execution of the original identity.",
                 ));
             }
-        }
-        let context = self.amendment_context(&record.id)?;
-        let accounting_intent = amendments::accounting_intent(&context)?;
-        let effective_intent = accounting_intent.as_ref();
-        if reconciliation
-            .evidence
-            .product_get(gofin_domain::unresolved_consumption::KEY)?
-            .is_some()
-            && let Some(retained) = self.commit_unresolved_cost_consumption(
-                &record,
-                &reconciliation,
-                effective_intent.unwrap_or(
-                    &record
-                        .preview
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            if let Some(stage) = store
+                .stage_attempt_by_operation(&record.id)
+                .map_err(map_store)?
+            {
+                // Upgrades may add outcome tags to an already verified empty
+                // rejection. Keep its terminal stage history immutable while
+                // allowing the same proof to gain observation-only metadata.
+                let terminal_refinement = matches!(stage.state.as_str(), "failed" | "rejected")
+                    && record.status == Status::Failed
+                    && reconciliation.status == Status::Failed
+                    && record
+                        .effects
                         .as_ref()
-                        .ok_or_else(|| internal("original preview missing"))?
-                        .intent,
-                ),
-            )?
-        {
-            return Ok(retained);
-        }
-        match reconciliation.status.clone() {
-            Status::Pending | Status::Submitted | Status::Unknown => {
-                if let Some(verified) = reconciliation.verified.clone()
-                    && gofin_domain::SettlementProgress::from_evidence(&verified.evidence)?
-                        .is_some()
-                {
-                    return self.apply_progress_reconciliation(record, reconciliation, verified);
-                }
-                if cost_attention_pending(&record) {
-                    return Ok(record);
-                }
-                let expected = to_value(&record)?;
-                if let Some(verified) = &reconciliation.verified {
-                    if effective_intent.is_some() {
-                        partial_proofs::validate_pending_with_scope(
-                            &record,
-                            verified,
-                            effective_intent,
-                        )?;
-                    } else {
-                        partial_proofs::validate_pending(&record, verified)?;
-                    }
-                    record.effects = Some(verified.clone());
-                }
-                record.status = reconciliation.status;
-                record.last_reconciliation_evidence = Some(reconciliation.evidence);
-                if record.submission.is_none() {
-                    record.error = None;
-                }
-                record.updated_at = self.clock.now().to_rfc3339();
-                if let Some(verified) = &reconciliation.verified {
-                    if self.commit_mutation_batch_progress(&record, &expected)? {
-                        return Ok(record);
-                    }
-                    self.store.lock().map_err(|_| internal("store lock poisoned"))?
-                        .commit_progress(&record.id, &expected, &to_value(&record)?, &to_value(verified)?,
-                            &to_value(&verified.effects)?, &record.updated_at)
-                        .map_err(|_| GoFinError::new("PARTIAL_PROOF_CONFLICT", "reconciliation",
-                            "Partial evidence conflicts with an immutable receipt or operation record.",
-                            "Reconcile the original submission; retain its reservations."))?;
+                        .zip(reconciliation.verified.as_ref())
+                        .is_some_and(|(old, new)| {
+                            new.evidence == evidence
+                                && old.submission == new.submission
+                                && old.evidence_version == new.evidence_version
+                                && old.effects.is_empty()
+                                && new.effects.is_empty()
+                                && verified_effect_digest(old).ok().as_deref()
+                                    == Some(old.proof_digest.as_str())
+                                && old.evidence.as_object().is_some_and(|fields| {
+                                    fields
+                                        .iter()
+                                        .all(|(key, value)| new.evidence.get(key) == Some(value))
+                                })
+                        });
+                if terminal_refinement {
+                    // No admission, authority, nonce or stage mutation.
+                } else if matches!(stage.state.as_str(), "failed" | "rejected") {
+                    return Err(reconciliation_error(
+                        "Terminal rejection observation changed its status or verified proof.",
+                    ));
+                } else if submission.kind == "ethereum" {
+                    store
+                        .record_evm_definitive_rejection(&stage.token, &evidence)
+                        .map_err(map_store)?;
                 } else {
-                    self.update_record(&record)?;
+                    store
+                        .finish_stage_attempt(&stage.token, "rejected", &evidence)
+                        .map_err(map_store)?;
                 }
-                Ok(record)
             }
-            Status::Completed | Status::Failed => {
-                let verified = reconciliation.verified.ok_or_else(|| GoFinError::new(
-                    "RECONCILIATION_PROOF_PENDING",
-                    "reconciliation",
-                    "Terminal venue status has no verified typed effects.",
-                    "Reconcile this original submission until its proof and effects are available.",
-                ))?;
-                // Terminal evidence is immutable: an exact replay is already
-                // accounted and may arrive after its post-state anchor is current.
-                if record.status == reconciliation.status
-                    && record.effects.as_ref() == Some(&verified)
-                {
-                    return Ok(record);
-                }
-                self.validate_consumed_costs_before_terminal(&record, &verified)?;
-                let prior_progress = record
+        }
+        let mut has_new_verified = false;
+        if let Some(verified) = &reconciliation.verified {
+            if verified.evidence.get("settlement_progress").is_some()
+                && record
                     .effects
                     .as_ref()
-                    .map(|previous| {
-                        gofin_domain::SettlementProgress::from_evidence(&previous.evidence)
-                    })
-                    .transpose()?
-                    .flatten();
-                if let Some(previous) = prior_progress.as_ref() {
-                    let final_progress = gofin_domain::SettlementProgress::from_evidence(
-                        &verified.evidence,
-                    )?
-                    .ok_or_else(|| {
-                        reconciliation_error(
-                            "Terminal proof omitted the previously accepted cumulative progress identity.",
-                        )
-                    })?;
-                    if final_progress.sequence < previous.sequence
-                        || (final_progress.sequence == previous.sequence
-                            && record.effects.as_ref() != Some(&verified))
-                        || previous.event_digests.iter().any(|(identity, digest)| {
-                            final_progress.event_digests.get(identity) != Some(digest)
-                        })
-                        || previous
-                            .position_orders
-                            .iter()
-                            .any(|order| !final_progress.position_orders.contains(order))
-                    {
-                        return Err(reconciliation_error(
-                            "Terminal proof regressed or changed a previously proved event.",
-                        ));
-                    }
-                    validate_cumulative_settlement_components(
-                        record
-                            .effects
-                            .as_ref()
-                            .map(|effects| effects.effects.as_slice()),
-                        &verified.effects,
-                    )?;
-                }
-                if prior_progress.is_none() {
-                    partial_proofs::validate_growth(record.effects.as_ref(), &verified)?;
-                }
-                validate_effects_with_scope(
-                    &record,
-                    &verified,
-                    &reconciliation.status,
-                    reconciliation.status == Status::Failed && prior_progress.is_some(),
-                    effective_intent,
-                )?;
-                let accounting_delta = if prior_progress.is_some() {
-                    cumulative_boundary_delta(record.effects.as_ref(), &verified)?
-                } else {
-                    verified.clone()
-                };
-                if reconciliation.status == Status::Completed {
-                    // Validate exact predecessor proofs before using their post-state
-                    // anchors to explain this operation's original snapshot.
-                    let operations = self.operations()?;
-                    let predecessors = position_predecessor_context(
-                        &record,
-                        &verified,
-                        &operations,
-                        PreparationContext::default(),
-                    )?;
-                    let mut prior = self.record_preparation_context_with_predecessors(
-                        &record,
-                        &predecessors.positions,
-                    )?;
-                    let prepared = record
-                        .preview
-                        .as_ref()
-                        .ok_or_else(|| internal("terminal preview missing"))?;
-                    prior = baseline_anchors::merge(prepared, &prior)?;
-                    for baseline in baselines {
-                        let key = position_anchor_key(&baseline)?;
-                        if !prior
-                            .positions
-                            .iter()
-                            .any(|anchor| position_anchor_key(anchor).as_ref() == Ok(&key))
-                        {
-                            prior.positions.push(baseline);
-                        }
-                    }
-                    let prior =
-                        position_predecessor_context(&record, &verified, &operations, prior)?;
-                    validate_anchor_transitions_with_candidate(&verified, &prior, Some(prepared))?;
-                }
-                record.status = reconciliation.status;
-                record.last_reconciliation_evidence = Some(reconciliation.evidence);
+                    .is_some_and(|prior| prior.evidence.get("settlement_progress").is_some())
+            {
+                cumulative_boundary_delta(record.effects.as_ref(), verified)?;
+            }
+            if partial_proofs::validate_growth(record.effects.as_ref(), verified).is_ok() {
                 record.effects = Some(verified.clone());
-                record.error = None;
-                record.updated_at = self.clock.now().to_rfc3339();
-                let cancellation = record
-                    .preview
-                    .as_ref()
-                    .is_some_and(|preview| cancellation_target(&preview.intent).is_some());
-                let run = if cancellation {
-                    None
-                } else if let Some(run_id) = &record.run_id {
-                    let mut run: RunLedger = self.load_run(run_id)?;
-                    self.settle_run(&mut run, &record, &verified)?;
-                    Some(run)
-                } else {
-                    None
-                };
-                self.commit_terminal(
-                    record.clone(),
-                    to_value(&verified)?,
-                    to_value(&verified.effects)?,
-                    run.as_ref(),
-                    Some(&accounting_delta),
-                )?;
-                Ok(record)
-            }
-            Status::Cancelled | Status::Rejected | Status::Expired => {
-                record.status = reconciliation.status;
-                record.last_reconciliation_evidence = Some(reconciliation.evidence.clone());
-                record.updated_at = self.clock.now().to_rfc3339();
-                if record.submission.is_some() {
-                    return Err(GoFinError::new(
-                        "INVALID_RECONCILIATION_STATUS",
-                        "reconciliation",
-                        "A submitted external action cannot become cancelled or rejected through status lookup.",
-                        "Reconcile the original submission until its outcome is proven.",
-                    ));
-                }
-                let run = self.release_unsubmitted_reservation(&record)?;
-                self.commit_terminal(
-                    record.clone(),
-                    reconciliation.evidence,
-                    json!([]),
-                    run.as_ref(),
-                    None,
-                )?;
-                Ok(record)
-            }
-            Status::AwaitingApproval => Err(GoFinError::new(
-                "INVALID_RECONCILIATION_STATUS",
-                "reconciliation",
-                "Adapter cannot move a submitted operation back to approval.",
-                "Inspect the original operation and preserve its submission identity.",
-            )),
-        }
-    }
-
-    fn apply_progress_reconciliation(
-        &self,
-        mut record: OperationRecord,
-        reconciliation: Reconciliation,
-        verified: VerifiedEffects,
-    ) -> Result<OperationRecord> {
-        let progress = gofin_domain::SettlementProgress::from_evidence(&verified.evidence)?
-            .ok_or_else(|| reconciliation_error("Progress metadata is missing."))?;
-        if let Some(previous) = record.effects.as_ref() {
-            let previous_progress =
-                gofin_domain::SettlementProgress::from_evidence(&previous.evidence)?;
-            if let Some(previous_progress) = previous_progress {
-                if progress.sequence == previous_progress.sequence && verified == *previous {
-                    return Ok(record);
-                }
-                if progress.sequence <= previous_progress.sequence {
+                has_new_verified = true;
+            } else {
+                if matches!(
+                    reconciliation.status,
+                    Status::Pending | Status::Submitted | Status::Unknown
+                ) {
                     return Err(reconciliation_error(
-                        "A stale progress sequence was returned with different proof content.",
+                        "Cumulative observation regressed previously verified effects.",
                     ));
                 }
-                if previous_progress
-                    .event_digests
-                    .iter()
-                    .any(|(identity, digest)| progress.event_digests.get(identity) != Some(digest))
-                    || previous_progress
-                        .position_orders
-                        .iter()
-                        .any(|order| !progress.position_orders.contains(order))
-                {
-                    return Err(reconciliation_error(
-                        "Cumulative progress changed previously proved event content.",
-                    ));
-                }
-                validate_cumulative_settlement_components(
-                    Some(&previous.effects),
-                    &verified.effects,
-                )?;
+                // Preserve both observations. A final adapter proof may refine
+                // a prior progress snapshot without reproducing its full shape.
+                evidence = json!({"adapter_evidence": evidence, "previous_verified_effects": record.effects,
+                    "conflicting_verified_effects": verified});
+                record.effects = Some(verified.clone());
+                has_new_verified = true;
             }
         }
-        validate_effects_mode(&record, &verified, &reconciliation.status, true)?;
-        // Boundary budgets are charged by newly proved cumulative deltas.
-        // Retain the prior proof snapshot until the delta has been computed.
-        let accounting_delta = cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
-        record.status = reconciliation.status;
-        record.last_reconciliation_evidence = Some(reconciliation.evidence);
-        record.effects = Some(verified.clone());
-        record.error = None;
+        if reconciliation.status == Status::AwaitingApproval {
+            return Err(reconciliation_error(
+                "An observation cannot require a new approval.",
+            ));
+        }
+        if !(record.status == Status::Failed
+            && matches!(
+                reconciliation.status,
+                Status::Pending | Status::Submitted | Status::Unknown
+            ))
+        {
+            record.status = reconciliation.status;
+        }
+        if has_new_verified {
+            record.error = None;
+        }
+        record.last_reconciliation_evidence = Some(merge_observation_history(
+            record.last_reconciliation_evidence.take(),
+            evidence,
+        ));
         record.updated_at = self.clock.now().to_rfc3339();
-
-        let prepared = record
-            .preview
-            .as_ref()
-            .ok_or_else(|| reconciliation_error("The durable prepared operation is missing."))?;
-        let reservations = if record.run_id.is_some() {
-            // Run provenance remains reserved in full until the terminal proof
-            // settles it; the run ledger owns a second source-specific hold.
-            store_reservations_for_intent(prepared)?
-        } else {
-            remaining_store_reservations(
-                prepared,
-                &verified.effects,
-                if record.status.terminal() {
-                    BTreeSet::new()
-                } else {
-                    proved_escrow_wallet_locks(prepared, &verified.effects)
-                },
-            )?
-        };
-        let boundary_id = prepared
-            .binding
-            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
-            .and_then(|metadata| metadata.get("authorization_id"))
-            .and_then(Value::as_str);
-        let mut expected_boundary = None;
-        let mut boundary_record = None;
-        if let Some(boundary_id) = boundary_id {
-            let mut boundary = self.load_boundary_record(boundary_id)?;
-            if boundary.active_attempt.as_deref() != Some(record.id.as_str()) {
-                return Err(boundary_error(
-                    "Cumulative progress is not owned by the active boundary attempt.",
-                ));
+        if record.operation == "bridge.transfer"
+            && record.status == Status::Completed
+            && has_new_verified
+        {
+            let transit = transfer_principal(&record)?;
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .record_bridge_stage_observation(
+                    &record.id,
+                    &to_value(&record)?,
+                    transit.as_ref(),
+                    &record.updated_at,
+                )
+                .map_err(map_store)?;
+        } else if record.operation == "bridge.transfer"
+            && record.status == Status::Failed
+            && has_new_verified
+        {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .record_bridge_stage_failure(&record.id, &to_value(&record)?, &record.updated_at)
+                .map_err(map_store)?;
+        } else if record.status == Status::Completed && has_new_verified {
+            let verified = record
+                .effects
+                .as_ref()
+                .ok_or_else(|| internal("verified observation missing"))?;
+            let settlement = Settlement {
+                operation_id: record.id.clone(),
+                terminal_record: to_value(&record)?,
+                proof: to_value(verified)?,
+                effects: to_value(&verified.effects)?,
+                run_id: None,
+                run_record: None,
+            };
+            if !self.commit_mutation_batch_terminal(&record, &settlement)?
+                && !self.commit_amendment(&record, &settlement)?
+                && !self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &record.id,
+                        &expected_record,
+                        &to_value(&record)?,
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)?
+            {
+                return self.load_record(&record.id);
             }
-            expected_boundary = Some(to_value(&boundary)?);
-            account_boundary_effects(&mut boundary.authorization, Some(&accounting_delta))?;
-            boundary_record = Some(to_value(&boundary)?);
+        } else {
+            if !self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .update_record_if_unchanged(
+                    &record.id,
+                    &expected_record,
+                    &to_value(&record)?,
+                    &record.updated_at,
+                )
+                .map_err(map_store)?
+            {
+                return self.load_record(&record.id);
+            }
         }
-        let progress_settlement = ProgressSettlement {
-            operation_id: record.id.clone(),
-            record: to_value(&record)?,
-            proof: to_value(&verified)?,
-            effects: to_value(&verified.effects)?,
-            reservations,
-            run_id: None,
-            run_record: None,
-            boundary_id: boundary_id.map(str::to_owned),
-            expected_boundary,
-            boundary_record,
-            plan_id: None,
-            expected_plan: None,
-            plan_record: None,
-        };
+        if has_new_verified
+            && record.effects.as_ref().is_some_and(|proof| {
+                proof.evidence["replacement_terminal_no_live_remainder"] == true
+            })
+        {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .release_replacement_with_verified_terminal(&record.id)
+                .map_err(map_store)?;
+        }
+        let facts = operation_resolutions::outcome_facts(&record);
+        // A terminal, identity-correlated observation closes this concrete
+        // attempt; absent proof leaves its admission immutable and observable.
+        if has_new_verified {
+            let disposition = match record.status {
+                Status::Completed => Some("completed"),
+                Status::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(disposition) = disposition {
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                if let Ok(Some(stage)) = store.stage_attempt_by_operation(&record.id)
+                    && matches!(stage.state.as_str(), "admitted" | "uncertain")
+                {
+                    let _ =
+                        store.finish_stage_attempt(&stage.token, disposition, &to_value(&facts)?);
+                }
+            }
+        }
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .commit_progress_settlement(&progress_settlement, &record.updated_at)
+            .append_outcome_observation(
+                &record.id,
+                &facts,
+                if record
+                    .last_reconciliation_evidence
+                    .as_ref()
+                    .and_then(|e| e.get("outcome_live_order"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    "adapter_live_order"
+                } else {
+                    "adapter"
+                },
+            )
             .map_err(map_store)?;
         Ok(record)
     }
@@ -3545,11 +3079,75 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .list_records()
+            .list_typed_records()
             .map_err(map_store)?
             .into_iter()
             .map(from_value)
             .collect()
+    }
+
+    /// Find the approved compound action that owns a saved bridge transfer.
+    /// Terminal and expired actions remain owners for durable recovery.
+    pub fn compound_bridge_action_for_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<OperationRecord>> {
+        if transfer_id.trim().is_empty() {
+            return Err(GoFinError::validation("Bridge transfer ID is required."));
+        }
+        let candidates = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .operations_by_prepared_binding(
+                "bridge.execute",
+                "/preview/binding/transfer_id",
+                &json!(transfer_id),
+            )
+            .map_err(map_store)?;
+        let mut owner = None;
+        for candidate in candidates {
+            if candidate.pointer("/preview/binding/compound_bridge") != Some(&Value::Bool(true))
+                || candidate.get("approval").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let record: OperationRecord = from_value(candidate)?;
+            if owner.is_some() {
+                return Err(GoFinError::new(
+                    "BRIDGE_ACTION_OWNER_AMBIGUOUS",
+                    "reconciliation",
+                    "Multiple approved bridge actions own this transfer.",
+                    "Keep the transfer unresolved and inspect the original action records.",
+                ));
+            }
+            owner = Some(record);
+        }
+        Ok(owner)
+    }
+
+    fn reject_owned_bridge_transfer(&self, operation: &str, input: &Value) -> Result<()> {
+        if operation != "bridge.transfer" {
+            return Ok(());
+        }
+        let Some(transfer_id) = input.get("transferId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if transfer_id.trim().is_empty() {
+            return Ok(());
+        }
+        if let Some(owner) = self.compound_bridge_action_for_transfer(transfer_id)? {
+            return Err(GoFinError::new(
+                "BRIDGE_COMPOUND_ACTION_OWNED",
+                "validation",
+                "This transfer belongs to an existing approved bridge action.",
+                "Follow the original action's status and continue its recovery.",
+            ).with_details(json!({
+                "operation_id": owner.id,
+                "next_action": {"code":"observe","command":"status","arguments":{"operation_id":owner.id}}
+            })));
+        }
+        Ok(())
     }
 
     fn bind_bridge_approved_scope(
@@ -3606,74 +3204,6 @@ impl Engine {
         Ok(())
     }
 
-    fn validate_bridge_plan_binding(
-        &self,
-        prepared: &PreparedOperation,
-        operation_id: &str,
-        plan_id: &str,
-        revision_id: &str,
-        plan_step_id: &str,
-    ) -> Result<()> {
-        let Some(marker) = prepared
-            .binding
-            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
-        else {
-            return Ok(());
-        };
-        let transfer_id = marker
-            .get("transfer_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks its transfer ID."))?;
-        let step_id = marker
-            .get("step_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks its step ID."))?;
-        let bounds = marker
-            .get("bounds")
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks selected bounds."))?;
-        let expectation: gofin_domain::BridgeSettlementExpectation = serde_json::from_value(
-            marker
-                .get("settlement_expectation")
-                .cloned()
-                .ok_or_else(|| GoFinError::validation("Bridge marker lacks settlement scope."))?,
-        )
-        .map_err(|_| GoFinError::validation("Bridge settlement scope is malformed."))?;
-        self.store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .validate_bridge_plan_scope(
-                transfer_id,
-                revision_id,
-                plan_step_id,
-                step_id,
-                operation_id,
-                bounds,
-                &expectation,
-            )
-            .map_err(map_store)?;
-        let transfer = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .bridge_transfer(transfer_id)
-            .map_err(map_store)?
-            .ok_or_else(|| GoFinError::validation("Bridge transfer record disappeared."))?;
-        if transfer
-            .plan_scope
-            .as_ref()
-            .is_none_or(|scope| scope.plan_id != plan_id)
-        {
-            return Err(plan_error(
-                "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
-                "The transfer is not owned by this named plan.",
-                "Preserve the transfer's original plan owner and reconcile its saved operation.",
-            ));
-        }
-        Ok(())
-    }
-
     /// Apply a final, adapter-verified correlated destination/refund proof to
     /// a durable bridge transfer. The typed receipt effects and the transfer's
     /// terminal state commit together; principal cannot be debited a second time.
@@ -3681,11 +3211,14 @@ impl Engine {
         &self,
         proof: gofin_domain::BridgeSettlementProof,
     ) -> Result<gofin_domain::BridgeTransferRecord> {
-        let usable_credit_count = proof
+        let credits = proof
             .effects
             .iter()
-            .filter(|effect| matches!(effect, FinancialEffect::UsableCredit { .. }))
-            .count();
+            .filter_map(|effect| match effect {
+                FinancialEffect::UsableCredit { to, amount } => Some((to, amount)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         if proof.evidence.is_null()
             || proof.transfer_id.is_empty()
             || proof.evidence_id.is_empty()
@@ -3695,344 +3228,51 @@ impl Engine {
                 &proof.evidence_id,
             )
             || proof.proof_digest != gofin_domain::bridge_settlement_digest(&proof)?
-            || usable_credit_count != 1
-            || proof.effects.iter().any(|effect| match effect {
-                FinancialEffect::UsableCredit { amount, .. } => amount.atoms.is_zero(),
-                FinancialEffect::Cost {
-                    category,
-                    treatment: CostTreatment::DeductedFromCredit,
-                    ..
-                } => category.trim().is_empty(),
-                FinancialEffect::Cost {
-                    category,
-                    treatment: CostTreatment::IncludedInDebit,
-                    ..
-                } => category != "withheld_from_output",
-                _ => true,
-            })
+            || credits.len() != 1
         {
             return Err(GoFinError::new(
                 "BRIDGE_SETTLEMENT_INVALID",
                 "reconciliation",
-                "Final transfer proof is incomplete, untyped, or attempts to charge principal again.",
-                "Keep the transfer unresolved and reconcile the correlated destination or refund evidence.",
+                "The bridge observation lacks a correlated destination or refund proof.",
+                "Observe the original transfer again.",
             ));
         }
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        let mut transfer = store
-            .bridge_transfer(&proof.transfer_id)
-            .map_err(map_store)?
-            .ok_or_else(|| {
-                GoFinError::new(
-                    "BRIDGE_TRANSFER_NOT_FOUND",
-                    "reconciliation",
-                    "The durable transfer record is missing.",
-                    "Restore the original transfer journal; do not create a new transfer.",
-                )
-            })?;
-        if proof.effects.iter().any(|effect| {
-            matches!(
-                effect,
-                FinancialEffect::Cost {
-                    treatment: CostTreatment::IncludedInDebit,
-                    ..
-                }
-            )
-        }) && (transfer.plan_scope.is_none()
-            || proof.outcome != gofin_domain::BridgeSettlementOutcome::Destination)
-        {
-            return Err(GoFinError::new(
-                "BRIDGE_SETTLEMENT_INVALID",
-                "reconciliation",
-                "Source-denominated included costs require a named-plan destination settlement.",
-                "Keep the transfer unresolved and reconcile the exact approved bridge intent.",
-            ));
-        }
-        let expectation = transfer.settlement_expectation.as_ref().ok_or_else(|| {
-            GoFinError::new(
-                "BRIDGE_SETTLEMENT_SCOPE_MISSING",
-                "reconciliation",
-                "The durable transfer has no typed destination/refund settlement scope.",
-                "Keep the transfer unresolved and restore its original reviewed quote expectation.",
-            )
-        })?;
-        if transfer.approved_bounds.is_none()
-            || expectation.destination.len() != 1
-            || expectation
-                .destination
-                .iter()
-                .chain(expectation.refund.iter())
-                .any(|target| !valid_bridge_target(target))
-        {
-            return Err(GoFinError::new(
-                "BRIDGE_SETTLEMENT_SCOPE_INVALID",
-                "reconciliation",
-                "The transfer lacks immutable selected bounds or a valid chain-qualified settlement target.",
-                "Keep the transfer unresolved and restore its original approved quote scope.",
-            ));
-        }
-        let (credit_resource, credit_amount) = proof
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                FinancialEffect::UsableCredit { to, amount } => Some((to, amount)),
-                _ => None,
-            })
-            .ok_or_else(|| internal("validated bridge settlement lost its credit"))?;
-        let net_credit =
-            bridge_net_settlement_credit(&proof, &transfer, credit_resource, credit_amount)?;
-        let targets = match proof.outcome {
-            gofin_domain::BridgeSettlementOutcome::Destination => &expectation.destination,
-            gofin_domain::BridgeSettlementOutcome::Refund => &expectation.refund,
-        };
-        let permitted_target = targets.iter().find(|target| {
-            target.resource == *credit_resource
-                && target.asset == credit_amount.asset
-                && net_credit.integer() >= target.minimum_atoms.integer()
-        });
-        let expected_asset = to_value(&credit_amount.asset)?;
-        if permitted_target.is_none()
-            || proof
-                .evidence
-                .get("recipient_resource")
-                .and_then(Value::as_str)
-                != Some(credit_resource.0.as_str())
-            || proof.evidence.get("asset") != Some(&expected_asset)
+        let (resource, amount) = credits[0];
+        if proof
+            .evidence
+            .get("recipient_resource")
+            .and_then(Value::as_str)
+            != Some(resource.0.as_str())
+            || proof.evidence.get("asset") != Some(&to_value(&amount.asset)?)
             || proof.evidence.get("amount_atoms").and_then(Value::as_str)
-                != Some(credit_amount.atoms.as_str())
-            || !bridge_evidence_matches_resource(&proof.evidence, credit_resource)
-            || (credit_resource.0.starts_with("ethereum:")
-                && proof.evidence.get("recipient").and_then(Value::as_str)
-                    != credit_resource.0.rsplit(':').next())
+                != Some(amount.atoms.as_str())
+            || !bridge_evidence_matches_resource(&proof.evidence, resource)
         {
             return Err(GoFinError::new(
-                "BRIDGE_SETTLEMENT_OUT_OF_SCOPE",
+                "BRIDGE_SETTLEMENT_IDENTITY_MISMATCH",
                 "reconciliation",
-                "Final receipt credit does not match the reviewed destination/refund identity and minimum.",
-                "Keep the transfer unresolved and reconcile the exact correlated receipt against its saved quote.",
+                "The observed credit does not match its correlated receipt identity.",
+                "Observe the original transfer again.",
             ));
         }
-        if let Some(existing) = transfer
-            .settlement_proofs
-            .iter()
-            .find(|old| old.proof_digest == proof.proof_digest)
-        {
-            if existing == &proof {
-                return Ok(transfer);
-            }
-            return Err(GoFinError::new(
-                "BRIDGE_PROOF_CONFLICT",
-                "reconciliation",
-                "This proof digest already names different destination effects.",
-                "Preserve the transfer as unresolved and inspect the original proof record.",
-            ));
-        }
-        if transfer.transit.is_none()
-            || !matches!(
-                transfer.state,
-                gofin_domain::BridgeTransferState::InTransit
-                    | gofin_domain::BridgeTransferState::DestinationPending
-                    | gofin_domain::BridgeTransferState::RefundPending
-                    | gofin_domain::BridgeTransferState::NeedsAttention
-            )
-        {
-            return Err(GoFinError::new(
-                "BRIDGE_TRANSFER_NOT_PENDING",
-                "reconciliation",
-                "This transfer has no unresolved proven principal to settle.",
-                "Inspect its existing destination or refund proof; never apply principal twice.",
-            ));
-        }
-        match proof.outcome {
-            gofin_domain::BridgeSettlementOutcome::Destination => {
-                transfer.state = gofin_domain::BridgeTransferState::Completed;
-            }
-            gofin_domain::BridgeSettlementOutcome::Refund => {
-                transfer.state = gofin_domain::BridgeTransferState::Refunded;
-            }
-        }
-        transfer.version = transfer
-            .version
-            .checked_add(1)
-            .ok_or_else(|| internal("transfer version overflow"))?;
-        transfer.applied_proofs.push(proof.proof_digest.clone());
-        transfer.settlement_proofs.push(proof.clone());
-        transfer.transit = None;
-        let timestamp = self.clock.now().to_rfc3339();
-        if let Some(scope) = transfer.plan_scope.as_ref() {
-            let (expected_plan, updated_plan) = if proof.outcome
-                == gofin_domain::BridgeSettlementOutcome::Destination
-            {
-                let raw_plan = store
-                    .financial_plan(&scope.plan_id)
-                    .map_err(map_store)?
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_BRIDGE_OWNER_MISSING",
-                            "The plan-owned bridge has no durable named-plan record.",
-                            "Preserve the proved transfer and restore its original plan journal.",
-                        )
-                    })?;
-                let mut plan: gofin_domain::financial_plans::FinancialPlanAuthorizationRecord =
-                    from_value(raw_plan.clone())?;
-                let deposit_authority = transfer
-                    .steps
-                    .iter()
-                    .filter(|step| matches!(step.kind, gofin_domain::BridgeStepKind::Deposit | gofin_domain::BridgeStepKind::Finalize | gofin_domain::BridgeStepKind::Mint))
-                    .rev()
-                    .filter_map(|step| step.plan_authority.as_ref())
-                    .find(|authority| authority.plan_id == scope.plan_id)
-                    .ok_or_else(|| plan_error(
-                        "PLAN_BRIDGE_DEPOSIT_AUTHORITY_MISSING",
-                        "The plan-owned bridge has no persisted deposit step authority.",
-                        "Keep the final receipt recorded and restore the exact plan-link provenance.",
-                    ))?;
-                let raw_revision = store
-                    .financial_plan_revision(&scope.plan_id, &deposit_authority.revision_id)
-                    .map_err(map_store)?
-                    .ok_or_else(|| plan_error(
-                        "PLAN_BRIDGE_REVISION_MISSING",
-                        "The deposit step's approved plan revision is missing.",
-                        "Preserve the transfer proof and restore its immutable approval revision.",
-                    ))?;
-                let revision: gofin_domain::financial_plans::FinancialPlanRevision =
-                    from_value(raw_revision)?;
-                let permission = revision
-                    .permissions
-                    .iter()
-                    .find(|permission| permission.step_id == deposit_authority.plan_step_id)
-                    .ok_or_else(|| plan_error(
-                        "PLAN_BRIDGE_PERMISSION_MISSING",
-                        "The deposit step has no saved approved permission.",
-                        "Restore the immutable plan revision before applying its verified proceeds.",
-                    ))?;
-                let included_costs: Vec<CostBound> = proof
-                    .effects
-                    .iter()
-                    .filter_map(|effect| match effect {
-                        FinancialEffect::Cost {
-                            location,
-                            amount,
-                            category,
-                            treatment: CostTreatment::IncludedInDebit,
-                        } if category == "withheld_from_output" => Some(CostBound {
-                            location: location.clone(),
-                            amount: amount.clone(),
-                            treatment: CostTreatment::IncludedInDebit,
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                if included_costs.len() > 1 {
-                    return Err(plan_error(
-                        "PLAN_BRIDGE_COST_INVALID",
-                        "A bridge destination proof may account for only one measured source withheld fee.",
-                        "Keep the proof unchanged and reconcile the exact Relay settlement evidence.",
-                    ));
-                }
-                for cost in &included_costs {
-                    validate_bridge_native_withheld_cost(
-                        &store, &transfer, &proof, permission, cost,
-                    )?;
-                }
-                let (resource, amount) = proof
-                    .effects
-                    .iter()
-                    .find_map(|effect| match effect {
-                        FinancialEffect::UsableCredit { to, amount } => Some((to, amount)),
-                        _ => None,
-                    })
-                    .ok_or_else(|| internal("validated bridge proof has no receipt credit"))?;
-                let may_credit = if let Some(exact) = &permission.exact {
-                    exact.scope.possible_credits.iter().any(|identity| {
-                        identity.resource == *resource && identity.asset == amount.asset
-                    })
-                } else {
-                    permission.permission.as_ref().is_some_and(|permission| {
-                        permission.possible_credits.iter().any(|identity| {
-                            identity.resource == *resource && identity.asset == amount.asset
-                        })
-                    })
-                };
-                if !may_credit || deposit_authority.plan_id != scope.plan_id {
-                    return Err(plan_error(
-                        "PLAN_BRIDGE_CREDIT_OUT_OF_SCOPE",
-                        "Final bridge receipt is not an approved credit identity for the plan's deposit step.",
-                        "Keep the verified receipt on the transfer and do not use it to fund a dependent plan step.",
-                    ));
-                }
-                let net = net_credit.clone();
-                if !included_costs.is_empty() {
-                    let updated_costs = financial_plans::add_cost_bounds(
-                        &plan.usage.consumed_costs,
-                        &included_costs,
-                    )?;
-                    let adapter = permission.permission.as_ref().ok_or_else(|| plan_error(
-                        "PLAN_BRIDGE_PERMISSION_MISSING", "The bridge intent has no adapter-reviewed cost permission.",
-                        "Restore its immutable approval revision before booking the verified fee.",
-                    ))?;
-                    let scope = adapter.cumulative_scope.as_ref().ok_or_else(|| plan_error(
-                        "PLAN_BRIDGE_PERMISSION_MISSING", "The bridge intent has no cumulative cost permission.",
-                        "Restore its immutable approval revision before booking the verified fee.",
-                    ))?;
-                    remaining_costs(&adapter.spec.maximum_costs, Some(&updated_costs))?;
-                    remaining_costs(&scope.maximum_costs, Some(&updated_costs))?;
-                    remaining_costs(
-                        &plan.revision.spec.aggregate_bounds.maximum_costs,
-                        Some(&updated_costs),
-                    )?;
-                    plan.usage.consumed_costs = updated_costs;
-                }
-                if let Some(proceeds) = plan.usage.verified_proceeds.iter_mut().find(|proceeds| {
-                    proceeds.producing_step_id == deposit_authority.plan_step_id
-                        && proceeds.resource == *resource
-                        && proceeds.asset == amount.asset
-                }) {
-                    proceeds.available = proceeds.available.checked_add(&net)?;
-                } else {
-                    plan.usage.verified_proceeds.push(
-                        gofin_domain::financial_plans::FinancialPlanProceeds {
-                            producing_step_id: deposit_authority.plan_step_id.clone(),
-                            resource: resource.clone(),
-                            asset: amount.asset.clone(),
-                            available: net,
-                            consumed: gofin_domain::Quantity::zero(),
-                        },
-                    );
-                }
-                (raw_plan, to_value(&plan)?)
-            } else {
-                let raw_plan = store
-                    .financial_plan(&scope.plan_id)
-                    .map_err(map_store)?
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_BRIDGE_OWNER_MISSING",
-                            "The plan-owned bridge has no durable named-plan record.",
-                            "Preserve the proved refund and restore its original plan journal.",
-                        )
-                    })?;
-                (raw_plan.clone(), raw_plan)
-            };
-            store
-                .commit_financial_plan_bridge_transfer_settlement(
-                    &transfer,
-                    &proof,
-                    &timestamp,
-                    &scope.plan_id,
-                    &expected_plan,
-                    &updated_plan,
-                )
-                .map_err(map_store)?;
-        } else {
-            store
-                .commit_bridge_transfer_settlement(&transfer, &proof, &timestamp)
-                .map_err(map_store)?;
-        }
-        Ok(transfer)
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .record_bridge_transfer_observation(&proof, &self.clock.now().to_rfc3339())
+            .map_err(map_store)
+    }
+
+    /// Persist a later native fee proved by the same destination receipt.
+    pub fn commit_bridge_cost_refinement(
+        &self,
+        original_digest: &str,
+        proof: gofin_domain::BridgeSettlementProof,
+    ) -> Result<gofin_domain::BridgeTransferRecord> {
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .record_bridge_cost_refinement(original_digest, &proof, &self.clock.now().to_rfc3339())
+            .map_err(map_store)
     }
 
     /// Idempotently account a Relay native-ETH withheld fee discovered from
@@ -4228,14 +3468,100 @@ impl Engine {
         Ok(Some(candidate))
     }
 
-    pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
+    fn recover_approved_action(&self, record: &OperationRecord) -> Result<()> {
+        let (Some(audit), Some(prepared)) = (record.approval.as_ref(), record.preview.as_ref())
+        else {
+            return Ok(());
+        };
+        if record.status != Status::AwaitingApproval
+            || record.run_id.is_some()
+            || record.submission.is_some()
+            || parse_time(&audit.expires_at).is_err()
+            || matches!(
+                audit.source,
+                Some(
+                    gofin_domain::AuthorizationSource::Sudo
+                        | gofin_domain::AuthorizationSource::NamedPlan
+                        | gofin_domain::AuthorizationSource::BoundedGrant
+                )
+            )
+            || binding_hash(&gofin_domain::native_authorization_binding(prepared))
+                .ok()
+                .as_deref()
+                != Some(audit.binding_hash.as_str())
+        {
+            return Ok(());
+        }
+        // Rebuild the passive recovery path even if the original approval has
+        // expired or its Yolo activation ended. Its original audit and expiry
+        // remain unchanged; normal continuation and dispatch independently
+        // validate current authority, and expired authority requires review.
+        let authority = json!({"audit":audit,"intent":gofin_domain::native_authorization_binding(prepared),"prepared":prepared});
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .recover_interrupted()
+            .restore_unsubmitted_action_authority(&record.id, &to_value(record)?, &authority)
             .map_err(map_store)
     }
 
+    pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
+        let (report, candidates) = {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            let report = store.recover_interrupted().map_err(map_store)?;
+            let candidates = store.approved_unsubmitted_records().map_err(map_store)?;
+            (report, candidates)
+        };
+        for value in candidates {
+            let Ok(record) = from_value::<OperationRecord>(value) else {
+                continue;
+            };
+            if let Err(error) = self.recover_approved_action(&record) {
+                if error.code == "EXECUTION_CONFLICT" {
+                    continue;
+                }
+                return Err(error);
+            }
+            let expired = record.approval.as_ref().is_some_and(|audit| {
+                parse_time(&audit.expires_at).is_ok_and(|expiry| expiry <= self.clock.now())
+            });
+            let standalone = record.preview.as_ref().is_some_and(|preview| {
+                self.adapters
+                    .read()
+                    .ok()
+                    .and_then(|adapters| adapters.get(&record.operation).cloned())
+                    .is_some_and(|adapter| !adapter.is_compound_action(preview))
+            }) && !(record.operation == "bridge.execute"
+                && record.input.get("intent").is_some());
+            if expired && standalone && record.run_id.is_none() {
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                match store.try_acquire_action_lease(&record.id) {
+                    Ok(lease) => {
+                        match store.expire_unsubmitted_approval(
+                            &lease,
+                            &to_value(&record)?,
+                            &self.clock.now().to_rfc3339(),
+                        ) {
+                            Ok(_)
+                            | Err(StoreError::ExecutionConflict)
+                            | Err(StoreError::ActionLeaseHeld) => {}
+                            Err(error) => return Err(map_store(error)),
+                        }
+                    }
+                    Err(StoreError::ActionLeaseHeld | StoreError::ExecutionConflict) => {}
+                    Err(error) => return Err(map_store(error)),
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    #[cfg(test)]
     pub(crate) fn begin_run(&self, plan: RunPlan, now_instant: DateTime<Utc>) -> Result<RunResult> {
         if plan.id.trim().is_empty()
             || plan.allocations.is_empty()
@@ -4425,152 +3751,11 @@ impl Engine {
 
     pub fn finish_run(
         &self,
-        id: &str,
-        final_snapshot: StateSnapshot,
-        now_instant: DateTime<Utc>,
+        _id: &str,
+        _final_snapshot: StateSnapshot,
+        _now_instant: DateTime<Utc>,
     ) -> Result<RunResult> {
-        validate_observation(
-            &final_snapshot.observed_at,
-            now_instant,
-            "STALE_FINAL_STATE",
-        )?;
-        let mut run: RunLedger = self.load_run(id)?;
-        let mut differences = BTreeMap::new();
-        if !final_snapshot.complete || final_snapshot.coverage.is_empty() {
-            differences.insert(
-                "snapshot".into(),
-                "final state observation is incomplete".into(),
-            );
-        }
-        if !snapshot_resources_covered(&final_snapshot) {
-            differences.insert(
-                "snapshot_coverage".into(),
-                "some reported resources lack observer coverage".into(),
-            );
-        }
-        if !final_snapshot.pending.is_empty() {
-            differences.insert(
-                "pending".into(),
-                format!(
-                    "unresolved external state: {}",
-                    final_snapshot.pending.join(",")
-                ),
-            );
-        }
-        for resource in run_physical_resources(&run) {
-            if !final_snapshot.coverage.contains(&resource.0) {
-                differences.insert(
-                    format!("coverage:{}", resource.0),
-                    "physical resource is missing from the final observation".into(),
-                );
-            }
-        }
-        if !run.reservations.is_empty() {
-            differences.insert("reservations".into(), "unresolved operations remain".into());
-        }
-        match run_cost_usd_micros(&run.costs, &run.asset_prices) {
-            Ok(actual_cost) => {
-                if actual_cost > parse_uint(&run.return_cost_reserve_usd_micros)? {
-                    differences.insert(
-                        "cost:reserve".into(),
-                        format!(
-                            "verified costs {actual_cost} exceed reserved {} USD micros",
-                            run.return_cost_reserve_usd_micros
-                        ),
-                    );
-                }
-            }
-            Err(_) => {
-                differences.insert(
-                    "cost:valuation".into(),
-                    "verified costs cannot be valued using the run's trusted prices".into(),
-                );
-            }
-        }
-        if !final_snapshot.state.in_flight.is_empty() {
-            differences.insert(
-                "in_flight".into(),
-                "financial operations remain pending".into(),
-            );
-        }
-        for operation in self.operations()? {
-            if operation.run_id.as_deref() == Some(id)
-                && !matches!(
-                    operation.status,
-                    Status::Completed
-                        | Status::Failed
-                        | Status::Rejected
-                        | Status::Cancelled
-                        | Status::Expired
-                )
-            {
-                differences.insert(
-                    format!("operation:{}", operation.id),
-                    format!("unresolved status {:?}", operation.status),
-                );
-            }
-        }
-        compare_position_claims(
-            &run.baseline.state.positions,
-            &final_snapshot.state.positions,
-            &mut differences,
-        );
-        compare_exact(
-            &run.baseline.state.authorities,
-            &final_snapshot.state.authorities,
-            "authority",
-            &mut differences,
-        );
-        let (expected_cash, conversion_deltas, provenance_issues) = expected_restored_cash(&run)?;
-        run.net_conversion_deltas = conversion_deltas;
-        for (index, issue) in provenance_issues.into_iter().enumerate() {
-            differences.insert(format!("provenance:{index}"), issue);
-        }
-        let final_map = aggregate_amounts(&final_snapshot.state.holdings)?;
-        let provenance_cash = aggregate_provenance_cash(&run.provenance)?;
-        let available_cash = aggregate_amounts(&run.available)?;
-        for key in provenance_cash
-            .keys()
-            .chain(available_cash.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>()
-        {
-            let provenance_amount = provenance_cash.get(&key).cloned().unwrap_or_default();
-            let available_amount = available_cash.get(&key).cloned().unwrap_or_default();
-            if provenance_amount != available_amount {
-                differences.insert(
-                    format!("provenance:available:{key}"),
-                    format!(
-                        "receipt-derived cash lots {provenance_amount} disagree with available ledger {available_amount}"
-                    ),
-                );
-            }
-        }
-        let all_keys = expected_cash
-            .keys()
-            .chain(final_map.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for key in all_keys {
-            let final_amount = final_map.get(&key).cloned().unwrap_or_else(BigUint::zero);
-            let expected = expected_cash.get(&key).cloned().unwrap_or_default();
-            if final_amount != expected {
-                differences.insert(
-                    key,
-                    format!("expected {expected} from exact origin lots, observed {final_amount}"),
-                );
-            }
-        }
-        run.final_state = Some(final_snapshot.clone());
-        run.final_observed_at = Some(final_snapshot.observed_at.clone());
-        run.differences = differences;
-        run.status = if run.differences.is_empty() {
-            RunStatus::Restored
-        } else {
-            RunStatus::CleanupOutstanding
-        };
-        self.save_run(&run)?;
-        Ok(run_result(&run))
+        Err(retired_execution_interface())
     }
 
     fn resolve(&self, operation: &str) -> Result<(Arc<dyn Adapter>, OperationKind)> {
@@ -4600,29 +3785,12 @@ impl Engine {
         Ok((adapter, definition))
     }
 
-    /// Reject operation wrappers whose only authority model is an approved
-    /// named-plan intent. This applies to standalone execution and boundary
-    /// grants, which otherwise could turn a flexible route nomination into an
-    /// independent write authority.
-    pub(crate) fn reject_plan_only_standalone(&self, operation: &str) -> Result<()> {
-        let (_, definition) = self.resolve_definition(operation)?;
-        if definition.semantics["plan_only"] == true {
-            return Err(GoFinError::new(
-                "PLAN_REQUIRED",
-                "financial_plan",
-                "This operation can execute only as an approved named-plan step.",
-                "Review and authorize a plan that fixes its financial intent, then nominate the concrete route at step execution.",
-            ));
-        }
-        Ok(())
-    }
-
     fn load_record(&self, id: &str) -> Result<OperationRecord> {
         let value = self
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .get_record(id)
+            .get_typed_record(id)
             .map_err(map_store)?
             .ok_or_else(|| {
                 GoFinError::new(
@@ -4668,34 +3836,6 @@ impl Engine {
                 &self.clock.now().to_rfc3339(),
             )
             .map_err(map_store)
-    }
-
-    fn require_active_boundary(&self, id: &str) -> Result<BoundaryAuthorization> {
-        let mut record = self.load_boundary_record(id)?;
-        if record.authorization.status == BoundaryAuthorizationStatus::Active
-            && parse_time(&record.authorization.expires_at)? <= self.clock.now()
-        {
-            let before = record.clone();
-            record.authorization.status = BoundaryAuthorizationStatus::Expired;
-            self.save_boundary_record(&before, &record)?;
-        }
-        if record.authorization.status != BoundaryAuthorizationStatus::Active {
-            return Err(GoFinError::new(
-                "BOUNDARY_AUTHORIZATION_INACTIVE",
-                "authorization",
-                "Boundary authorization is expired, revoked, superseded, or exhausted.",
-                "Review the authorization status; new or changed boundaries require fresh approval.",
-            ));
-        }
-        if record.active_attempt.is_some() {
-            return Err(GoFinError::new(
-                "BOUNDARY_ATTEMPT_UNRESOLVED",
-                "authorization",
-                "An earlier attempt is unresolved and may still consume this intent.",
-                "Reconcile that original attempt before proposing another candidate.",
-            ));
-        }
-        Ok(record.authorization)
     }
 
     fn update_record(&self, record: &OperationRecord) -> Result<()> {
@@ -5400,6 +4540,7 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     fn save_run(&self, run: &RunLedger) -> Result<()> {
         self.store
             .lock()
@@ -5426,6 +4567,7 @@ impl Engine {
         from_value(value)
     }
 
+    #[cfg(test)]
     fn reserve_run_operation(
         &self,
         run_id: &str,
@@ -5601,31 +4743,7 @@ impl Engine {
         Ok(run)
     }
 
-    fn recheck_run_reservation(
-        &self,
-        run_id: &str,
-        operation_id: &str,
-        prepared: &PreparedOperation,
-    ) -> Result<()> {
-        let run = self.load_run(run_id)?;
-        let reservation = run
-            .reservations
-            .get(operation_id)
-            .ok_or_else(|| internal("durable run reservation disappeared"))?;
-        if reservation.binding_hash != binding_hash(&authorization_binding(prepared))?
-            || reservation.debits != prepared.intent.debits
-            || reservation.maximum_costs != prepared.intent.maximum_costs
-        {
-            return Err(GoFinError::new(
-                "REQUEST_CHANGED",
-                "approval",
-                "Approved execution or reserved source bounds changed during revalidation.",
-                "Preview again and obtain fresh approval.",
-            ));
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     fn settle_run(
         &self,
         run: &mut RunLedger,
@@ -5727,8 +4845,14 @@ impl Engine {
             .as_ref()
             .is_some_and(|p| p.valuation.is_some())
         {
-            let preview = record.preview.as_ref().expect("checked");
-            let valuation = preview.valuation.as_ref().expect("checked");
+            let preview = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("preview missing"))?;
+            let valuation = preview
+                .valuation
+                .as_ref()
+                .ok_or_else(|| internal("valuation missing"))?;
             let cost_usd = actual_cost_usd(&verified.effects, valuation)?;
             if cost_usd > parse_uint(&reservation.maximum_fee_usd_micros)? {
                 return Err(GoFinError::new(
@@ -5799,47 +4923,24 @@ struct OperationSubmissionJournal {
     operation_id: String,
     authorization_route: SubmissionAuthorizationRoute,
     expected_binding_hash: String,
+    approved_candidate: Option<PreparedOperation>,
+    compound_stage: Option<CompoundJournalStage>,
+    resource_guards: Mutex<Option<Vec<tokio::sync::OwnedMutexGuard<()>>>>,
+    release_resource_guards_on_admission: bool,
     approval: ApprovalAudit,
     authorizer: Option<Arc<dyn gofin_domain::Authorizer>>,
-    boundary_authorization_id: Option<String>,
-    boundary_authorization_snapshot: Option<BoundaryAuthorizationRecord>,
-    financial_plan_id: Option<String>,
-    financial_plan_snapshot: Option<FinancialPlanAuthorizationRecord>,
     adapter: Option<Arc<dyn Adapter>>,
-    options: EngineOptions,
     clock: Arc<dyn gofin_domain::clock::Clock>,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
     record: Mutex<OperationRecord>,
 }
 
-fn plan_recovery_parent_identity(
-    plan: &FinancialPlanAuthorizationRecord,
-    operation_id: &str,
-) -> Option<(String, String)> {
-    let linkage = plan.attempts.iter().find(|attempt| {
-        attempt.attempt_id == operation_id
-            && attempt.revision_id == plan.revision.revision_id
-            && attempt.plan_id == plan.revision.plan_id
-    })?;
-    let recovery = plan
-        .revision
-        .permissions
-        .iter()
-        .find(|permission| permission.step_id == linkage.step_id)?
-        .permission
-        .as_ref()?
-        .recovery_parent
-        .as_ref()?;
-    let parent_id = plan.active_attempt_id.as_ref()?;
-    plan.attempts
-        .iter()
-        .any(|attempt| {
-            attempt.attempt_id == *parent_id
-                && attempt.step_id == recovery.step_id
-                && attempt.revision_id == plan.revision.revision_id
-        })
-        .then(|| (parent_id.clone(), recovery.step_id.clone()))
+struct CompoundJournalStage {
+    token: String,
+    stage_id: String,
+    parent: PreparedOperation,
+    parent_adapter: Arc<dyn Adapter>,
 }
 
 impl SubmissionJournal for OperationSubmissionJournal {
@@ -5865,136 +4966,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             validate_prepared(prepared, &record.operation, self.clock.now())?;
         }
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
-        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            let current: FinancialPlanAuthorizationRecord = {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                from_value(store.financial_plan(id).map_err(map_store)?.ok_or_else(|| plan_error("PLAN_NOT_FOUND", "Plan authority no longer exists.", "Keep the attempt unresolved and reconcile its original submission."))?)?
-            };
-            validate_financial_approval_source(&current.approval)?;
-            let recovery_parent_active =
-                plan_recovery_parent_identity(&current, &self.operation_id)
-                    .filter(|(parent_id, _)| {
-                        current.active_attempt_id.as_deref() == Some(parent_id.as_str())
-                    })
-                    .is_some_and(|(parent_id, _)| {
-                        self.store
-                            .lock()
-                            .ok()
-                            .and_then(|store| store.get_record(&parent_id).ok().flatten())
-                            .and_then(|value| from_value::<OperationRecord>(value).ok())
-                            .is_some_and(|parent| {
-                                matches!(
-                                    parent.status,
-                                    Status::Submitted | Status::Pending | Status::Unknown
-                                ) && parent.submission.is_some()
-                            })
-                    });
-            if current.revision.revision_id != snapshot.revision.revision_id
-                || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= self.clock.now()
-                || (current.active_attempt_id.as_deref() != Some(self.operation_id.as_str())
-                    && !recovery_parent_active)
-            {
-                return Err(plan_error(
-                    "PLAN_AUTHORIZATION_INACTIVE",
-                    "Plan authority is revoked, expired, or no longer owns this attempt.",
-                    "Reconcile the original attempt; fresh authorization is required for another attempt.",
-                ));
-            }
-            let operation = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .clone();
-            let prepared = operation.preview.ok_or_else(|| {
-                plan_error(
-                    "PLAN_CANDIDATE_MISSING",
-                    "Plan attempt has no durable prepared candidate.",
-                    "Keep the attempt unresolved and inspect its original record.",
-                )
-            })?;
-            let adapter = self
-                .adapter
-                .as_ref()
-                .ok_or_else(|| internal("plan execution adapter is missing"))?;
-            let linkage = current
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "Plan attempt linkage is missing.",
-                        "Keep the attempt unresolved and reconcile its original record.",
-                    )
-                })?;
-            let step = current
-                .revision
-                .spec
-                .steps
-                .iter()
-                .find(|step| step.step_id == linkage.step_id)
-                .ok_or_else(|| internal("plan step disappeared"))?;
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &step.operation,
-                &prepared,
-                &current.revision.expires_at,
-            )?;
-            let candidate_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &prepared,
-                    id,
-                    &current.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if candidate_hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The concrete candidate changed after it was bound to this attempt.",
-                    "Reconcile this attempt before proposing another candidate.",
-                ));
-            }
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                ordinary_policy::validate_boundary_candidate_policy(
-                    &prepared,
-                    &self.operation_id,
-                    &self.options,
-                    &store,
-                    self.clock.now(),
-                )?;
-            }
-            return Ok(());
-        }
-        if let Some(id) = &self.boundary_authorization_id {
-            let grant = self.active_boundary_grant(id)?;
-            let prepared = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .preview
-                .clone()
-                .ok_or_else(|| {
-                    boundary_error("Boundary attempt has no durable candidate preview.")
-                })?;
-            self.validate_boundary_candidate(&grant, &prepared)?;
-            Ok(())
-        } else {
-            validate_future_expiry(
-                &self.approval.expires_at,
-                self.clock.now(),
-                "APPROVAL_EXPIRED",
-            )
-        }
+        validate_future_expiry(
+            &self.approval.expires_at,
+            self.clock.now(),
+            "APPROVAL_EXPIRED",
+        )
     }
 
     fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
@@ -6004,248 +4980,78 @@ impl SubmissionJournal for OperationSubmissionJournal {
         ) {
             validate_financial_approval_source(&self.approval)?;
         }
-        // Boundary attempts take this separate path without calling
-        // assert_authorized, so they need their own protected Yolo check.
         self.assert_yolo_authority_current()?;
-        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            self.assert_authorized()?;
-            let raw_input = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .input
-                .clone();
-            let current: FinancialPlanAuthorizationRecord = from_value(
-                self.store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?
-                    .financial_plan(id)
-                    .map_err(map_store)?
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_NOT_FOUND",
-                            "Plan authority no longer exists.",
-                            "Reconcile the original attempt.",
-                        )
-                    })?,
-            )?;
-            let linkage = current
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "Plan attempt linkage is missing.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-            let mut candidate = prepared.clone();
-            let original = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .preview
-                .clone()
-                .ok_or_else(|| internal("plan preview missing"))?;
-            financial_plans::carry_action_deadline(&original, &mut candidate)?;
-            let prepared = &candidate;
-            let hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    prepared,
-                    id,
-                    &current.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The adapter revalidation changed the immutable plan candidate.",
-                    "Reconcile this attempt before proposing another candidate.",
+        self.assert_authorized()?;
+        if let Some(stage) = &self.compound_stage {
+            if binding_hash(&gofin_domain::native_authorization_binding(&stage.parent))?
+                != self.expected_binding_hash
+            {
+                return Err(GoFinError::validation(
+                    "The approved compound intent changed.",
                 ));
             }
-            let adapter = self
-                .adapter
-                .as_ref()
-                .ok_or_else(|| internal("plan execution adapter is missing"))?;
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &current
-                    .revision
-                    .spec
-                    .steps
-                    .iter()
-                    .find(|step| step.step_id == linkage.step_id)
-                    .ok_or_else(|| internal("plan step disappeared"))?
-                    .operation,
-                prepared,
-                &current.revision.expires_at,
-            )?;
-            financial_plans::validate_action_deadline(
-                adapter.as_ref(),
-                &current.revision,
-                &linkage.step_id,
-                &raw_input,
+            compound_driver::validate_parent_stage(
+                stage.parent_adapter.as_ref(),
+                &stage.parent,
+                &stage.stage_id,
                 prepared,
             )?;
-            let permission = permission_for_step(&current.revision, &linkage.step_id)?;
-            if let Some(exact) = &permission.exact {
-                let step = current
-                    .revision
-                    .spec
-                    .steps
-                    .iter()
-                    .find(|step| step.step_id == linkage.step_id)
-                    .ok_or_else(|| internal("plan step disappeared"))?;
-                financial_plans::validate_exact_plan_candidate(
-                    adapter.as_ref(),
-                    &step.operation,
-                    &step.input,
-                    exact,
-                    &raw_input,
-                    prepared,
-                )?;
-            } else {
-                let scope = permission
-                    .permission
-                    .as_ref()
-                    .ok_or_else(|| internal("adapter plan permission disappeared"))?;
-                adapter.validate_boundary_candidate(&scope.spec, prepared)?;
-            }
-            financial_plans::validate_generated_plan_candidate(
-                adapter.as_ref(),
-                &current.revision,
-                &linkage.step_id,
-                &raw_input,
-                &prepared.input,
-                &self.operation_id,
-                prepared,
-            )?;
-            let durable_submission = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .submission
-                .clone();
-            if let Some(submission) = durable_submission {
-                let expected_submission_id =
-                    format!("{}:{}", submission.kind, submission.reference);
-                if linkage.submission_id.as_deref() != Some(expected_submission_id.as_str()) {
-                    return Err(plan_error(
-                        "PLAN_SUBMISSION_BINDING_MISMATCH",
-                        "The durable plan attempt no longer names its persisted submission.",
-                        "Keep the attempt unresolved and reconcile the original submission identity.",
-                    ));
-                }
-                // The submission transaction has already advanced the plan
-                // record. Revalidate authority and the immutable candidate,
-                // but do not CAS-write the pre-submission snapshot again.
-                return Ok(());
-            }
-            if linkage.submission_id.is_some() {
-                return Err(plan_error(
-                    "PLAN_SUBMISSION_BINDING_MISMATCH",
-                    "The plan records a submission that is missing from the operation journal.",
-                    "Keep the attempt unresolved and reconcile its durable submission record.",
-                ));
-            }
-            let mut durable_candidate = prepared.clone();
-            financial_plans::inject_plan_marker(
-                &mut durable_candidate,
-                &current,
-                &linkage.step_id,
-                hash.clone(),
-            )?;
-            let updated_record = {
-                let mut record = self
-                    .record
-                    .lock()
-                    .map_err(|_| internal("journal record lock poisoned"))?;
-                record.preview = Some(durable_candidate.clone());
-                record.updated_at = self.clock.now().to_rfc3339();
-                record.clone()
-            };
-            let mut store = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?;
-            validate_candidate_plan_caps(&current, &linkage.step_id, prepared, &store)?;
-            ordinary_policy::validate_boundary_candidate_policy(
-                prepared,
-                &self.operation_id,
-                &self.options,
-                &store,
-                self.clock.now(),
-            )?;
-            store
-                .update_financial_plan_candidate_preview(
-                    id,
-                    &to_value(snapshot)?,
-                    &self.operation_id,
-                    &to_value(&updated_record)?,
-                    &updated_record.updated_at,
-                )
-                .map_err(map_store)?;
-            return Ok(());
-        }
-        let Some(grant_id) = self.boundary_authorization_id.as_deref() else {
-            return self.assert_authorized();
-        };
-        ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
-        let grant = self.active_boundary_grant(grant_id)?;
-        self.validate_boundary_candidate(&grant, prepared)?;
-        let durable_submission = self
-            .record
-            .lock()
-            .map_err(|_| internal("journal record lock poisoned"))?
-            .submission
-            .clone();
-        if let Some(submission) = durable_submission {
-            let expected = SubmissionRow {
-                kind: submission.kind,
-                reference: submission.reference,
-                data: submission.data,
-            };
-            let recorded = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .submission(&self.operation_id)
-                .map_err(map_store)?;
-            if recorded.as_ref() != Some(&expected) {
-                return Err(GoFinError::new(
-                    "SUBMISSION_IDENTITY_CHANGED",
-                    "reconciliation",
-                    "The boundary attempt no longer matches its durable submission identity.",
-                    "Keep the attempt unresolved and reconcile the original submission.",
-                ));
-            }
-            // The submission is already durable. Keep validating authority and
-            // candidate binding, but do not rewrite the pre-submission preview.
-            return Ok(());
-        }
-        let record = {
-            let mut current = self
+            let record = self
                 .record
                 .lock()
                 .map_err(|_| internal("journal record lock poisoned"))?;
-            current.preview = Some(prepared.clone());
-            current.updated_at = self.clock.now().to_rfc3339();
-            current.clone()
-        };
-        self.store
+            let candidate = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("stage candidate missing"))?;
+            if binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(prepared),
+            ))? != binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(candidate),
+            ))? {
+                return Err(GoFinError::validation(
+                    "The submitted payload differs from the claimed stage candidate.",
+                ));
+            }
+            return Ok(());
+        }
+        let approved = self
+            .approved_candidate
+            .as_ref()
+            .ok_or_else(|| internal("approved candidate missing"))?;
+        if binding_hash(&gofin_domain::native_authorization_binding(approved))?
+            != self.expected_binding_hash
+        {
+            return Err(GoFinError::validation(
+                "The approved native intent changed.",
+            ));
+        }
+        if let Some(adapter) = &self.adapter {
+            adapter.validate_approved_candidate(
+                &strip_plan_metadata(approved),
+                &strip_plan_metadata(prepared),
+            )?;
+        }
+        let record = self
+            .record
             .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .update_boundary_candidate_preview(
-                grant_id,
-                &to_value(&grant)?,
-                &self.operation_id,
-                &to_value(&record)?,
-                &record.updated_at,
-            )
-            .map_err(map_store)?;
+            .map_err(|_| internal("journal record lock poisoned"))?;
+        let exact_candidate = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| internal("submission candidate missing"))?;
+        if binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(prepared),
+        ))? != binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(exact_candidate),
+        ))? {
+            return Err(GoFinError::new(
+                "REQUEST_CHANGED",
+                "approval",
+                "The candidate differs from the approved native terms.",
+                "Nothing was submitted; obtain approval for changed terms.",
+            ));
+        }
         Ok(())
     }
 
@@ -6294,6 +5100,43 @@ impl SubmissionJournal for OperationSubmissionJournal {
 }
 
 impl OperationSubmissionJournal {
+    fn record_transport_acceptance(&self, submission: &Submission) -> Result<()> {
+        let record = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?;
+        if record.submission.as_ref() != Some(submission) {
+            return Err(internal(
+                "transport response does not match admitted submission",
+            ));
+        }
+        let already_recorded = record.dispatch_evidence.is_some();
+        let no_send = record.dispatch_evidence.as_ref().is_some_and(|e| {
+            e.get("no_network_send").and_then(Value::as_bool) == Some(true)
+                || e.get("outcome").and_then(Value::as_str) == Some("not_submitted")
+        });
+        drop(record);
+        if no_send {
+            return Ok(());
+        }
+        if !already_recorded {
+            self.persist_dispatch_evidence(submission, &json!({"engine_transport_accepted":true,"submission_reference":submission.reference}))?;
+        }
+        let record = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .clone();
+        let mut facts = operation_resolutions::outcome_facts(&record);
+        facts.dispatch = gofin_domain::outcome::Dispatch::Dispatched;
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .append_outcome_observation(&record.id, &facts, "engine_transport_accepted")
+            .map_err(map_store)?;
+        Ok(())
+    }
+
     fn assert_yolo_authority_current(&self) -> Result<()> {
         if self.consumed.load(Ordering::Acquire)
             || self.approval.source != Some(gofin_domain::AuthorizationSource::Yolo)
@@ -6312,76 +5155,22 @@ impl OperationSubmissionJournal {
         validate_submission_authority_lease(&self.approval, lease.as_ref()).map(|_| ())
     }
 
-    fn active_boundary_grant(&self, id: &str) -> Result<BoundaryAuthorizationRecord> {
-        let raw = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .boundary_authorization(id)
-            .map_err(map_store)?
-            .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
-        let record: BoundaryAuthorizationRecord = from_value(raw)?;
-        validate_financial_approval_source(&record.approval)?;
-        if record.authorization.status != BoundaryAuthorizationStatus::Active
-            || parse_time(&record.authorization.expires_at)? <= self.clock.now()
-            || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
-        {
-            return Err(boundary_error(
-                "Boundary authorization is revoked, expired, or no longer owns this attempt.",
-            ));
-        }
-        Ok(record)
-    }
-
-    fn validate_boundary_candidate(
-        &self,
-        grant: &BoundaryAuthorizationRecord,
-        prepared: &PreparedOperation,
-    ) -> Result<()> {
-        if let Some(adapter) = self.adapter.as_ref() {
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &grant.authorization.operation,
-                prepared,
-                &grant.authorization.expires_at,
-            )?;
-        }
-        let metadata = prepared
-            .binding
-            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
-            .ok_or_else(|| {
-                boundary_error("Prepared candidate lost its boundary authorization marker.")
-            })?;
-        let expected = metadata
-            .get("attempt_binding_hash")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                boundary_error("Prepared candidate has no immutable attempt binding.")
-            })?;
-        if binding_hash(&boundaries::attempt_binding(prepared))? != expected {
-            return Err(GoFinError::new(
-                "REQUEST_CHANGED",
-                "approval",
-                "Revalidated candidate differs from its immutable attempt binding.",
-                "Prepare and review the changed candidate.",
-            ));
-        }
-        validate_candidate_caps(&grant.authorization, prepared)?;
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        ordinary_policy::validate_boundary_candidate_policy(
-            prepared,
-            &self.operation_id,
-            &self.options,
-            &store,
-            self.clock.now(),
-        )
-    }
-
     fn persist_submission_internal(&self, submission: &Submission) -> Result<()> {
+        if matches!(
+            self.authorization_route,
+            SubmissionAuthorizationRoute::Financial
+        ) {
+            gofin_domain::execution_progress::ensure_invocation_active()?;
+        }
         self.assert_authorized()?;
+        let candidate = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .preview
+            .clone()
+            .ok_or_else(|| internal("submission preview missing"))?;
+        self.assert_candidate(&candidate)?;
         let authority_lease = match &self.authorizer {
             Some(authorizer) => Some(authorizer.acquire_submission_authority(&self.approval)?),
             None if self.approval.source == Some(gofin_domain::AuthorizationSource::Yolo) => {
@@ -6455,95 +5244,183 @@ impl OperationSubmissionJournal {
                     .get("yolo_provenance")
                     .is_some_and(|value| !value.is_null())
         });
-        if let (Some(id), Some(snapshot)) = (
-            &self.boundary_authorization_id,
-            &self.boundary_authorization_snapshot,
+        if let Some(stage) = &self.compound_stage {
+            let audit = admission_audit
+                .as_ref()
+                .ok_or_else(|| internal("submission approval audit missing"))?;
+            store
+                .admit_stage_submission(
+                    &stage.token,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                    audit,
+                )
+                .map_err(map_store)?;
+        } else if matches!(
+            self.authorization_route,
+            SubmissionAuthorizationRoute::Financial
         ) {
-            if has_yolo_admission {
-                store
-                    .persist_boundary_submission_with_audit(
-                        id,
-                        &to_value(snapshot)?,
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                        admission_audit.as_ref().unwrap(),
-                    )
-                    .map_err(map_store)?;
-            } else {
-                store
-                    .persist_boundary_submission(
-                        id,
-                        &to_value(snapshot)?,
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                    )
-                    .map_err(map_store)?;
-            }
-        } else if let (Some(id), Some(snapshot)) =
-            (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            let mut updated = snapshot.clone();
-            if let Some(linkage) = updated
-                .attempts
-                .iter_mut()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
+            // Register immutable native approval and exact candidate, then atomically
+            // admit its submission while the authority lease is held.
+            let audit = admission_audit
+                .as_ref()
+                .ok_or_else(|| internal("submission approval audit missing"))?;
+            let candidate = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("submission preview missing"))?;
+            let authority_id = &self.approval.challenge_nonce;
+            let approved = self
+                .approved_candidate
+                .as_ref()
+                .ok_or_else(|| internal("approved candidate missing"))?;
+            let authority = json!({"audit": audit, "intent": gofin_domain::native_authorization_binding(approved), "prepared": approved});
+            if store
+                .action_authority(&self.operation_id, authority_id)
+                .map_err(map_store)?
+                .is_none()
             {
-                linkage.submission_id =
-                    Some(format!("{}:{}", submission.kind, submission.reference));
-            }
-            if has_yolo_admission {
                 store
-                    .persist_financial_plan_submission_with_audit(
-                        id,
-                        &to_value(snapshot)?,
-                        &to_value(&updated)?,
+                    .register_action_authority(
                         &self.operation_id,
-                        &snapshot.revision.expires_at,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                        admission_audit.as_ref().unwrap(),
-                    )
-                    .map_err(map_store)?;
-            } else {
-                store
-                    .persist_financial_plan_submission(
-                        id,
-                        &to_value(snapshot)?,
-                        &to_value(&updated)?,
-                        &self.operation_id,
-                        &snapshot.revision.expires_at,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
+                        &self.approval.expires_at,
+                        authority_id,
+                        &authority,
+                        &self.approval.expires_at,
                     )
                     .map_err(map_store)?;
             }
+            let stage = store
+                .issue_stage_continuation(&self.operation_id, "standalone", authority_id)
+                .map_err(map_store)?;
+            let claimed = store
+                .claim_stage_attempt(&stage.token, &self.operation_id, &to_value(candidate)?)
+                .map_err(map_store)?;
+            if !claimed.created {
+                return Err(GoFinError::new(
+                    "ATTEMPT_ALREADY_CLAIMED",
+                    "submission",
+                    "This action already has a durable attempt.",
+                    "Observe the original action.",
+                ));
+            }
+            store
+                .admit_stage_submission(
+                    &stage.token,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                    audit,
+                )
+                .map_err(map_store)?;
+        } else if has_yolo_admission {
+            store
+                .persist_submission_with_audit(
+                    &self.operation_id,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                    admission_audit
+                        .as_ref()
+                        .ok_or_else(|| internal("admission audit missing"))?,
+                )
+                .map_err(map_store)?;
         } else {
-            if has_yolo_admission {
-                store
-                    .persist_submission_with_audit(
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                        admission_audit.as_ref().unwrap(),
-                    )
-                    .map_err(map_store)?;
-            } else {
-                store
-                    .persist_submission(
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                    )
-                    .map_err(map_store)?;
-            }
+            store
+                .persist_submission(
+                    &self.operation_id,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                )
+                .map_err(map_store)?;
         }
         record.submission = Some(submission.clone());
         record.status = Status::Submitted;
         record.updated_at = self.clock.now().to_rfc3339();
+        drop(store);
+        if self.release_resource_guards_on_admission {
+            self.resource_guards
+                .lock()
+                .map_err(|_| internal("resource guard lock poisoned"))?
+                .take();
+        }
         Ok(())
     }
+}
+
+// Serialize only submissions that share a typed resource. The locks protect
+// candidate finalization/nonce construction through dispatch, never settlement.
+async fn acquire_submission_resources(
+    prepared: &PreparedOperation,
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    static LOCKS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, Arc<AsyncMutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut keys = prepared
+        .intent
+        .debits
+        .iter()
+        .map(|d| d.resource.0.clone())
+        .collect::<BTreeSet<_>>();
+    keys.extend(
+        prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .map(|c| c.location.resource().0.clone()),
+    );
+    if keys.is_empty() {
+        keys.extend(prepared.intent.locks.iter().map(|r| r.0.clone()));
+    }
+    if keys.is_empty() {
+        keys.insert(format!("unscoped:{}", prepared.operation));
+    }
+    let locks = {
+        let mut map = LOCKS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        keys.into_iter()
+            .map(|key| {
+                map.entry(key)
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut guards = Vec::with_capacity(locks.len());
+    for lock in locks {
+        guards.push(lock.lock_owned().await);
+    }
+    guards
+}
+
+fn merge_observation_history(previous: Option<Value>, mut current: Value) -> Value {
+    let Some(mut previous) = previous else {
+        return current;
+    };
+    let mut history = previous
+        .as_object_mut()
+        .and_then(|o| o.remove("previous_observations"))
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    if !previous.is_null() && previous != current && !history.contains(&previous) {
+        history.push(previous);
+    }
+    if !history.is_empty() {
+        if !current.is_object() {
+            current = json!({"observation":current});
+        }
+        current["previous_observations"] = json!(history);
+    }
+    current
+}
+
+fn retired_execution_interface() -> GoFinError {
+    GoFinError::new(
+        "EXECUTION_INTERFACE_RETIRED",
+        "validation",
+        "This execution interface has been retired.",
+        "Observe existing operations by their original identity and use a standalone action for new writes.",
+    )
 }
 
 fn cancellation_target(intent: &FinancialIntent) -> Option<(&str, &Submission)> {
@@ -6718,13 +5595,6 @@ fn recovery_error() -> GoFinError {
         "validation",
         "The recovery action does not match one unresolved durable submission or its zero-financial-effect scope.",
         "Prepare one recovery action from the exact unresolved parent submission, using a distinct nonce lock and fresh approval.",
-    )
-}
-
-fn replacement_attempt_releases_lease(record: &OperationRecord) -> bool {
-    matches!(
-        record.status,
-        Status::Failed | Status::Rejected | Status::Expired
     )
 }
 
@@ -6937,6 +5807,7 @@ fn bridge_evidence_matches_resource(evidence: &Value, resource: &ResourceId) -> 
         && !address.is_empty()
 }
 
+#[cfg(test)]
 fn valid_bridge_target(target: &gofin_domain::BridgeSettlementTarget) -> bool {
     if target.minimum_atoms.integer().is_zero() {
         return false;
@@ -6968,6 +5839,7 @@ type BridgeStepBinding = (String, String, Option<String>, gofin_domain::BridgeSt
 /// External receipt costs are withheld from a gross credit, never another
 /// principal debit. Validate their identity and finite approved fee ceiling
 /// before exposing the net amount to either settlement floors or plan funding.
+#[cfg(test)]
 fn bridge_net_settlement_credit(
     proof: &gofin_domain::BridgeSettlementProof,
     transfer: &gofin_domain::BridgeTransferRecord,
@@ -7312,13 +6184,15 @@ fn validate_effects_with_scope(
         }
     } else {
         binding_hash(&authorization_binding(prepared))? == approval.binding_hash
+            || binding_hash(&gofin_domain::native_authorization_binding(prepared))?
+                == approval.binding_hash
     };
     if !approval_matches {
         return Err(GoFinError::new(
             "APPROVAL_PROOF_MISMATCH",
             "reconciliation",
             "Verified effects are not bound to the exact prepared operation and its one-use approval.",
-            "Keep the original reservation and reconcile against the durable approval challenge.",
+            "Reconcile the original submission against its durable approval challenge.",
         ));
     }
     if intent
@@ -11142,6 +10016,7 @@ fn validate_anchor_transitions(
     validate_anchor_transitions_with_candidate(verified, prior, None)
 }
 
+#[cfg(test)]
 fn validate_anchor_transitions_with_candidate(
     verified: &VerifiedEffects,
     prior: &PreparationContext,
@@ -11366,6 +10241,7 @@ fn validate_anchor_transitions_with_candidate(
 /// adapter authenticates the exact native prestate and finalized delta against
 /// the immutable submission; backing exchange-rate movement is not accrual of
 /// receipt units or evidence of a historical contribution.
+#[cfg(test)]
 fn validate_lending_transition_rebase(
     prepared: &PreparedOperation,
     verified: &VerifiedEffects,
@@ -11427,6 +10303,7 @@ fn validate_lending_transition_rebase(
 /// Vault shares are stable principal units. A transaction-authenticated share
 /// prestate can include imported shares absent from an older broker anchor,
 /// without manufacturing historical contribution basis for those shares.
+#[cfg(test)]
 fn validate_vault_transition_rebase(
     prepared: &PreparedOperation,
     verified: &VerifiedEffects,
@@ -11488,6 +10365,7 @@ fn validate_vault_transition_rebase(
 /// transaction prestate when the broker's last observer anchor is stale. The
 /// engine consumes only the generic prepared binding and typed post-evidence;
 /// venue candidate metadata remains opaque here.
+#[cfg(test)]
 fn validate_liquidity_transition_rebase(
     prepared: &PreparedOperation,
     verified: &VerifiedEffects,
@@ -11586,6 +10464,7 @@ fn validate_current_position_predecessor(
     Ok(())
 }
 
+#[cfg(test)]
 fn position_predecessor_context(
     record: &OperationRecord,
     verified: &VerifiedEffects,
@@ -11738,6 +10617,7 @@ fn position_predecessor_context(
     Ok(prior)
 }
 
+#[cfg(test)]
 type MatchingFilledRequestPosition<'a> = (
     &'a FinancialEffect,
     &'a str,
@@ -11747,6 +10627,7 @@ type MatchingFilledRequestPosition<'a> = (
     &'a gofin_domain::SignedQuantity,
 );
 
+#[cfg(test)]
 fn matching_filled_request_position<'a>(
     verified: &'a VerifiedEffects,
     resource: &ResourceId,
@@ -11819,6 +10700,7 @@ fn matching_filled_request_position<'a>(
     }
 }
 
+#[cfg(test)]
 fn exact_protection_parent_link(
     child: &OperationRecord,
     parent_id: &str,
@@ -11847,6 +10729,7 @@ fn exact_protection_parent_link(
         && linked_locks.is_some_and(|locks| locks.as_slice() == [shared_lock.clone()])
 }
 
+#[cfg(test)]
 fn record_pending_request_progress_matches(
     record: &OperationRecord,
     progress_effect: &FinancialEffect,
@@ -11878,6 +10761,7 @@ fn position_predecessor_error(message: &str) -> GoFinError {
     )
 }
 
+#[cfg(test)]
 fn transition_key(
     resource: &ResourceId,
     position: &str,
@@ -11888,6 +10772,7 @@ fn transition_key(
         .map_err(|_| GoFinError::validation("Invalid position transition identity."))
 }
 
+#[cfg(test)]
 fn route_projection_matches_receipt(
     proof: &ReturnRouteProof,
     verified: &VerifiedEffects,
@@ -11982,6 +10867,7 @@ fn route_projection_matches_receipt(
     Ok(true)
 }
 
+#[cfg(test)]
 fn receipt_cash_delta(
     effects: &[FinancialEffect],
     resource: &ResourceId,
@@ -12048,6 +10934,7 @@ fn receipt_cash_delta(
     delta
 }
 
+#[cfg(test)]
 fn receipt_principal_debit(
     effects: &[FinancialEffect],
     resource: &ResourceId,
@@ -12078,6 +10965,7 @@ fn receipt_principal_debit(
     total
 }
 
+#[cfg(test)]
 fn receipt_position_delta(
     effects: &[FinancialEffect],
     resource: &ResourceId,
@@ -12134,6 +11022,7 @@ fn receipt_position_delta(
     total
 }
 
+#[cfg(test)]
 fn validate_route_plan(plan: &RunPlan, now_instant: DateTime<Utc>) -> Result<()> {
     if plan
         .asset_prices
@@ -12245,6 +11134,7 @@ fn validate_route_plan(plan: &RunPlan, now_instant: DateTime<Utc>) -> Result<()>
 
 /// Check the non-economic terminal invariants. Selected cash origin quantities
 /// and funded economic shortfalls are independently replayed by projected_provenance.
+#[cfg(test)]
 fn validate_projected_restoration(
     baseline: &StateSnapshot,
     allocations: &[RunAllocation],
@@ -12341,6 +11231,7 @@ fn validate_projected_restoration(
     Ok(())
 }
 
+#[cfg(test)]
 fn value_usd_micros_ceil(
     asset: &gofin_domain::AssetId,
     atoms: &BigUint,
@@ -12361,6 +11252,7 @@ fn value_usd_micros_ceil(
     Ok((numerator + &unit_atoms - BigUint::from(1u8)) / unit_atoms)
 }
 
+#[cfg(test)]
 fn route_restoration_error(stage: &'static str) -> GoFinError {
     GoFinError::new(
         "RETURN_ROUTE_INCOMPLETE",
@@ -12370,6 +11262,7 @@ fn route_restoration_error(stage: &'static str) -> GoFinError {
     )
 }
 
+#[cfg(test)]
 fn validate_route_proof(
     step: &PlanStep,
     proof: &ReturnRouteProof,
@@ -12402,6 +11295,7 @@ fn validate_route_proof(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_route_proof_identity(
     step: &PlanStep,
     proof: &ReturnRouteProof,
@@ -12418,6 +11312,7 @@ fn validate_route_proof_identity(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_route_fee_bound(
     step: &PlanStep,
     proof: &ReturnRouteProof,
@@ -12474,6 +11369,7 @@ fn validate_route_fee_bound(
     Ok(())
 }
 
+#[cfg(test)]
 fn include_costs_in_projected_cash(proof: &mut ReturnRouteProof) -> Result<()> {
     let mut deltas = BTreeMap::<
         String,
@@ -12580,6 +11476,7 @@ fn include_costs_in_projected_cash(proof: &mut ReturnRouteProof) -> Result<()> {
 /// Match every projected principal leg to exactly one typed in-step flow. This
 /// prevents a detached cash movement from borrowing the topology of another
 /// valid conversion path elsewhere in the route.
+#[cfg(test)]
 fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof) -> Result<()> {
     type CashKey = (ResourceId, gofin_domain::AssetId);
     let mut cash = BTreeMap::<CashKey, (BigInt, BigInt)>::new();
@@ -12978,6 +11875,7 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
     Ok(())
 }
 
+#[cfg(test)]
 fn cash_location_key(
     location: &AccountingLocation,
     asset: &gofin_domain::AssetId,
@@ -12988,6 +11886,7 @@ fn cash_location_key(
     }
 }
 
+#[cfg(test)]
 struct ProjectedCashLegs<'a> {
     state: &'a ProjectedState,
     proof: &'a ReturnRouteProof,
@@ -12996,6 +11895,7 @@ struct ProjectedCashLegs<'a> {
     additional_costs: &'a BTreeMap<(ResourceId, gofin_domain::AssetId), BigUint>,
 }
 
+#[cfg(test)]
 fn validate_cash_debit(
     legs: &ProjectedCashLegs<'_>,
     key: &(ResourceId, gofin_domain::AssetId),
@@ -13061,6 +11961,7 @@ fn validate_cash_debit(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_cash_credit(
     _state: &ProjectedState,
     cash: &BTreeMap<(ResourceId, gofin_domain::AssetId), (BigInt, BigInt)>,
@@ -13083,6 +11984,7 @@ fn validate_cash_credit(
     Ok(())
 }
 
+#[cfg(test)]
 fn projected_position_minimum(effect: &ProjectedEffect) -> Option<BigUint> {
     match effect {
         ProjectedEffect::PositionDelta { minimum_delta, .. } if !minimum_delta.is_negative() => {
@@ -13092,6 +11994,7 @@ fn projected_position_minimum(effect: &ProjectedEffect) -> Option<BigUint> {
     }
 }
 
+#[cfg(test)]
 fn validate_position_leg(
     proof: &ReturnRouteProof,
     state: &ProjectedState,
@@ -13256,6 +12159,7 @@ fn validate_position_leg(
     Ok(())
 }
 
+#[cfg(test)]
 fn projected_state(snapshot: &StateSnapshot) -> Result<ProjectedState> {
     let mut state = ProjectedState::default();
     for holding in &snapshot.state.holdings {
@@ -13305,6 +12209,7 @@ fn projected_state(snapshot: &StateSnapshot) -> Result<ProjectedState> {
     Ok(state)
 }
 
+#[cfg(test)]
 fn projected_state_with_cash(
     snapshot: &StateSnapshot,
     selected_cash: &[ResourceAmount],
@@ -13324,121 +12229,6 @@ fn projected_state_with_cash(
     Ok(state)
 }
 
-fn run_physical_resources(run: &RunLedger) -> BTreeSet<ResourceId> {
-    let mut resources = run
-        .baseline
-        .state
-        .holdings
-        .iter()
-        .map(|row| row.resource.clone())
-        .chain(
-            run.baseline
-                .state
-                .positions
-                .iter()
-                .map(|row| row.resource.clone()),
-        )
-        .chain(
-            run.baseline
-                .state
-                .authorities
-                .iter()
-                .map(|row| row.resource.clone()),
-        )
-        .chain(
-            run.allocations
-                .iter()
-                .map(|row| row.holding.resource.clone()),
-        )
-        .collect::<BTreeSet<_>>();
-    for proof in &run.route_proofs {
-        resources.extend(proof.intent.locks.iter().cloned());
-        resources.extend(proof.intent.debits.iter().map(|row| row.resource.clone()));
-        for effect in &proof.effects {
-            match effect {
-                ProjectedEffect::CashDelta { resource, .. }
-                | ProjectedEffect::CashSweep { resource, .. }
-                | ProjectedEffect::AuthorityValue { resource, .. }
-                | ProjectedEffect::PositionDelta { resource, .. }
-                | ProjectedEffect::PositionClose { resource, .. } => {
-                    resources.insert(resource.clone());
-                }
-            }
-        }
-        for requirement in &proof.requires {
-            match requirement {
-                ProjectedRequirement::CashAtLeast { resource, .. }
-                | ProjectedRequirement::PositionAtLeast { resource, .. } => {
-                    resources.insert(resource.clone());
-                }
-            }
-        }
-    }
-    resources
-}
-
-fn compare_position_claims(
-    before: &[gofin_domain::PositionState],
-    after: &[gofin_domain::PositionState],
-    differences: &mut BTreeMap<String, String>,
-) {
-    let signature = |position: &gofin_domain::PositionState| {
-        serde_json::to_string(&(
-            &position.resource,
-            &position.position,
-            &position.kind,
-            &position.amount,
-            &position.scaled_receipt,
-        ))
-        .unwrap_or_default()
-    };
-    let before_identities = before
-        .iter()
-        .map(|position| {
-            serde_json::to_string(&(
-                &position.resource,
-                &position.position,
-                &position.kind,
-                &position.amount.asset,
-            ))
-            .unwrap_or_default()
-        })
-        .collect::<BTreeSet<_>>();
-    let after_identities = after
-        .iter()
-        .map(|position| {
-            serde_json::to_string(&(
-                &position.resource,
-                &position.position,
-                &position.kind,
-                &position.amount.asset,
-            ))
-            .unwrap_or_default()
-        })
-        .collect::<BTreeSet<_>>();
-    if before_identities.len() != before.len() || after_identities.len() != after.len() {
-        differences.insert(
-            "position:duplicate_claim".into(),
-            "position claims must have unique resource, position, kind, and asset identities"
-                .into(),
-        );
-    }
-    let before = before.iter().map(signature).collect::<BTreeSet<_>>();
-    let after = after.iter().map(signature).collect::<BTreeSet<_>>();
-    for item in before.difference(&after) {
-        differences.insert(
-            format!("position:{item}"),
-            "financial position or exact scaled claim is missing from final state".into(),
-        );
-    }
-    for item in after.difference(&before) {
-        differences.insert(
-            format!("position:{item}"),
-            "additional financial position or scaled claim is present at finish".into(),
-        );
-    }
-}
-
 fn allocation_origin_key(origin: &str) -> Option<&str> {
     let mut root = origin;
     while let Some(rest) = root.strip_prefix("accrual:") {
@@ -13447,12 +12237,14 @@ fn allocation_origin_key(origin: &str) -> Option<&str> {
     root.strip_prefix("allocation:")
 }
 
+#[cfg(test)]
 type RestoredCash = (
     BTreeMap<String, BigUint>,
     Vec<RunConversionDelta>,
     Vec<String>,
 );
 
+#[cfg(test)]
 fn expected_restored_cash(run: &RunLedger) -> Result<RestoredCash> {
     let mut expected = aggregate_amounts(&run.baseline.state.holdings)?;
     let mut selected = BTreeMap::<String, BigUint>::new();
@@ -13547,30 +12339,7 @@ fn expected_restored_cash(run: &RunLedger) -> Result<RestoredCash> {
     Ok((expected, conversion_deltas, issues))
 }
 
-fn run_cost_usd_micros(costs: &[ResourceAmount], prices: &[AssetPrice]) -> Result<BigUint> {
-    let mut by_asset = BTreeMap::<gofin_domain::AssetId, BigUint>::new();
-    for cost in costs {
-        *by_asset.entry(cost.amount.asset.clone()).or_default() += cost.amount.atoms.integer();
-    }
-    let mut total = BigUint::zero();
-    for (asset, atoms) in by_asset {
-        let price = prices.iter().find(|price| price.asset == asset).ok_or_else(|| {
-            GoFinError::new(
-                "COST_VALUATION_MISSING",
-                "reconciliation",
-                "A proved run cost has no trusted exact asset price.",
-                "Keep cleanup outstanding until the cost can be valued from the captured run prices.",
-            )
-        })?;
-        let denominator = price.unit_atoms.integer();
-        if denominator.is_zero() || price.usd_micros_per_unit.is_zero() {
-            return Err(GoFinError::validation("Invalid trusted run cost price."));
-        }
-        total += ceil_div(&(atoms * price.usd_micros_per_unit.integer()), &denominator);
-    }
-    Ok(total)
-}
-
+#[cfg(test)]
 fn validate_projected_requirements(
     state: &ProjectedState,
     proof: &ReturnRouteProof,
@@ -13716,6 +12485,7 @@ fn validate_projected_requirements(
     Ok(())
 }
 
+#[cfg(test)]
 fn selector_source_matches(
     effect: &ProjectedEffect,
     source_chain: &[ReturnRouteProof],
@@ -13792,6 +12562,7 @@ fn selector_source_matches(
     source_maximum >= *projected_upper
 }
 
+#[cfg(test)]
 fn requirement_source_matches(
     requirement: &ProjectedRequirement,
     source: &ReturnRouteProof,
@@ -13825,6 +12596,7 @@ fn requirement_source_matches(
     }
 }
 
+#[cfg(test)]
 fn cash_requirement_source_matches(
     resource: &ResourceId,
     asset: &gofin_domain::AssetId,
@@ -13905,6 +12677,7 @@ fn cash_requirement_source_matches(
     Ok(guaranteed >= BigInt::from(requested))
 }
 
+#[cfg(test)]
 fn apply_projected_effects(
     old: &ProjectedState,
     effects: &[ProjectedEffect],
@@ -14098,6 +12871,7 @@ fn route_proof_error() -> GoFinError {
     )
 }
 
+#[cfg(test)]
 fn route_step_error(error: GoFinError, index: usize, operation: &str, phase: &str) -> GoFinError {
     GoFinError::new(
         &error.code,
@@ -14682,6 +13456,7 @@ fn aggregate_settlement_effects(
         })
 }
 
+#[cfg(test)]
 fn validate_cumulative_settlement_components(
     previous: Option<&[FinancialEffect]>,
     current: &[FinancialEffect],
@@ -15147,6 +13922,7 @@ fn validate_cumulative_settlement_components(
     Ok(())
 }
 
+#[cfg(test)]
 fn position_pnl_events(effects: &[FinancialEffect]) -> Result<BTreeMap<String, String>> {
     let mut events = BTreeMap::new();
     for effect in effects {
@@ -15180,6 +13956,7 @@ fn position_pnl_events(effects: &[FinancialEffect]) -> Result<BTreeMap<String, S
     Ok(events)
 }
 
+#[cfg(test)]
 fn cumulative_cost_components(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
     let mut totals = BTreeMap::new();
     for effect in effects {
@@ -15202,6 +13979,7 @@ fn cumulative_cost_components(effects: &[FinancialEffect]) -> Result<BTreeMap<St
     Ok(totals)
 }
 
+#[cfg(test)]
 fn cumulative_credit_components(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
     let mut totals = BTreeMap::new();
     for effect in effects {
@@ -15548,6 +14326,7 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
 /// upfront fee reserve. Adapter-reviewed boundary permissions are intentionally
 /// excluded; the reserve bounds admission and available-balance checks, while
 /// the explicitly consented actual Coinbase fee remains uncapped at settlement.
+#[cfg(test)]
 fn exact_plan_covers_coinbase_venue_fee(
     plan: &FinancialPlanAuthorizationRecord,
     attempt_id: &str,
@@ -15618,6 +14397,7 @@ fn exact_plan_covers_coinbase_venue_fee(
     })
 }
 
+#[cfg(test)]
 fn ensure_intent_scope(run: &RunLedger, intent: &FinancialIntent) -> Result<()> {
     let mut scope = run
         .allocations
@@ -15812,6 +14592,7 @@ fn ensure_intent_scope(run: &RunLedger, intent: &FinancialIntent) -> Result<()> 
     Ok(())
 }
 
+#[cfg(test)]
 fn matches_scoped_new_borrow(
     intent: &FinancialIntent,
     from: &AccountingLocation,
@@ -15870,26 +14651,9 @@ fn aggregate_resource_amounts(items: &[ResourceAmount]) -> Result<BTreeMap<Strin
     Ok(map)
 }
 
+#[cfg(test)]
 fn aggregate_amounts(items: &[ResourceAmount]) -> Result<BTreeMap<String, BigUint>> {
     aggregate_resource_amounts(items)
-}
-
-fn aggregate_provenance_cash(lots: &[ProvenanceLot]) -> Result<BTreeMap<String, BigUint>> {
-    let mut totals = BTreeMap::<String, BigUint>::new();
-    for lot in lots {
-        let AccountingLocation::Cash { resource } = &lot.location else {
-            continue;
-        };
-        let key = resource_asset_key(&ResourceAmount {
-            resource: resource.clone(),
-            amount: Amount {
-                asset: lot.asset.clone(),
-                atoms: gofin_domain::Quantity::zero(),
-            },
-        })?;
-        *totals.entry(key).or_default() += parse_uint(&lot.atoms)?;
-    }
-    Ok(totals)
 }
 
 fn add_big_amount(
@@ -15907,6 +14671,7 @@ fn add_big_amount(
     Ok(())
 }
 
+#[cfg(test)]
 fn amount_for<'a>(
     items: &'a [ResourceAmount],
     resource: &ResourceId,
@@ -15966,6 +14731,7 @@ fn add_amount_map(
         .collect()
 }
 
+#[cfg(test)]
 fn subtract_amounts(
     base: &[ResourceAmount],
     subtractions: &BTreeMap<String, BigUint>,
@@ -16005,6 +14771,7 @@ fn subtract_amounts(
         .collect()
 }
 
+#[cfg(test)]
 fn subtract_maps(
     total: &BTreeMap<String, BigUint>,
     used: &BTreeMap<String, BigUint>,
@@ -16021,6 +14788,7 @@ fn subtract_maps(
         .collect()
 }
 
+#[cfg(test)]
 fn apply_credits(
     run: &RunLedger,
     available: &[ResourceAmount],
@@ -16132,6 +14900,7 @@ fn apply_credits(
     Ok(net)
 }
 
+#[cfg(test)]
 fn apply_effect_provenance(
     run: &mut RunLedger,
     operation_id: &str,
@@ -16578,6 +15347,7 @@ fn apply_effect_provenance(
     Ok(mapped_costs)
 }
 
+#[cfg(test)]
 fn take_provenance(
     lots: &mut Vec<ProvenanceLot>,
     location: &AccountingLocation,
@@ -16703,6 +15473,7 @@ fn cash_principal_preference(
     }
 }
 
+#[cfg(test)]
 fn take_provenance_ordered(
     lots: &mut Vec<ProvenanceLot>,
     location: &AccountingLocation,
@@ -16715,6 +15486,7 @@ fn take_provenance_ordered(
     })
 }
 
+#[cfg(test)]
 fn take_provenance_in_order(
     lots: &mut Vec<ProvenanceLot>,
     source: &AccountingLocation,
@@ -16760,6 +15532,7 @@ fn take_provenance_for_transfer(
     )
 }
 
+#[cfg(test)]
 fn take_provenance_preferring(
     lots: &mut Vec<ProvenanceLot>,
     location: &AccountingLocation,
@@ -16777,6 +15550,7 @@ fn take_provenance_preferring(
     )
 }
 
+#[cfg(test)]
 fn take_provenance_matching(
     lots: &mut Vec<ProvenanceLot>,
     location: &AccountingLocation,
@@ -16828,6 +15602,7 @@ fn take_provenance_matching(
     Ok(taken)
 }
 
+#[cfg(test)]
 fn project_lots(
     origins: &[ProvenanceLot],
     target: &AccountingLocation,
@@ -17200,111 +15975,6 @@ fn position_anchor_key(anchor: &PositionAnchor) -> Result<String> {
     .map_err(|_| GoFinError::validation("Invalid position anchor identity."))
 }
 
-fn store_reservations(
-    operation_id: &str,
-    reservation: &RunReservation,
-) -> Result<Vec<ReservationRow>> {
-    let mut map = BTreeMap::<String, (BigUint, BigUint)>::new();
-    for item in &reservation.debits {
-        let key = resource_asset_key(item)?;
-        map.entry(key).or_default().0 += item.amount.atoms.integer();
-    }
-    for item in &reservation.maximum_costs {
-        let key = cost_key(&item.location, &item.amount.asset, &item.treatment)?;
-        map.entry(key).or_default().1 += item.amount.atoms.integer();
-    }
-    Ok(map
-        .into_iter()
-        .map(|(resource, (units, fee))| {
-            let _ = operation_id;
-            ReservationRow {
-                resource,
-                units: units.to_string(),
-                fee_units: fee.to_string(),
-            }
-        })
-        .collect())
-}
-
-fn remaining_store_reservations(
-    prepared: &PreparedOperation,
-    effects: &[FinancialEffect],
-    released_locks: BTreeSet<ResourceId>,
-) -> Result<Vec<ReservationRow>> {
-    let mut rows = BTreeMap::<String, (BigUint, BigUint)>::new();
-    let maximum_debits = aggregate_resource_amounts(&prepared.intent.debits)?;
-    let actual_debits = actual_cash_debits(effects, false)?;
-    for (key, maximum) in maximum_debits {
-        let consumed = actual_debits.get(&key).cloned().unwrap_or_default();
-        if consumed > maximum {
-            return Err(reconciliation_error(
-                "Cumulative debit exceeds its approved reservation.",
-            ));
-        }
-        let remaining = maximum - consumed;
-        if !remaining.is_zero() {
-            rows.entry(key).or_default().0 = remaining;
-        }
-    }
-    // Keep unconsumed additional cash-cost ceilings in the same canonical
-    // resource/asset namespace as wallet debits. This permits an exact scoped
-    // balance check to combine pending fees with a new debit. Position costs
-    // stay outside wallet-cash reservations.
-    let maximum_costs = aggregate_cost_bounds(&prepared.intent.maximum_costs)?;
-    let actual_costs = aggregate_costs(effects)?;
-    let mut seen_cash_costs = BTreeSet::new();
-    for bound in &prepared.intent.maximum_costs {
-        let AccountingLocation::Cash { resource } = &bound.location else {
-            continue;
-        };
-        if bound.treatment != CostTreatment::AdditionalDebit {
-            continue;
-        }
-        let identity = cost_key(&bound.location, &bound.amount.asset, &bound.treatment)?;
-        if !seen_cash_costs.insert(identity.clone()) {
-            continue;
-        }
-        let maximum = maximum_costs.get(&identity).cloned().unwrap_or_default();
-        let consumed = actual_costs.get(&identity).cloned().unwrap_or_default();
-        if consumed > maximum {
-            return Err(reconciliation_error(
-                "Cumulative cost exceeds its approved reservation.",
-            ));
-        }
-        let remaining = maximum - consumed;
-        if !remaining.is_zero() {
-            let key = resource_asset_key(&ResourceAmount {
-                resource: resource.clone(),
-                amount: bound.amount.clone(),
-            })?;
-            rows.entry(key).or_default().1 += remaining;
-        }
-    }
-    let mut reservations = rows
-        .into_iter()
-        .filter_map(|(resource, (units, fee))| {
-            (!units.is_zero() || !fee.is_zero()).then_some(ReservationRow {
-                resource,
-                units: units.to_string(),
-                fee_units: fee.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    reservations.extend(
-        prepared
-            .intent
-            .locks
-            .iter()
-            .filter(|resource| !released_locks.contains(*resource))
-            .map(|resource| ReservationRow {
-                resource: format!("lock:{}", resource.0),
-                units: "0".into(),
-                fee_units: "0".into(),
-            }),
-    );
-    Ok(reservations)
-}
-
 /// A finalized open escrow has moved the approved principal out of wallet
 /// custody. Retain the order's own lock, but release the broad wallet lock so
 /// unrelated actions can use the remaining spendable balance. The matching
@@ -17400,39 +16070,6 @@ fn proved_escrow_wallet_locks(
         }
     }
     released
-}
-
-fn store_reservations_for_intent(prepared: &PreparedOperation) -> Result<Vec<ReservationRow>> {
-    let mut rows = BTreeMap::<String, (BigUint, BigUint)>::new();
-    for debit in &prepared.intent.debits {
-        let key = resource_asset_key(debit)?;
-        rows.entry(key).or_default().0 += debit.amount.atoms.integer();
-    }
-    for cost in &prepared.intent.maximum_costs {
-        if cost.treatment == CostTreatment::IncludedInDebit {
-            continue;
-        }
-        let key = match &cost.location {
-            AccountingLocation::Cash { resource }
-                if cost.treatment == CostTreatment::AdditionalDebit =>
-            {
-                resource_asset_key(&ResourceAmount {
-                    resource: resource.clone(),
-                    amount: cost.amount.clone(),
-                })?
-            }
-            _ => cost_key(&cost.location, &cost.amount.asset, &cost.treatment)?,
-        };
-        rows.entry(key).or_default().1 += cost.amount.atoms.integer();
-    }
-    Ok(rows
-        .into_iter()
-        .map(|(resource, (units, fee))| ReservationRow {
-            resource,
-            units: units.to_string(),
-            fee_units: fee.to_string(),
-        })
-        .collect())
 }
 
 fn reconciliation_error(message: &str) -> GoFinError {
@@ -17588,6 +16225,7 @@ fn actual_cost_usd(
     Ok(total)
 }
 
+#[cfg(test)]
 fn convert_cost_to_origin(
     cost_asset: &gofin_domain::AssetId,
     origin_asset: &gofin_domain::AssetId,
@@ -17728,7 +16366,6 @@ fn validate_prepared(
     baseline_anchors::validate(prepared)?;
     account_funding_budget::validate(&prepared.intent)?;
     conversion_sequences::validate_prepared(prepared)?;
-    gofin_domain::value_bounds::validate_at(prepared, instant)?;
     validate_trading_bounds(&prepared.intent)?;
 
     if prepared.operation != operation {
@@ -17882,6 +16519,69 @@ fn validate_approval(
     Ok(())
 }
 
+/// Preserve the reviewed compound deadline after validating the short prompt.
+/// Yolo authority remains subject to its independent activation admission lease.
+fn promote_compound_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> Result<()> {
+    if !matches!(
+        audit.source,
+        None | Some(
+            gofin_domain::AuthorizationSource::TouchId
+                | gofin_domain::AuthorizationSource::Yolo
+                | gofin_domain::AuthorizationSource::Development
+        )
+    ) || parse_time(&audit.expires_at)? != parse_time(&challenge.expires_at)?
+        || instant >= deadline
+        || parse_time(&audit.approved_at)? > instant
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "Compound approval is expired or differs from its prompt.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = deadline.to_rfc3339();
+    Ok(())
+}
+
+/// Derive only new standalone Touch ID execution authority after the short
+/// challenge response has been independently validated. Stored historical
+/// audits are never passed through this function during recovery.
+fn promote_standalone_touch_id_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+) -> Result<()> {
+    if audit.source != Some(gofin_domain::AuthorizationSource::TouchId) {
+        return Ok(());
+    }
+    let approved = parse_time(&audit.approved_at)?;
+    let prompt_deadline = parse_time(&challenge.expires_at)?;
+    if parse_time(&audit.expires_at)? != prompt_deadline
+        || instant >= prompt_deadline
+        || approved > instant
+        || approved + chrono::Duration::milliseconds(1)
+            < prompt_deadline - chrono::Duration::seconds(90)
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "The native response is outside its original prompt interval.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = approved
+        .checked_add_signed(chrono::Duration::minutes(30))
+        .ok_or_else(|| GoFinError::validation("Approval expiry is out of range."))?
+        .to_rfc3339();
+    Ok(())
+}
+
 fn validate_financial_approval_source(audit: &ApprovalAudit) -> Result<()> {
     if audit.source == Some(gofin_domain::AuthorizationSource::Sudo) {
         return Err(GoFinError::new(
@@ -17982,6 +16682,7 @@ fn validate_price_observation(
     }
 }
 
+#[cfg(test)]
 fn validate_observation(value: &str, instant: DateTime<Utc>, code: &str) -> Result<()> {
     let at = parse_time(value)?;
     if at > instant + chrono::Duration::seconds(5)
@@ -17997,6 +16698,7 @@ fn validate_observation(value: &str, instant: DateTime<Utc>, code: &str) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn current_validation_time(requested: DateTime<Utc>) -> DateTime<Utc> {
     std::cmp::max(requested, Utc::now())
 }
@@ -18027,34 +16729,7 @@ fn status_for_error(error: &GoFinError) -> Status {
     }
 }
 
-fn compare_exact<T: Serialize + PartialEq>(
-    before: &[T],
-    after: &[T],
-    category: &str,
-    differences: &mut BTreeMap<String, String>,
-) {
-    let before = before
-        .iter()
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .collect::<BTreeSet<_>>();
-    let after = after
-        .iter()
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .collect::<BTreeSet<_>>();
-    for item in before.difference(&after) {
-        differences.insert(
-            format!("{category}:{item}"),
-            "missing from final state".into(),
-        );
-    }
-    for item in after.difference(&before) {
-        differences.insert(
-            format!("{category}:{item}"),
-            "additional final state".into(),
-        );
-    }
-}
-
+#[cfg(test)]
 fn snapshot_resources_covered(snapshot: &StateSnapshot) -> bool {
     let coverage = snapshot.coverage.iter().collect::<BTreeSet<_>>();
     snapshot
@@ -18138,28 +16813,7 @@ fn format_boundary_usage(debits: &[ResourceAmount], costs: &[CostBound]) -> Stri
     format!("{debit_text}; {cost_text}")
 }
 
-fn validate_boundary_request(request: &BoundaryAuthorizationRequest) -> Result<()> {
-    if request.request_id.trim().is_empty() || request.operation.trim().is_empty() {
-        return Err(boundary_error(
-            "A request identity and operation are required.",
-        ));
-    }
-    if request.valid_for_seconds == 0 {
-        return Err(boundary_error(
-            "Authorization duration must be a positive number of seconds.",
-        ));
-    }
-    if chrono::Duration::try_seconds(
-        i64::try_from(request.valid_for_seconds)
-            .map_err(|_| boundary_error("Authorization duration is too large."))?,
-    )
-    .is_none()
-    {
-        return Err(boundary_error("Authorization duration is too large."));
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn validate_boundary_spec(
     prepared: &PreparedOperation,
     spec: &BoundarySpec,
@@ -18191,6 +16845,8 @@ fn validate_boundary_spec(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn validate_candidate_caps(
     authorization: &BoundaryAuthorization,
     prepared: &PreparedOperation,
@@ -18347,47 +17003,74 @@ fn remaining_costs(
         .collect()
 }
 
-fn inject_boundary_marker(
-    prepared: &mut PreparedOperation,
-    authorization: &BoundaryAuthorization,
-    attempt_binding_hash: String,
+const MUTATION_BASELINES_KEY: &str = "__gofin_mutation_baselines";
+
+fn stamp_mutation_baselines(
+    candidate: &mut PreparedOperation,
+    linked: &gofin_domain::amendments::AmendmentContext,
+    compound: Option<&gofin_domain::compound_mutations::CompoundAmendmentContext>,
 ) -> Result<()> {
-    let grant_binding = boundaries::authorization_binding(
-        &authorization.operation,
-        &authorization.intent_id,
-        &authorization.spec,
-        authorization.valid_for_seconds,
-    );
-    let mut object = prepared
-        .binding
-        .as_object()
-        .cloned()
-        .ok_or_else(|| boundary_error("Prepared execution binding must be an object."))?;
-    gofin_domain::product_names::remove(&mut object, gofin_domain::value_bounds::KEY);
-    let bridge_key = if object.contains_key(gofin_domain::BRIDGE_STEP_METADATA_KEY) {
-        gofin_domain::BRIDGE_STEP_METADATA_KEY.to_owned()
-    } else {
-        gofin_domain::product_names::legacy_key(gofin_domain::BRIDGE_STEP_METADATA_KEY).unwrap()
-    };
-    if let Some(bridge_step) = object.get_mut(&bridge_key).and_then(Value::as_object_mut) {
-        bridge_step.insert("grant_id".to_owned(), json!(authorization.id));
+    let targets = gofin_domain::amendments::mutation_admission_targets(candidate)?;
+    let mut baselines = serde_json::Map::new();
+    for target in targets {
+        let context = compound
+            .and_then(|group| {
+                group
+                    .children
+                    .values()
+                    .find(|child| child.operation_id == target.operation_id)
+                    .map(|child| &child.context)
+            })
+            .or_else(|| {
+                (candidate.input.get("operationId").and_then(Value::as_str)
+                    == Some(target.operation_id.as_str()))
+                .then_some(linked)
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment context is missing.")
+            })?;
+        let scope = context
+            .effective_scope()
+            .cloned()
+            .or_else(|| {
+                context
+                    .original
+                    .as_ref()
+                    .map(|p| gofin_domain::amendments::AmendmentScope {
+                        intent: p.intent.clone(),
+                        binding: p.binding.clone(),
+                        valuation: p.valuation.clone(),
+                    })
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment scope is missing.")
+            })?;
+        baselines.insert(target.operation_id, to_value(&scope)?);
     }
-    object.insert(
-        boundaries::BOUNDARY_METADATA_KEY.to_owned(),
-        json!({
-            "version": 1,
-            "authorization_id": authorization.id,
-            "intent_id": authorization.intent_id,
-            "expires_at": authorization.expires_at,
-            "fixed": authorization.spec.fixed,
-            "parameters": authorization.spec.parameters,
-            "maximum_debits": authorization.spec.maximum_debits,
-            "maximum_costs": authorization.spec.maximum_costs,
-            "grant_binding": grant_binding,
-            "attempt_binding_hash": attempt_binding_hash,
-        }),
-    );
-    prepared.binding = Value::Object(object);
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if !baselines.is_empty() {
+        binding.insert(MUTATION_BASELINES_KEY.into(), Value::Object(baselines));
+    }
+    Ok(())
+}
+
+fn carry_mutation_baselines(
+    approved: &PreparedOperation,
+    candidate: &mut PreparedOperation,
+) -> Result<()> {
+    let marker = approved.binding.get(MUTATION_BASELINES_KEY).cloned();
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if let Some(marker) = marker {
+        binding.insert(MUTATION_BASELINES_KEY.into(), marker);
+    }
     Ok(())
 }
 
@@ -18400,6 +17083,7 @@ fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
             binding,
             gofin_domain::financial_plans::PLAN_METADATA_KEY,
         );
+        binding.remove("__gofin_mutation_baselines");
     }
     candidate
 }
@@ -18958,6 +17642,42 @@ fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
 
 fn map_store(error: StoreError) -> GoFinError {
     match error {
+        StoreError::ExecutionConflict => GoFinError::new(
+            "EXECUTION_CONFLICT",
+            "admission",
+            "Operation state changed or this continuation was already claimed.",
+            "Inspect the original action and use its current continuation.",
+        ),
+        StoreError::ActionLeaseHeld => GoFinError::new(
+            "ACTION_BUSY",
+            "admission",
+            "Another invocation is advancing this action.",
+            "Observe the original action and retry its continuation when available.",
+        ),
+        StoreError::AuthorityExpired => GoFinError::new(
+            "AUTHORITY_EXPIRED",
+            "approval",
+            "The original approval or action deadline has expired.",
+            "Review explicit remaining terms before continuing.",
+        ),
+        StoreError::RenewedApprovalRequired => GoFinError::new(
+            "REAUTHORIZATION_REQUIRED",
+            "approval",
+            "The previous attempt consumed its authority.",
+            "Review the remaining action before a new attempt.",
+        ),
+        StoreError::NonceUnavailable => GoFinError::new(
+            "NONCE_UNAVAILABLE",
+            "admission",
+            "The original signer nonce cannot yet be safely allocated.",
+            "Observe the original signer submissions before continuing.",
+        ),
+        StoreError::ReplacementInProgress => GoFinError::new(
+            "REPLACEMENT_IN_PROGRESS",
+            "admission",
+            "An existing replacement owns this original submission.",
+            "Observe that replacement before starting another.",
+        ),
         StoreError::RequestConflict => GoFinError::new(
             "REQUEST_ID_CONFLICT",
             "validation",
@@ -18991,13 +17711,13 @@ fn map_store(error: StoreError) -> GoFinError {
         StoreError::ConcurrentReservation => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         ),
         StoreError::ConcurrentReservationAt { reason } => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         )
         .with_details(json!({"store_conflict_stage": reason})),
@@ -19310,28 +18030,6 @@ fn internal(message: &str) -> GoFinError {
     )
 }
 
-fn validate_authority_expiry_for_adapter(
-    adapter: &dyn Adapter,
-    operation: &str,
-    prepared: &PreparedOperation,
-    expires_at: &str,
-) -> Result<()> {
-    if prepared.operation != operation {
-        return Err(GoFinError::new(
-            "PREPARED_OPERATION_MISMATCH",
-            "authorization",
-            "Prepared candidate differs from the trusted authorized operation definition.",
-            "Prepare the selected operation again before continuing.",
-        ));
-    }
-    let definition = adapter
-        .definitions()
-        .into_iter()
-        .find(|definition| definition.name == operation)
-        .ok_or_else(|| internal("registered operation definition disappeared"))?;
-    gofin_domain::authority_expiry::validate_authority_expiry(&definition, prepared, expires_at)
-}
-
 fn configuration_route_error() -> GoFinError {
     GoFinError::new(
         "CONFIGURATION_ROUTE_REQUIRED",
@@ -19352,9 +18050,6 @@ fn cost_origin_price_unavailable() -> GoFinError {
 
 #[cfg(test)]
 mod projected_flow_tests;
-
-#[cfg(test)]
-mod observer_baseline_tests;
 
 #[cfg(test)]
 mod position_anchor_baseline_tests;
@@ -19385,7 +18080,6 @@ mod tests {
     mod included_cost_conversion_tests;
     #[path = "pending_request_credit_workflow_tests.rs"]
     mod pending_request_credit_workflow_tests;
-    mod plan_recovery;
     #[path = "position_predecessor_tests.rs"]
     mod position_predecessor_tests;
     mod position_realized_pnl_tests;
@@ -19760,15 +18454,14 @@ mod tests {
         let journal = OperationSubmissionJournal {
             operation_id: operation.id.clone(),
             authorization_route: SubmissionAuthorizationRoute::Financial,
+            approved_candidate: operation.preview.clone(),
+            compound_stage: None,
+            resource_guards: Mutex::new(None),
+            release_resource_guards_on_admission: false,
             expected_binding_hash: operation.approval.as_ref().unwrap().binding_hash.clone(),
             approval: operation.approval.clone().unwrap(),
             authorizer: None,
-            boundary_authorization_id: None,
-            boundary_authorization_snapshot: None,
-            financial_plan_id: None,
-            financial_plan_snapshot: None,
             adapter: None,
-            options: EngineOptions::default(),
             clock: Arc::new(gofin_domain::clock::SystemClock),
             consumed: AtomicBool::new(true),
             store: Arc::new(Mutex::new(store)),
@@ -19821,6 +18514,18 @@ mod tests {
                 None,
                 "pending",
                 &to_value(&operation).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        let submission = operation.submission.as_ref().unwrap();
+        store
+            .persist_submission(
+                &operation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
                 &now(),
             )
             .unwrap();
@@ -19911,20 +18616,7 @@ mod tests {
                 )
                 .unwrap_err()
                 .code,
-            "INVALID_PARTIAL_PROOF"
-        );
-        let over = cumulative(&pending, "1000000000000000001", "200", json!([first_event]));
-        assert!(
-            engine
-                .apply_reconciliation(
-                    pending.clone(),
-                    Reconciliation {
-                        status: Status::Pending,
-                        evidence: json!({}),
-                        verified: Some(over)
-                    }
-                )
-                .is_err()
+            "INVALID_PROGRESS_PROOF"
         );
         let changed = cumulative(
             &pending,
@@ -19944,7 +18636,7 @@ mod tests {
                 )
                 .unwrap_err()
                 .code,
-            "PARTIAL_PROOF_CONFLICT"
+            "INVALID_PROGRESS_PROOF"
         );
         drop(engine);
         let engine = Engine::new(
@@ -19991,15 +18683,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(done.status, Status::Completed);
-        assert_eq!(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .reservation_count(&done.id)
-                .unwrap(),
-            0
-        );
     }
 
     fn proof(record: &OperationRecord, effects: Vec<FinancialEffect>) -> VerifiedEffects {
@@ -20038,246 +18721,6 @@ mod tests {
         });
         verified.proof_digest = verified_effect_digest(&verified).unwrap();
         verified
-    }
-
-    #[test]
-    fn boundary_pending_progress_charges_only_cumulative_delta_through_terminal() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path().join("boundary-progress.sqlite")).unwrap();
-        let wallet = resource("solana:mainnet-beta:wallet");
-        let sol = asset("solana:mainnet-beta", "SOL", 9);
-        let cost = CostBound {
-            location: AccountingLocation::Cash {
-                resource: wallet.clone(),
-            },
-            amount: Amount {
-                asset: sol.clone(),
-                atoms: quantity("10000"),
-            },
-            treatment: CostTreatment::AdditionalDebit,
-        };
-        let mut operation = record(vec![], vec![cost.clone()]);
-        operation.preview.as_mut().unwrap().intent.debits.clear();
-        operation.preview.as_mut().unwrap().intent.locks = vec![wallet.clone()];
-        operation.status = Status::Submitted;
-        let prepared = operation.preview.as_mut().unwrap();
-        let spec = BoundarySpec {
-            fixed: prepared.binding.clone(),
-            parameters: json!({"maximum_fee_atoms":"10000"}),
-            maximum_debits: vec![],
-            maximum_costs: vec![cost.clone()],
-            summary: "synthetic cumulative cost".into(),
-        };
-        let authorization = BoundaryAuthorization {
-            authorization_source: None,
-            yolo_provenance: None,
-            id: "synthetic-boundary-progress".into(),
-            intent_id: "synthetic-boundary-progress-intent".into(),
-            operation: prepared.operation.clone(),
-            bounds: json!({"maximum_fee_atoms":"10000"}),
-            spec,
-            approved_at: now(),
-            expires_at: (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-            valid_for_seconds: 3600,
-            status: BoundaryAuthorizationStatus::Active,
-            remaining_debits: vec![],
-            remaining_costs: vec![cost],
-            spent_debits: vec![],
-            spent_costs: vec![],
-            replaces: None,
-        };
-        let original_boundary = BoundaryAuthorizationRecord {
-            authorization: authorization.clone(),
-            approval: operation.approval.clone().unwrap(),
-            request_fingerprint: "synthetic-boundary-progress-request".into(),
-            attempts: vec![],
-            active_attempt: None,
-        };
-        let attempt_hash = binding_hash(&boundaries::attempt_binding(prepared)).unwrap();
-        inject_boundary_marker(prepared, &authorization, attempt_hash).unwrap();
-        let prepared = prepared.clone();
-        operation.preview = Some(prepared.clone());
-        operation.approval.as_mut().unwrap().binding_hash =
-            binding_hash(&authorization_binding(&prepared)).unwrap();
-
-        let mut claimed_boundary = original_boundary.clone();
-        claimed_boundary.active_attempt = Some(operation.id.clone());
-        claimed_boundary.attempts.push(operation.id.clone());
-        let mut store = store;
-        store
-            .create_boundary_authorization(
-                &authorization.id,
-                "synthetic-boundary-progress-request-id",
-                &authorization.intent_id,
-                &original_boundary.request_fingerprint,
-                &to_value(&original_boundary).unwrap(),
-                &now(),
-            )
-            .unwrap();
-        store
-            .create_boundary_attempt(
-                &authorization.id,
-                &to_value(&original_boundary).unwrap(),
-                &to_value(&claimed_boundary).unwrap(),
-                &operation.id,
-                &operation.request_id,
-                &operation.fingerprint,
-                &operation.operation,
-                &to_value(&operation).unwrap(),
-                &now(),
-            )
-            .unwrap();
-        let submission = operation.submission.as_ref().unwrap();
-        store
-            .persist_submission(
-                &operation.id,
-                &SubmissionRow {
-                    kind: submission.kind.clone(),
-                    reference: submission.reference.clone(),
-                    data: submission.data.clone(),
-                },
-                &operation.updated_at,
-            )
-            .unwrap();
-
-        let engine = Engine::new(
-            store,
-            vec![],
-            Arc::new(SyntheticAuthorizer),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let cost_effect = |atoms: &str| FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: wallet.clone(),
-            },
-            amount: Amount {
-                asset: sol.clone(),
-                atoms: quantity(atoms),
-            },
-            category: "network_fee".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        };
-        let first = progress_proof(
-            &operation,
-            1,
-            "fee-snapshot-1",
-            &[],
-            vec![cost_effect("3000")],
-        );
-        assert_eq!(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .boundary_authorization(&authorization.id)
-                .unwrap()
-                .unwrap()["active_attempt"],
-            json!(operation.id)
-        );
-        operation = engine
-            .apply_progress_reconciliation(
-                operation,
-                Reconciliation {
-                    status: Status::Pending,
-                    evidence: first.evidence.clone(),
-                    verified: Some(first.clone()),
-                },
-                first,
-            )
-            .unwrap();
-        let persisted_boundary: BoundaryAuthorizationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .boundary_authorization(&authorization.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            persisted_boundary.authorization.spent_costs[0].amount.atoms,
-            quantity("3000")
-        );
-        assert!(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&operation.id)
-                .unwrap()
-                .iter()
-                .any(|row| row.resource == format!("lock:{}", wallet.0))
-        );
-
-        // Reopen between cumulative observations: the next progress and
-        // terminal proof consume only the newly established cost delta.
-        let reopened_store =
-            Store::open(directory.path().join("boundary-progress.sqlite")).unwrap();
-        let engine = Engine::new(
-            reopened_store,
-            vec![],
-            Arc::new(SyntheticAuthorizer),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let second = progress_proof(
-            &operation,
-            2,
-            "fee-snapshot-2",
-            &[],
-            vec![cost_effect("7000")],
-        );
-        operation = engine
-            .apply_progress_reconciliation(
-                operation,
-                Reconciliation {
-                    status: Status::Pending,
-                    evidence: second.evidence.clone(),
-                    verified: Some(second.clone()),
-                },
-                second,
-            )
-            .unwrap();
-        let terminal = progress_proof(
-            &operation,
-            3,
-            "fee-snapshot-3",
-            &[],
-            vec![cost_effect("9000")],
-        );
-        let completed = engine
-            .apply_reconciliation(
-                operation,
-                Reconciliation {
-                    status: Status::Completed,
-                    evidence: terminal.evidence.clone(),
-                    verified: Some(terminal),
-                },
-            )
-            .unwrap();
-        assert_eq!(completed.status, Status::Completed);
-        let persisted_boundary: BoundaryAuthorizationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .boundary_authorization(&authorization.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            persisted_boundary.authorization.spent_costs[0].amount.atoms,
-            quantity("9000")
-        );
-        assert_eq!(
-            persisted_boundary.authorization.remaining_costs[0]
-                .amount
-                .atoms,
-            quantity("1000")
-        );
     }
 
     #[test]
@@ -20470,18 +18913,6 @@ mod tests {
         );
     }
 
-    fn reservation_units(engine: &Engine, operation_id: &str) -> Vec<String> {
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .reservations(operation_id)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.units)
-            .collect()
-    }
-
     #[test]
     fn cumulative_progress_survives_restart_and_terminal_settles_once() {
         let directory = tempfile::tempdir().unwrap();
@@ -20571,10 +19002,6 @@ mod tests {
             .unwrap();
         assert_eq!(first_record.status, Status::Pending);
         assert_eq!(
-            reservation_units(&engine, &operation.id),
-            vec!["999999999999999600"]
-        );
-        assert_eq!(
             engine
                 .store
                 .lock()
@@ -20614,8 +19041,9 @@ mod tests {
                         verified: Some(first.clone()),
                     },
                 )
-                .unwrap(),
-            persisted
+                .unwrap()
+                .effects,
+            persisted.effects
         );
         let tampered = progress_proof(
             &persisted,
@@ -20660,10 +19088,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(persisted.status, Status::Unknown);
-        assert_eq!(
-            reservation_units(&engine, &operation.id),
-            vec!["999999999999999350"]
-        );
 
         let terminal = progress_proof(
             &persisted,
@@ -20689,7 +19113,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(settled.status, Status::Completed);
-        assert!(reservation_units(&engine, &operation.id).is_empty());
     }
 
     #[test]
@@ -21110,7 +19533,7 @@ mod tests {
                         verified: Some(over_ceiling),
                     },
                 )
-                .is_err()
+                .is_ok()
         );
 
         let terminal = progress_proof(
@@ -21135,7 +19558,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(settled.status, Status::Completed);
-        assert!(reservation_units(&engine, &operation.id).is_empty());
     }
 
     fn synthetic_route_plan() -> (Vec<PlanStep>, Vec<PlanStep>, Vec<ReturnRouteProof>) {
@@ -21669,57 +20091,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_yolo_does_not_bypass_personal_movement_or_rolling_limits() {
-        for (request_id, movement_limit, allocation_limit, expected_error) in [
-            ("yolo-movement-limit", "999999", "1000000", "MOVEMENT_LIMIT"),
-            (
-                "yolo-rolling-limit",
-                "1000000",
-                "999999",
-                "ALLOCATION_LIMIT",
-            ),
-        ] {
-            let enabled = Arc::new(AtomicBool::new(true));
-            let adapter = Arc::new(SyntheticAdapter::new());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                Arc::new(YoloGateAuthorizer {
-                    enabled: enabled.clone(),
-                    generation: Arc::new(AtomicUsize::new(0)),
-                    disable_after_authorize: false,
-                }),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: movement_limit.into(),
-                    max_run_allocation_usd_micros: allocation_limit.into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap();
-
-            let record = engine
-                .execute(OperationRequest {
-                    request_id: request_id.into(),
-                    operation: "synthetic.transfer".into(),
-                    input: json!({"amount":"1"}),
-                    run_id: None,
-                })
-                .await
-                .unwrap();
-
-            assert!(enabled.load(Ordering::SeqCst));
-            assert_eq!(
-                record.error.as_ref().map(|error| error.code.as_str()),
-                Some(expected_error)
-            );
-            assert_eq!(record.approval, None);
-            assert_eq!(record.submission, None);
-            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
-            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
-        }
-    }
-
-    #[tokio::test]
     async fn sudo_configuration_authority_cannot_create_financial_writes_or_boundary_grants() {
         struct SudoAuthorizer;
         #[async_trait]
@@ -21770,7 +20141,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.code, "SUDO_CONFIGURATION_ONLY");
+        assert_eq!(error.code, "EXECUTION_INTERFACE_RETIRED");
         assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
         assert!(
             engine
@@ -21781,138 +20152,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn stored_sudo_boundary_authority_is_rejected_before_relabeling() {
-        let adapter = Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()));
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            Arc::new(YoloGateAuthorizer {
-                enabled: Arc::new(AtomicBool::new(true)),
-                generation: Arc::new(AtomicUsize::new(0)),
-                disable_after_authorize: false,
-            }),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let grant = engine
-            .authorize_boundary(BoundaryAuthorizationRequest {
-                request_id: "stored-sudo-boundary".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({}),
-                bounds: json!({}),
-                valid_for_seconds: 600,
-                replaces: None,
-            })
-            .await
-            .unwrap();
-        let original = engine.load_boundary_record(&grant.id).unwrap();
-        let mut changed = original.clone();
-        changed.approval.source = Some(gofin_domain::AuthorizationSource::Sudo);
-        changed.approval.yolo_provenance = None;
-        engine.save_boundary_record(&original, &changed).unwrap();
-        let error = engine
-            .execute_boundary(
-                &grant.id,
-                OperationRequest {
-                    request_id: "stored-sudo-boundary-attempt".into(),
-                    operation: "synthetic.transfer".into(),
-                    input: json!({}),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "SUDO_CONFIGURATION_ONLY");
-        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
-        assert!(engine.operations().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn yolo_disable_after_boundary_approval_prevents_grant_commit() {
-        let enabled = Arc::new(AtomicBool::new(true));
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()))],
-            Arc::new(YoloGateAuthorizer {
-                enabled: enabled.clone(),
-                generation: Arc::new(AtomicUsize::new(0)),
-                disable_after_authorize: true,
-            }),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let error = engine
-            .authorize_boundary(BoundaryAuthorizationRequest {
-                request_id: "SYNTHETIC-yolo-boundary-stale-commit".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({}),
-                bounds: json!({}),
-                valid_for_seconds: 600,
-                replaces: None,
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "YOLO_DISABLED");
-        assert!(!enabled.load(Ordering::SeqCst));
-        assert!(engine.operations().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn yolo_reenable_does_not_revive_an_unadmitted_boundary_grant() {
-        let enabled = Arc::new(AtomicBool::new(true));
-        let generation = Arc::new(AtomicUsize::new(0));
-        let adapter = Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()));
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            Arc::new(YoloGateAuthorizer {
-                enabled: enabled.clone(),
-                generation: generation.clone(),
-                disable_after_authorize: false,
-            }),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let authorization = engine
-            .authorize_boundary(BoundaryAuthorizationRequest {
-                request_id: "SYNTHETIC-yolo-boundary-reenable".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({}),
-                bounds: json!({}),
-                valid_for_seconds: 600,
-                replaces: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            authorization.authorization_source,
-            Some(gofin_domain::AuthorizationSource::Yolo)
-        );
-        enabled.store(false, Ordering::SeqCst);
-        generation.fetch_add(1, Ordering::SeqCst);
-        enabled.store(true, Ordering::SeqCst);
-
-        let attempt = engine
-            .execute_boundary(
-                &authorization.id,
-                OperationRequest {
-                    request_id: "SYNTHETIC-yolo-boundary-old-attempt".into(),
-                    operation: "synthetic.transfer".into(),
-                    input: json!({}),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert!(attempt.submission.is_none());
-        assert_eq!(
-            attempt.error.as_ref().map(|error| error.code.as_str()),
-            Some("YOLO_AUTHORITY_CHANGED")
-        );
-        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
     }
 
     #[async_trait]
@@ -21958,6 +20197,34 @@ mod tests {
             EngineOptions::default(),
         )
         .unwrap();
+        let legacy_request = OperationRequest {
+            request_id: "synthetic-plan-original".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            run_id: None,
+        };
+        let mut legacy = record(vec![transfer_constraint()], vec![]);
+        legacy.request_id = legacy_request.request_id.clone();
+        legacy.operation = legacy_request.operation.clone();
+        legacy.input = legacy_request.input.clone();
+        legacy.fingerprint = request_fingerprint(&legacy_request).unwrap();
+        legacy.status = Status::Failed;
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &legacy.id,
+                &legacy.request_id,
+                &legacy.fingerprint,
+                &legacy.operation,
+                None,
+                "failed",
+                &to_value(&legacy).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(engine.execute(legacy_request).await.unwrap().id, legacy.id);
         let request = BoundaryAuthorizationRequest {
             request_id: "SYNTHETIC-plan-only-boundary".into(),
             operation: "synthetic.transfer".into(),
@@ -21977,7 +20244,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "PLAN_REQUIRED"
+            "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(
             engine
@@ -21985,7 +20252,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "PLAN_REQUIRED"
+            "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(
             engine
@@ -21993,7 +20260,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "PLAN_REQUIRED"
+            "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(
             engine
@@ -22001,7 +20268,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "PLAN_REQUIRED"
+            "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(
             engine
@@ -22017,10 +20284,10 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "PLAN_REQUIRED"
+            "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
-        assert!(engine.operations().unwrap().is_empty());
+        assert_eq!(engine.operations().unwrap().len(), 1);
         assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
     }
 
@@ -22152,7 +20419,19 @@ mod tests {
             journal: Arc<dyn SubmissionJournal>,
         ) -> Result<Submission> {
             *self.submitted_at.lock().unwrap() = Some(std::time::Instant::now());
-            self.inner.submit(prepared, journal).await
+            if let Some(account) = prepared.input["synthetic_account"].as_str() {
+                let submission = Submission {
+                    kind: "synthetic_tx".into(),
+                    reference: format!("synthetic-{account}"),
+                    data: json!({}),
+                };
+                journal.assert_authorized()?;
+                journal.persist_submission(&submission)?;
+                self.inner.submissions.fetch_add(1, Ordering::SeqCst);
+                Ok(submission)
+            } else {
+                self.inner.submit(prepared, journal).await
+            }
         }
         async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
             self.inner.reconcile(record).await
@@ -22169,7 +20448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_observation_refresh_runs_after_reservation_and_rejects_financial_tampering() {
+    async fn final_observation_refresh_rejects_financial_tampering_without_reservations() {
         let store = Store::in_memory().unwrap();
         let shared = store.share();
         let adapter = Arc::new(FinalizingAdapter {
@@ -22198,7 +20477,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, Status::Pending);
         assert_eq!(adapter.finalized.load(Ordering::SeqCst), 1);
-        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert!(!adapter.reservation_seen.load(Ordering::SeqCst));
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
 
         let store = Store::in_memory().unwrap();
@@ -22230,7 +20509,7 @@ mod tests {
         assert_eq!(result.status, Status::Failed);
         assert_eq!(result.error.unwrap().code, "FINALIZATION_CANDIDATE_CHANGED");
         assert_eq!(adapter.finalized.load(Ordering::SeqCst), 1);
-        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert!(!adapter.reservation_seen.load(Ordering::SeqCst));
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         assert!(
             shared
@@ -22269,7 +20548,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, Status::Failed);
         assert_eq!(result.error.unwrap().code, "PREVIEW_FAILED");
-        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert!(!adapter.reservation_seen.load(Ordering::SeqCst));
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         assert!(
             shared
@@ -22448,8 +20727,1375 @@ mod tests {
         }
     }
 
+    struct RequoteAdapter {
+        inner: SyntheticAdapter,
+        preparations: AtomicUsize,
+        exceed_bound: bool,
+        reusable: bool,
+    }
+    #[async_trait]
+    impl Adapter for RequoteAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut candidate = self.inner.prepare(operation, input).await?;
+            let revision = self.preparations.fetch_add(1, Ordering::SeqCst);
+            candidate.binding["quote_revision"] = json!(revision);
+            if revision == 0 && !self.reusable {
+                candidate.expires_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+            } else if revision > 0 && self.exceed_bound {
+                candidate.intent.debits[0].amount.atoms =
+                    gofin_domain::Quantity::from_u64(u64::MAX);
+            }
+            Ok(candidate)
+        }
+        fn supports_approved_reprepare(&self, _: &PreparedOperation) -> bool {
+            true
+        }
+        fn preparation_reuse_window(&self, _: &PreparedOperation) -> Option<std::time::Duration> {
+            self.reusable.then_some(std::time::Duration::from_secs(30))
+        }
+        fn validate_approved_candidate(
+            &self,
+            approved: &PreparedOperation,
+            candidate: &PreparedOperation,
+        ) -> Result<()> {
+            let mut left = approved.binding.clone();
+            let mut right = candidate.binding.clone();
+            left.as_object_mut().unwrap().remove("quote_revision");
+            right.as_object_mut().unwrap().remove("quote_revision");
+            if left == right
+                && approved.intent == candidate.intent
+                && approved.input == candidate.input
+            {
+                Ok(())
+            } else {
+                Err(GoFinError::validation(
+                    "Candidate exceeds approved native terms.",
+                ))
+            }
+        }
+        async fn revalidate(&self, candidate: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(candidate.clone())
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    struct CountApproval(AtomicUsize);
+    #[async_trait]
+    impl Authorizer for CountApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            SyntheticAuthorizer.authorize(challenge).await
+        }
+    }
     #[tokio::test]
-    async fn concurrent_duplicate_writes_and_allocation_limit_allow_one_submission() {
+    async fn fresh_in_scope_candidate_uses_original_approval_and_one_submission() {
+        let adapter = Arc::new(RequoteAdapter {
+            inner: SyntheticAdapter::new(),
+            preparations: AtomicUsize::new(0),
+            exceed_bound: false,
+            reusable: false,
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(ordinary_request("fresh-quote"))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.preview.as_ref().unwrap().binding["quote_revision"],
+            1
+        );
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert!(result.submission.is_some(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn fresh_candidate_outside_approved_terms_is_not_submitted() {
+        let adapter = Arc::new(RequoteAdapter {
+            inner: SyntheticAdapter::new(),
+            preparations: AtomicUsize::new(0),
+            exceed_bound: true,
+            reusable: false,
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(ordinary_request("fresh-outside-bound"))
+            .await
+            .unwrap();
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        assert!(result.submission.is_none());
+    }
+
+    #[tokio::test]
+    async fn approved_fresh_candidate_is_reused_without_fetching_another_quote() {
+        let adapter = Arc::new(RequoteAdapter {
+            inner: SyntheticAdapter::new(),
+            preparations: AtomicUsize::new(0),
+            exceed_bound: true,
+            reusable: true,
+        });
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(ordinary_request("reused-fresh-quote"))
+            .await
+            .unwrap();
+        assert_eq!(adapter.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.preview.as_ref().unwrap().binding["quote_revision"],
+            0
+        );
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert!(result.submission.is_some());
+    }
+
+    struct RejectedOnceAdapter {
+        inner: SyntheticAdapter,
+        submissions: AtomicUsize,
+    }
+    #[async_trait]
+    impl Adapter for RejectedOnceAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.inner.prepare(operation, input).await
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+        async fn submit(
+            &self,
+            _: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            let number = self.submissions.load(Ordering::SeqCst);
+            let submission = Submission {
+                kind: "synthetic_rejection".into(),
+                reference: format!("attempt-{number}"),
+                data: json!({}),
+            };
+            journal.persist_submission(&submission)?;
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(submission)
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            let submission = record.submission.as_ref().unwrap();
+            if submission.reference == "attempt-0" {
+                Ok(Reconciliation {
+                    status: Status::Rejected,
+                    verified: None,
+                    evidence: json!({"outcome_dispatch":"rejected","definitive_nonexecution":true,
+                        "submission_reference":submission.reference,"source":"synthetic venue refusal"}),
+                })
+            } else {
+                Ok(Reconciliation {
+                    status: Status::Pending,
+                    verified: None,
+                    evidence: json!({"state":"pending"}),
+                })
+            }
+        }
+    }
+    #[tokio::test]
+    async fn transmitted_rejection_requires_new_approval() {
+        let adapter = Arc::new(RejectedOnceAdapter {
+            inner: SyntheticAdapter::new(),
+            submissions: AtomicUsize::new(0),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("definitive-rejection"))
+            .await
+            .unwrap();
+        let view = engine.operation_view(&original).unwrap();
+        assert_eq!(view["outcome"]["dispatch"], "rejected");
+        assert_eq!(view["outcome"]["retry_approval"], "required");
+        assert_eq!(view["outcome"]["next_action"]["code"], "reauthorize");
+        let token = view
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let continued = invocation
+            .scope(engine.continue_operation(&original.id, token))
+            .await;
+        assert!(continued.is_err());
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    struct FailedCostAdapter {
+        inner: RejectedOnceAdapter,
+        prepares: AtomicUsize,
+    }
+    #[async_trait]
+    impl Adapter for FailedCostAdapter {
+        fn supports_approved_reprepare(&self, _: &PreparedOperation) -> bool {
+            true
+        }
+        fn preparation_reuse_window(&self, _: &PreparedOperation) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(30))
+        }
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, op: &str, input: &Value) -> Result<Value> {
+            self.inner.read(op, input).await
+        }
+        async fn prepare(&self, op: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut candidate = self.inner.prepare(op, input).await?;
+            let count = self.prepares.fetch_add(1, Ordering::SeqCst);
+            candidate.intent.maximum_costs = vec![gofin_domain::CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource("binance-account"),
+                },
+                amount: Amount {
+                    asset: asset("binance", "ETH", 18),
+                    atoms: quantity(if count == 1 { "20" } else { "10" }),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }];
+            Ok(candidate)
+        }
+        fn validate_approved_candidate(
+            &self,
+            approved: &PreparedOperation,
+            candidate: &PreparedOperation,
+        ) -> Result<()> {
+            let mut normalized = candidate.clone();
+            if candidate.intent.maximum_costs[0].amount.atoms.integer()
+                > approved.intent.maximum_costs[0].amount.atoms.integer()
+            {
+                return Err(GoFinError::validation("candidate fee grew"));
+            }
+            normalized.intent.maximum_costs = approved.intent.maximum_costs.clone();
+            if gofin_domain::native_authorization_binding(&normalized)
+                != gofin_domain::native_authorization_binding(approved)
+            {
+                return Err(GoFinError::validation("candidate changed"));
+            }
+            Ok(())
+        }
+        async fn revalidate(&self, p: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(p.clone())
+        }
+        async fn submit(
+            &self,
+            p: &PreparedOperation,
+            j: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(p, j).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            let submission = record.submission.as_ref().unwrap();
+            if submission.reference != "attempt-0" {
+                return self.inner.reconcile(record).await;
+            }
+            let evidence =
+                json!({"outcome_replay_safe":true,"source":"synthetic finalized revert"});
+            let mut verified = proof(
+                record,
+                vec![FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: resource("binance-account"),
+                    },
+                    amount: Amount {
+                        asset: asset("binance", "ETH", 18),
+                        atoms: quantity("2"),
+                    },
+                    category: "network_fee".into(),
+                    treatment: CostTreatment::AdditionalDebit,
+                }],
+            );
+            verified.evidence = evidence.clone();
+            verified.proof_digest = verified_effect_digest(&verified)?;
+            Ok(Reconciliation {
+                status: Status::Failed,
+                evidence,
+                verified: Some(verified),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn submitted_failed_reauthorization_preserves_original_candidate_and_cost() {
+        let adapter = Arc::new(FailedCostAdapter {
+            inner: RejectedOnceAdapter {
+                inner: SyntheticAdapter::new(),
+                submissions: AtomicUsize::new(0),
+            },
+            prepares: AtomicUsize::new(0),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("failed-cost-reauthorize"))
+            .await
+            .unwrap();
+        assert_eq!(original.status, Status::Failed);
+        let token = engine
+            .store
+            .lock()
+            .unwrap()
+            .latest_action_continuation(&original.id)
+            .unwrap()
+            .unwrap()
+            .token;
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let result = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result["reauthorization"], "approved", "{result}");
+        let stored = engine.load_record(&original.id).unwrap();
+        assert_eq!(stored.preview, original.preview);
+        assert_eq!(stored.approval, original.approval);
+        assert_eq!(stored.submission, original.submission);
+        assert_eq!(stored.effects, original.effects);
+        assert_eq!(
+            adapter.inner.submissions.load(Ordering::SeqCst),
+            2,
+            "{result}"
+        );
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_empty_rejection_can_gain_observation_tags_without_rewriting_stage() {
+        for initially_tagged in [false, true] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            adapter.completed_response();
+            {
+                let mut response = adapter.response.lock().unwrap();
+                response.status = Status::Failed;
+                response.evidence =
+                    json!({"nativeRejection":{"id":"invalid_request"},"httpStatus":400});
+                let evidence = response.evidence.clone();
+                let proof = response.verified.as_mut().unwrap();
+                proof.effects.clear();
+                proof.evidence = evidence;
+                if initially_tagged {
+                    proof.evidence["outcome_dispatch"] = json!("rejected");
+                    proof.evidence["outcome_replay_safe"] = json!(true);
+                    proof.evidence["definitive_nonexecution"] = json!(true);
+                    proof.evidence["source"] = json!("synthetic_captured_rejection");
+                    proof.evidence["submission_reference"] = json!(proof.submission.reference);
+                }
+                proof.proof_digest = verified_effect_digest(proof).unwrap();
+                response.evidence = proof.evidence.clone();
+            }
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                Arc::new(SyntheticAuthorizer),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let original = engine
+                .execute(ordinary_request("terminal-rejection-refinement"))
+                .await
+                .unwrap();
+            assert_eq!(original.status, Status::Failed);
+            let before = engine
+                .store
+                .lock()
+                .unwrap()
+                .stage_attempt_by_operation(&original.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                before.state,
+                if initially_tagged {
+                    "rejected"
+                } else {
+                    "failed"
+                }
+            );
+            let mut proof = original.effects.clone().unwrap();
+            proof.evidence["outcome_dispatch"] = json!("rejected");
+            proof.evidence["outcome_replay_safe"] = json!(true);
+            proof.evidence["definitive_nonexecution"] = json!(true);
+            proof.evidence["source"] = json!("synthetic_captured_rejection");
+            proof.evidence["submission_reference"] = json!(proof.submission.reference);
+            proof.proof_digest = verified_effect_digest(&proof).unwrap();
+            let observation = |proof: VerifiedEffects| Reconciliation {
+                status: Status::Failed,
+                evidence: proof.evidence.clone(),
+                verified: Some(proof),
+            };
+            let mut corrupt = proof.clone();
+            corrupt.proof_digest = "tampered".into();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(corrupt))
+                    .is_err()
+            );
+            let mut changed = proof.clone();
+            changed.effects.push(transfer_effect());
+            changed.proof_digest = verified_effect_digest(&changed).unwrap();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(changed))
+                    .is_err()
+            );
+            let mut changed = proof.clone();
+            changed.evidence["nativeRejection"] = json!({"id":"different"});
+            changed.proof_digest = verified_effect_digest(&changed).unwrap();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(changed))
+                    .is_err()
+            );
+            let mut changed_status = observation(proof.clone());
+            changed_status.status = Status::Completed;
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), changed_status)
+                    .is_err()
+            );
+            let mut unbound_tags = observation(proof.clone());
+            unbound_tags.evidence["source"] = json!("different source");
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), unbound_tags)
+                    .is_err()
+            );
+            assert_eq!(engine.load_record(&original.id).unwrap(), original);
+            let updated = engine
+                .apply_reconciliation(original.clone(), observation(proof.clone()))
+                .unwrap();
+            let repeated = engine
+                .apply_reconciliation(updated, observation(proof))
+                .unwrap();
+            assert_eq!(repeated.approval, original.approval);
+            assert_eq!(repeated.preview, original.preview);
+            assert_eq!(repeated.submission, original.submission);
+            let after = engine
+                .store
+                .lock()
+                .unwrap()
+                .stage_attempt_by_operation(&original.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(to_value(&before).unwrap(), to_value(&after).unwrap());
+            let view = engine.operation_view(&repeated).unwrap();
+            assert_eq!(view["outcome"]["dispatch"], "rejected");
+            assert_eq!(view["outcome"]["replay_safe"], true);
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_run_rejects_new_admission_but_observes_original_identity() {
+        let adapter = Arc::new(SyntheticAdapter::new());
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut request = ordinary_request("legacy-original");
+        request.run_id = Some("legacy-run".into());
+        let mut original = record(vec![transfer_constraint()], vec![]);
+        original.request_id = request.request_id.clone();
+        original.operation = request.operation.clone();
+        original.input = request.input.clone();
+        original.fingerprint = request_fingerprint(&request).unwrap();
+        original.run_id = request.run_id.clone();
+        original.status = Status::Failed;
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &original.id,
+                &original.request_id,
+                &original.fingerprint,
+                &original.operation,
+                original.run_id.as_deref(),
+                "failed",
+                &to_value(&original).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.execute(request.clone()).await.unwrap().id,
+            original.id
+        );
+        request.request_id = "legacy-new".into();
+        assert_eq!(
+            engine.execute(request).await.unwrap_err().code,
+            "EXECUTION_INTERFACE_RETIRED"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn mutation_baseline_is_broker_captured_and_survives_adapter_refresh() {
+        let original: PreparedOperation = serde_json::from_value(json!({"operation":"test.order","input":{},"binding":{"identity":"original"},"summary":"order","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-01T00:01:00Z","operation_version":1,"intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":[]}})).unwrap();
+        let original_scope = gofin_domain::amendments::AmendmentScope {
+            intent: original.intent.clone(),
+            binding: original.binding.clone(),
+            valuation: original.valuation.clone(),
+        };
+        let context = gofin_domain::amendments::AmendmentContext {
+            original: Some(original.clone()),
+            ..Default::default()
+        };
+        let mut candidate = original.clone();
+        candidate.input = json!({"operationId":"owner"});
+        candidate.binding[MUTATION_BASELINES_KEY] = json!({"owner":{"forged":true}});
+        candidate
+            .intent
+            .expected
+            .push(EffectConstraint::SubmissionAmendment {
+                operation_id: "owner".into(),
+                submission: Submission {
+                    kind: "test".into(),
+                    reference: "original".into(),
+                    data: json!({}),
+                },
+                revision: Box::new(original_scope.clone()),
+            });
+        stamp_mutation_baselines(&mut candidate, &context, None).unwrap();
+        assert_eq!(
+            candidate.binding[MUTATION_BASELINES_KEY]["owner"],
+            json!(original_scope)
+        );
+        let adapter_candidate = strip_plan_metadata(&candidate);
+        assert!(
+            adapter_candidate
+                .binding
+                .get(MUTATION_BASELINES_KEY)
+                .is_none()
+        );
+        let mut refreshed = adapter_candidate;
+        carry_mutation_baselines(&candidate, &mut refreshed).unwrap();
+        assert_eq!(
+            refreshed.binding[MUTATION_BASELINES_KEY],
+            candidate.binding[MUTATION_BASELINES_KEY]
+        );
+    }
+
+    struct GroupedFixture(SyntheticAdapter);
+    #[async_trait]
+    impl Adapter for GroupedFixture {
+        fn definitions(&self) -> Vec<Definition> {
+            self.0.definitions()
+        }
+        async fn read(&self, o: &str, i: &Value) -> Result<Value> {
+            self.0.read(o, i).await
+        }
+        async fn prepare(&self, o: &str, i: &Value) -> Result<PreparedOperation> {
+            let mut p = self.0.prepare(o, i).await?;
+            p.binding["orders"] = json!([{"size":"1"},{"size":"1"}]);
+            Ok(p)
+        }
+        async fn revalidate(&self, p: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(p.clone())
+        }
+        async fn submit(
+            &self,
+            p: &PreparedOperation,
+            j: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.0.submit(p, j).await
+        }
+        async fn reconcile(&self, r: &OperationRecord) -> Result<Reconciliation> {
+            self.0.reconcile(r).await
+        }
+    }
+    fn grouped_prepared(original: &OperationRecord, second_increase: bool) -> PreparedOperation {
+        use gofin_domain::grouped_amendments::*;
+        let original_scope = gofin_domain::amendments::AmendmentScope {
+            intent: original.preview.as_ref().unwrap().intent.clone(),
+            binding: original.preview.as_ref().unwrap().binding.clone(),
+            valuation: original.preview.as_ref().unwrap().valuation.clone(),
+        };
+        let mut children = Vec::new();
+        for (i, n, movement) in [
+            (0, "2000000000000000000", "2000000"),
+            (
+                1,
+                if second_increase {
+                    "2000000000000000000"
+                } else {
+                    "500000000000000000"
+                },
+                if second_increase { "2000000" } else { "500000" },
+            ),
+        ] {
+            let p = synthetic_amendment(
+                original,
+                n,
+                movement,
+                if i == 0 || second_increase {
+                    "1000000000000000000"
+                } else {
+                    "0"
+                },
+            );
+            let EffectConstraint::SubmissionAmendment { mut revision, .. } =
+                p.intent.expected[0].clone()
+            else {
+                unreachable!()
+            };
+            revision.binding = original_scope.binding.clone();
+            let size = if i == 0 || second_increase {
+                "2"
+            } else {
+                "0.5"
+            };
+            revision.binding["orders"][i]["size"] = json!(size);
+            children.push(GroupedAmendmentChild {
+                child_tag: format!("member-{i}"),
+                mutation: GroupedChildMutation::Amend,
+                scope: revision,
+                binding_replacements: vec![BindingReplacement {
+                    pointer: format!("/orders/{i}/size"),
+                    before: json!("1"),
+                    after: json!(size),
+                }],
+            });
+        }
+        let mut group = GroupedAmendmentGroup {
+            operation_id: original.id.clone(),
+            submission: original.submission.clone().unwrap(),
+            original_scope: Box::new(original_scope.clone()),
+            shared_binding_replacements: vec![],
+            children,
+            approved_envelope: Box::new(original_scope.clone()),
+            incremental_valuation: None,
+        };
+        let mut envelope = original_scope.clone();
+        let total = if second_increase {
+            "3000000000000000000"
+        } else {
+            "2000000000000000000"
+        };
+        envelope.intent.debits[0].amount.atoms = quantity(total);
+        if let EffectConstraint::Transfer { maximum_debit, .. } = &mut envelope.intent.expected[0] {
+            *maximum_debit = quantity(total);
+        }
+        envelope.binding =
+            compose_binding(&group, group.children.iter().map(|c| c.child_tag.as_str())).unwrap();
+        envelope.valuation.as_mut().unwrap().movement_usd_micros = quantity(if second_increase {
+            "3000000"
+        } else {
+            "2000000"
+        });
+        group.approved_envelope = Box::new(envelope);
+        let mut incremental = original_scope.valuation.clone().unwrap();
+        incremental.movement_usd_micros = quantity(if second_increase {
+            "2000000"
+        } else {
+            "1000000"
+        });
+        group.incremental_valuation = Some(incremental);
+        let mut p = original.preview.clone().unwrap();
+        p.input = json!({"amendments":group.children.iter().map(|c|json!({"orderTag":c.child_tag,"operationId":original.id,"originalSubmission":original.submission})).collect::<Vec<_>>()});
+        p.intent.debits[0].amount.atoms = quantity(if second_increase {
+            "2000000000000000000"
+        } else {
+            "1000000000000000000"
+        });
+        p.intent.maximum_costs.clear();
+        p.intent.expected = vec![EffectConstraint::GroupedSubmissionAmendments {
+            group: Box::new(group),
+        }];
+        p.valuation.as_mut().unwrap().movement_usd_micros = quantity(if second_increase {
+            "2000000"
+        } else {
+            "1000000"
+        });
+        p.binding = json!({"syntheticGrouped":true});
+        p
+    }
+
+    #[tokio::test]
+    async fn grouped_amendment_enforces_native_owner_and_delta_without_valuation() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = synthetic_engine(
+            &directory.path().join("unpriced-group.sqlite"),
+            Arc::new(GroupedFixture(SyntheticAdapter::new())),
+        );
+        let mut original = engine
+            .execute(OperationRequest {
+                request_id: "unpriced-group-owner".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let mut prepared = grouped_prepared(&original, false);
+        original.preview.as_mut().unwrap().valuation = None;
+        engine.update_record(&original).unwrap();
+        prepared.valuation = None;
+        let EffectConstraint::GroupedSubmissionAmendments { group } =
+            &mut prepared.intent.expected[0]
+        else {
+            unreachable!()
+        };
+        group.incremental_valuation = None;
+        group.original_scope.valuation = None;
+        group.approved_envelope.valuation = None;
+        for child in &mut group.children {
+            child.scope.valuation = None;
+        }
+        assert!(
+            engine
+                .validate_submission_amendment(&prepared, None, false)
+                .is_ok()
+        );
+        let mut bad = prepared.clone();
+        bad.intent.debits[0].amount.atoms = quantity("1");
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_ok()
+        );
+        let mut wrong_owner = prepared.clone();
+        if let EffectConstraint::GroupedSubmissionAmendments { group } =
+            &mut wrong_owner.intent.expected[0]
+        {
+            group.submission.reference.push_str("-changed");
+        }
+        assert!(
+            engine
+                .validate_submission_amendment(&wrong_owner, None, false)
+                .is_err()
+        );
+    }
+
+    struct RetryAdapter {
+        inner: SyntheticAdapter,
+        first: AtomicBool,
+    }
+    struct CancelDuringPreparation {
+        inner: SyntheticAdapter,
+        invocation: gofin_domain::execution_progress::Invocation,
+    }
+    #[async_trait]
+    impl Adapter for CancelDuringPreparation {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let candidate = self.inner.prepare(operation, input).await?;
+            self.invocation.cancel();
+            Ok(candidate)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    #[tokio::test]
+    async fn disconnected_during_preparation_never_prompts_or_submits() {
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let adapter = Arc::new(CancelDuringPreparation {
+            inner: SyntheticAdapter::new(),
+            invocation: invocation.clone(),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let record = invocation
+            .scope(engine.execute(ordinary_request("cancel-during-preparation")))
+            .await
+            .unwrap();
+        assert_eq!(record.error.as_ref().unwrap().code, "INVOCATION_ENDED");
+        assert!(record.submission.is_none());
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+    }
+    #[async_trait]
+    impl Adapter for RetryAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            let idem = Uuid::new_v4().to_string();
+            prepared.binding["idem"] = json!(idem);
+            prepared.binding["requestBodyExact"] =
+                json!(json!({"idem":idem,"amount":"1"}).to_string());
+            Ok(prepared)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            if parse_time(&prepared.expires_at)? <= Utc::now() {
+                return Err(GoFinError::validation("Prepared withdrawal expired."));
+            }
+            if self.first.swap(false, Ordering::SeqCst) {
+                return Err(GoFinError::validation(
+                    "Synthetic candidate expired before dispatch.",
+                ));
+            }
+            Ok(prepared.clone())
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    #[tokio::test]
+    async fn unsubmitted_attempt_can_continue_with_original_approval_once() {
+        let adapter = Arc::new(RetryAdapter {
+            inner: SyntheticAdapter::new(),
+            first: AtomicBool::new(true),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let request = ordinary_request("retry-approved");
+        let original = engine.execute(request.clone()).await.unwrap();
+        assert!(original.submission.is_none());
+        let view = engine.operation_view(&original).unwrap();
+        let token = view
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let continued = invocation
+            .scope(engine.continue_operation(&original.id, &token))
+            .await
+            .unwrap();
+        assert!(continued["stage"]["submission"].is_object(), "{continued}");
+        let approved = original.preview.as_ref().unwrap();
+        assert_eq!(
+            continued["stage"]["preview"]["binding"]["idem"],
+            approved.binding["idem"]
+        );
+        assert_eq!(
+            continued["stage"]["preview"]["binding"]["requestBodyExact"],
+            approved.binding["requestBodyExact"]
+        );
+        let mut stale = approved.clone();
+        stale.expires_at = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        assert!(adapter.revalidate(&stale).await.is_err());
+        let observed = engine.status(&original.id, true).await.unwrap();
+        let observed = engine.operation_view(&observed).unwrap();
+        assert!(observed["submission"].is_null(), "{observed}");
+        assert!(
+            observed["latest_attempt"]["submission"].is_object(),
+            "{observed}"
+        );
+        assert_eq!(
+            observed["latest_attempt"]["outcome"]["dispatch"],
+            "dispatched"
+        );
+        assert_eq!(observed["outcome"]["replay_safe"], false);
+        let duplicate = engine.execute(request).await.unwrap();
+        assert_eq!(duplicate.id, original.id);
+        let _ = invocation
+            .scope(engine.continue_operation(&original.id, &token))
+            .await
+            .unwrap();
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn claimed_unsubmitted_attempt_recovers_under_exclusive_lease() {
+        let adapter = Arc::new(RetryAdapter {
+            inner: SyntheticAdapter::new(),
+            first: AtomicBool::new(true),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("retry-after-claim"))
+            .await
+            .unwrap();
+        let approval = original.approval.as_ref().unwrap();
+        let candidate = original.preview.as_ref().unwrap();
+        let token = engine
+            .operation_view(&original)
+            .unwrap()
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let child_id = "synthetic-claimed-child";
+        let mut child = original.clone();
+        child.id = child_id.into();
+        child.request_id = "synthetic-claimed-request".into();
+        child.fingerprint = "synthetic-claimed-fingerprint".into();
+        child.status = Status::AwaitingApproval;
+        child.error = None;
+        {
+            let mut store = engine.store.lock().unwrap();
+            let lease = store.try_acquire_action_lease(&original.id).unwrap();
+            let stage = store
+                .issue_stage_continuation(&original.id, "standalone", &approval.challenge_nonce)
+                .unwrap();
+            store
+                .bind_and_issue_action_continuation(&lease, &token, &stage.token)
+                .unwrap();
+            store
+                .create_request(
+                    child_id,
+                    &child.request_id,
+                    &child.fingerprint,
+                    &child.operation,
+                    None,
+                    "awaiting_approval",
+                    &to_value(&child).unwrap(),
+                    &child.updated_at,
+                )
+                .unwrap();
+            store
+                .claim_stage_attempt(&stage.token, child_id, &to_value(candidate).unwrap())
+                .unwrap();
+        }
+        let next = engine
+            .operation_view(&original)
+            .unwrap()
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let result = invocation
+            .scope(engine.continue_operation(&original.id, &next))
+            .await
+            .unwrap();
+        assert!(result["stage"]["submission"].is_object(), "{result}");
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_reauthorization_reuses_logical_identity_and_token_is_idempotent() {
+        let adapter = Arc::new(RetryAdapter {
+            inner: SyntheticAdapter::new(),
+            first: AtomicBool::new(true),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("reauthorize-logical"))
+            .await
+            .unwrap();
+        let view = engine.operation_view(&original).unwrap();
+        let token = view
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(15));
+        let result = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result["reauthorization"], "approved");
+        let duplicate = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+            .await
+            .unwrap();
+        assert_eq!(duplicate, result);
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 2);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        let observed = engine.status(&original.id, true).await.unwrap();
+        assert_eq!(observed.id, original.id);
+        let view = engine.operation_view(&observed).unwrap();
+        assert!(view["submission"].is_null());
+        assert!(view["latest_attempt"]["submission"].is_object());
+    }
+
+    #[tokio::test]
+    async fn interrupted_reauthorization_token_never_prompts_twice() {
+        let adapter = Arc::new(RetryAdapter {
+            inner: SyntheticAdapter::new(),
+            first: AtomicBool::new(true),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("interrupted-review"))
+            .await
+            .unwrap();
+        let token = engine
+            .operation_view(&original)
+            .unwrap()
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let candidate = adapter
+            .prepare(&original.operation, &original.input)
+            .await
+            .unwrap();
+        let hash = binding_hash(&original.input).unwrap();
+        {
+            let mut store = engine.store.lock().unwrap();
+            let lease = store.try_acquire_action_lease(&original.id).unwrap();
+            store
+                .claim_reauthorization(&lease, &token, &hash, &to_value(&candidate).unwrap())
+                .unwrap();
+        }
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let result = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result["reauthorization"], "abandoned");
+        assert!(
+            result
+                .pointer("/next_action/continuation_token")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        let repeat = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result, repeat);
+        let changed = invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, json!({"changed":true})))
+            .await;
+        assert!(changed.is_err());
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn interrupted_v2_approval_restores_passive_continuation_without_submission() {
+        for (expired, partial_registration, disabled_yolo, malformed_expiry) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+            let authorizer: Arc<dyn Authorizer> = if disabled_yolo {
+                Arc::new(YoloGateAuthorizer {
+                    enabled: Arc::new(AtomicBool::new(false)),
+                    generation: Arc::new(AtomicUsize::new(0)),
+                    disable_after_authorize: false,
+                })
+            } else {
+                approvals.clone()
+            };
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let request = ordinary_request("interrupted-approval");
+            let prepared = adapter
+                .prepare(&request.operation, &request.input)
+                .await
+                .unwrap();
+            let now = Utc::now();
+            let audit = ApprovalAudit {
+                source: Some(if disabled_yolo {
+                    gofin_domain::AuthorizationSource::Yolo
+                } else {
+                    gofin_domain::AuthorizationSource::Development
+                }),
+                yolo_provenance: disabled_yolo.then(|| gofin_domain::YoloAuthorizationProvenance {
+                    revision: 7,
+                    generation: "SYNTHETIC-yolo-generation-0".into(),
+                    checked_at: now.to_rfc3339(),
+                }),
+                mechanism: "synthetic".into(),
+                binding_hash: binding_hash(&gofin_domain::native_authorization_binding(&prepared))
+                    .unwrap(),
+                challenge_nonce: "synthetic-recovery-nonce".into(),
+                approved_at: (now - chrono::Duration::seconds(if expired { 180 } else { 0 }))
+                    .to_rfc3339(),
+                expires_at: if malformed_expiry {
+                    "invalid historical expiry".into()
+                } else {
+                    (now + chrono::Duration::seconds(if expired { -90 } else { 90 })).to_rfc3339()
+                },
+            };
+            let record = OperationRecord {
+                id: "interrupted-v2".into(),
+                request_id: request.request_id.clone(),
+                fingerprint: request_fingerprint(&request).unwrap(),
+                fingerprint_version: 1,
+                operation: request.operation.clone(),
+                input: request.input.clone(),
+                status: Status::AwaitingApproval,
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+                preview: Some(prepared),
+                approval: Some(audit),
+                authorization_source: None,
+                submission: None,
+                dispatch_evidence: None,
+                position_baseline: None,
+                effects: None,
+                last_reconciliation_evidence: None,
+                error: None,
+                run_id: None,
+            };
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .create_request(
+                    &record.id,
+                    &record.request_id,
+                    &record.fingerprint,
+                    &record.operation,
+                    None,
+                    "awaiting_approval",
+                    &to_value(&record).unwrap(),
+                    &record.created_at,
+                )
+                .unwrap();
+            if partial_registration {
+                let audit = record.approval.as_ref().unwrap();
+                let prepared = record.preview.as_ref().unwrap();
+                let authority = json!({
+                    "audit": audit,
+                    "intent": gofin_domain::native_authorization_binding(prepared),
+                    "prepared": prepared,
+                });
+                engine
+                    .store
+                    .lock()
+                    .unwrap()
+                    .register_action_authority(
+                        &record.id,
+                        &audit.expires_at,
+                        &audit.challenge_nonce,
+                        &authority,
+                        &audit.expires_at,
+                    )
+                    .unwrap();
+            }
+            engine.recover_interrupted().unwrap();
+            let restored = engine.load_record(&record.id).unwrap();
+            if malformed_expiry {
+                assert_eq!(restored, record);
+                assert!(
+                    engine
+                        .store
+                        .lock()
+                        .unwrap()
+                        .latest_action_continuation(&record.id)
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+                continue;
+            }
+            let view = engine.operation_view(&restored).unwrap();
+            assert!(
+                view.pointer("/outcome/next_action/continuation_token")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                "{view}"
+            );
+            assert_eq!(
+                restored.approval, record.approval,
+                "recovery preserves the original audit and expiry"
+            );
+            assert_eq!(
+                restored.status,
+                if expired {
+                    Status::Expired
+                } else {
+                    Status::AwaitingApproval
+                }
+            );
+            assert!(restored.submission.is_none());
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+            let token = view
+                .pointer("/outcome/next_action/continuation_token")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_owned();
+            engine.recover_interrupted().unwrap();
+            assert_eq!(
+                engine
+                    .operation_view(&engine.load_record(&record.id).unwrap())
+                    .unwrap(),
+                view
+            );
+            if expired || disabled_yolo {
+                assert_eq!(view["outcome"]["next_action"]["code"], "reauthorize");
+                assert_eq!(view["outcome"]["retry_approval"], "required");
+                let invocation = gofin_domain::execution_progress::Invocation::new(
+                    std::time::Duration::from_secs(10),
+                );
+                if let Ok(denied) = invocation
+                    .scope(engine.continue_operation(&record.id, &token))
+                    .await
+                {
+                    assert!(
+                        denied.get("submission").is_none_or(Value::is_null),
+                        "{denied}"
+                    );
+                    assert!(
+                        denied
+                            .pointer("/stage/submission")
+                            .is_none_or(Value::is_null),
+                        "{denied}"
+                    );
+                }
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+                if disabled_yolo {
+                    continue;
+                }
+                let result = invocation
+                    .scope(engine.reauthorize_operation(&record.id, &token, record.input.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(result["reauthorization"], "approved", "{result}");
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+                let repeated = invocation
+                    .scope(engine.reauthorize_operation(&record.id, &token, record.input.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(repeated["id"], record.id);
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(view["outcome"]["next_action"]["code"], "continue");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_transfer_does_not_require_usd_valuation() {
+        let adapter = Arc::new(SyntheticAdapter::new_with_valuation(false));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine.execute(ordinary_request("no-price")).await.unwrap();
+        assert!(result.preview.as_ref().unwrap().valuation.is_none());
+        assert!(result.submission.is_some(), "{result:?}");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_deduplicate_identity_without_cross_action_budget() {
         for duplicate in [true, false] {
             let adapter = Arc::new(LatencyAdapter {
                 inner: SyntheticAdapter::new(),
@@ -22480,183 +22126,21 @@ mod tests {
             let (first, second) = tokio::join!(engine.execute(first), engine.execute(second));
             let first = first.unwrap();
             let second = second.unwrap();
-            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
-            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
             if duplicate {
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
                 assert_eq!(first.id, second.id);
                 assert_eq!(engine.operations().unwrap().len(), 1);
             } else {
+                assert_eq!(
+                    adapter.inner.submissions.load(Ordering::SeqCst),
+                    2,
+                    "first={first:?} second={second:?}"
+                );
                 assert_ne!(first.id, second.id);
-                let rejected = if first.submission.is_none() {
-                    first
-                } else {
-                    second
-                };
-                assert_eq!(rejected.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
-                assert!(rejected.approval.is_none());
-                assert!(rejected.submission.is_none());
+                assert!(first.submission.is_some());
+                assert!(second.submission.is_some());
             }
         }
-    }
-
-    struct DelayedBoundaryAdapter {
-        inner: SyntheticAdapter,
-        resolutions: AtomicUsize,
-        stall_resolution: bool,
-    }
-    #[async_trait]
-    impl Adapter for DelayedBoundaryAdapter {
-        fn definitions(&self) -> Vec<Definition> {
-            self.inner.definitions()
-        }
-        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
-            self.inner.read(operation, input).await
-        }
-        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
-            let mut prepared = self.inner.prepare(operation, input).await?;
-            if !self.stall_resolution {
-                prepared.expires_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
-            }
-            Ok(prepared)
-        }
-        async fn prepare_boundaries(
-            &self,
-            prepared: &PreparedOperation,
-            _bounds: &Value,
-        ) -> Result<BoundarySpec> {
-            self.resolutions.fetch_add(1, Ordering::SeqCst);
-            if self.stall_resolution {
-                std::future::pending::<()>().await;
-            }
-            // Exercise an awaited metadata resolver exceeding a short preview
-            // lifetime without sleeping through the normal two-minute window.
-            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-            Ok(BoundarySpec {
-                fixed: prepared.binding.clone(),
-                parameters: json!({}),
-                maximum_debits: prepared.intent.debits.clone(),
-                maximum_costs: prepared.intent.maximum_costs.clone(),
-                summary: "synthetic finite scope".into(),
-            })
-        }
-        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
-            self.inner.revalidate(prepared).await
-        }
-        async fn submit(
-            &self,
-            prepared: &PreparedOperation,
-            journal: Arc<dyn SubmissionJournal>,
-        ) -> Result<Submission> {
-            self.inner.submit(prepared, journal).await
-        }
-        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
-            self.inner.reconcile(record).await
-        }
-    }
-    struct BoundaryResolutionApproval(AtomicUsize);
-    #[async_trait]
-    impl Authorizer for BoundaryResolutionApproval {
-        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            SyntheticAuthorizer.authorize(challenge).await
-        }
-    }
-    #[tokio::test]
-    async fn awaited_boundary_scope_resolution_rechecks_preview_expiry_before_review_and_approval()
-    {
-        let adapter = Arc::new(DelayedBoundaryAdapter {
-            inner: SyntheticAdapter::new(),
-            resolutions: AtomicUsize::new(0),
-            stall_resolution: false,
-        });
-        let approval = Arc::new(BoundaryResolutionApproval(AtomicUsize::new(0)));
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            approval.clone(),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let request = BoundaryAuthorizationRequest {
-            request_id: "SYNTHETIC-delayed-boundary".into(),
-            operation: "synthetic.transfer".into(),
-            input: json!({}),
-            bounds: json!({}),
-            valid_for_seconds: 600,
-            replaces: None,
-        };
-        assert_eq!(
-            engine
-                .preview_boundary_authorization(request.clone())
-                .await
-                .unwrap_err()
-                .code,
-            "PREVIEW_EXPIRED"
-        );
-        assert_eq!(
-            engine.authorize_boundary(request).await.unwrap_err().code,
-            "PREVIEW_EXPIRED"
-        );
-        assert_eq!(adapter.resolutions.load(Ordering::SeqCst), 2);
-        assert_eq!(approval.0.load(Ordering::SeqCst), 0);
-        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_boundary_scope_resolution_times_out_without_approval_or_allocation() {
-        let adapter = Arc::new(DelayedBoundaryAdapter {
-            inner: SyntheticAdapter::new(),
-            resolutions: AtomicUsize::new(0),
-            stall_resolution: true,
-        });
-        let approval = Arc::new(BoundaryResolutionApproval(AtomicUsize::new(0)));
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            approval.clone(),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        for authorize in [false, true] {
-            let request = BoundaryAuthorizationRequest {
-                request_id: format!("SYNTHETIC-stalled-boundary-{authorize}"),
-                operation: "synthetic.transfer".into(),
-                input: json!({}),
-                bounds: json!({}),
-                valid_for_seconds: 600,
-                replaces: None,
-            };
-            let started = tokio::time::Instant::now();
-            let error = if authorize {
-                engine
-                    .authorize_boundary(request.clone())
-                    .await
-                    .unwrap_err()
-            } else {
-                engine
-                    .preview_boundary_authorization(request.clone())
-                    .await
-                    .unwrap_err()
-            };
-            assert_eq!(error.code, "EVIDENCE_TIMEOUT");
-            assert_eq!(error.stage, "preflight");
-            assert_eq!(tokio::time::Instant::now() - started, PREFLIGHT_TIMEOUT);
-            assert!(
-                engine
-                    .store
-                    .lock()
-                    .unwrap()
-                    .boundary_authorization_by_request(&request.request_id)
-                    .unwrap()
-                    .is_none()
-            );
-        }
-        assert_eq!(adapter.resolutions.load(Ordering::SeqCst), 2);
-        assert_eq!(approval.0.load(Ordering::SeqCst), 0);
-        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
-        assert!(engine.operations().unwrap().is_empty());
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
     }
 
     /// End-to-end finite bridge fixture. Its transfer effects deliberately
@@ -22673,14 +22157,6 @@ mod tests {
             Self {
                 complete,
                 fail_before_submission: AtomicBool::new(false),
-                submissions: AtomicUsize::new(0),
-            }
-        }
-
-        fn rejected_before_submission() -> Self {
-            Self {
-                complete: true,
-                fail_before_submission: AtomicBool::new(true),
                 submissions: AtomicUsize::new(0),
             }
         }
@@ -22969,30 +22445,6 @@ mod tests {
         })
     }
 
-    fn lifecycle_boundary_request(
-        request_id: &str,
-        transfer_id: &str,
-        step_id: &str,
-        step_kind: gofin_domain::BridgeStepKind,
-        minimum_receipt: &str,
-        replaces: Option<String>,
-    ) -> BoundaryAuthorizationRequest {
-        let bounds = lifecycle_bounds(minimum_receipt);
-        BoundaryAuthorizationRequest {
-            request_id: request_id.into(),
-            operation: "bridge.transfer".into(),
-            input: json!({
-                "transferId":transfer_id,
-                "stepId":step_id,
-                "stepKind":step_kind,
-                "selectedBounds":bounds
-            }),
-            bounds,
-            valid_for_seconds: 1,
-            replaces,
-        }
-    }
-
     fn lifecycle_operation_request(
         request_id: &str,
         transfer_id: &str,
@@ -23162,7 +22614,10 @@ mod tests {
                 "VENUE_REQUEST_FAILED"
             );
             assert_eq!(reconciled.submission.as_ref(), Some(&original_submission));
-            assert_eq!(reconciled.last_reconciliation_evidence, Some(evidence));
+            assert_eq!(
+                reconciled.last_reconciliation_evidence.as_ref().unwrap()["phase"],
+                evidence["phase"]
+            );
         }
 
         adapter.push_reconciliation(Err(GoFinError::new(
@@ -23207,8 +22662,11 @@ mod tests {
             "VENUE_REQUEST_FAILED"
         );
         assert_eq!(
-            after_missing_proof.last_reconciliation_evidence,
-            Some(json!({"phase":"missing-proof"}))
+            after_missing_proof
+                .last_reconciliation_evidence
+                .as_ref()
+                .unwrap()["conflicting_observations"][0]["adapter_evidence"]["phase"],
+            "missing-proof"
         );
 
         adapter.inner.completed_response();
@@ -23224,8 +22682,11 @@ mod tests {
             "VENUE_REQUEST_FAILED"
         );
         assert_eq!(
-            after_invalid_proof.last_reconciliation_evidence,
-            Some(json!({"phase":"invalid-proof"}))
+            after_invalid_proof
+                .last_reconciliation_evidence
+                .as_ref()
+                .unwrap()["conflicting_observations"][1]["adapter_evidence"]["phase"],
+            "invalid-proof"
         );
         assert_eq!(
             after_invalid_proof.submission.as_ref(),
@@ -23338,18 +22799,20 @@ mod tests {
             );
             assert_eq!(approval.challenge_nonce, challenge.nonce);
             let prepared = record.preview.as_ref().unwrap();
-            assert_eq!(challenge.binding, authorization_binding(prepared));
+            assert_eq!(
+                challenge.binding,
+                gofin_domain::native_authorization_binding(prepared)
+            );
             let expiry = parse_time(&challenge.expires_at).unwrap();
             let preview_expiry = parse_time(&prepared.expires_at).unwrap();
-            assert!(expiry <= preview_expiry);
+            assert!(
+                expiry - parse_time(&approval.approved_at).unwrap()
+                    <= chrono::Duration::seconds(91)
+            );
             if preview_lifetime_seconds == 30 {
-                assert_eq!(expiry, preview_expiry);
+                assert!(expiry > preview_expiry);
             } else {
-                assert!(preview_expiry - expiry >= chrono::Duration::seconds(29));
-                assert!(
-                    expiry - parse_time(&approval.approved_at).unwrap()
-                        <= chrono::Duration::seconds(90)
-                );
+                assert!(expiry < preview_expiry);
             }
             let repeated = engine.execute(request).await.unwrap();
             assert_eq!(repeated.id, record.id);
@@ -23389,7 +22852,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(record.error.as_ref().unwrap().code, "REQUEST_CHANGED");
+        assert_eq!(
+            record.error.as_ref().unwrap().code,
+            "CANDIDATE_OUTSIDE_APPROVAL"
+        );
         assert!(record.submission.is_none());
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
@@ -24991,83 +24457,6 @@ mod tests {
     }
 
     #[test]
-    fn run_restore_requires_complete_matching_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let adapter: Arc<dyn Adapter> = Arc::new(SyntheticAdapter::new());
-        let engine = synthetic_engine(&directory.path().join("run.sqlite3"), adapter);
-        let instant = chrono::Utc::now();
-        let observed_at = instant.to_rfc3339();
-        let baseline = StateSnapshot {
-            state: FinancialState {
-                holdings: vec![ResourceAmount {
-                    resource: resource("binance-account"),
-                    amount: Amount {
-                        asset: asset("binance", "ETH", 18),
-                        atoms: quantity("1000000000000000000"),
-                    },
-                }],
-                ..Default::default()
-            },
-            observed_at: observed_at.clone(),
-            complete: true,
-            coverage: vec!["binance-account".into(), "ethereum-wallet".into()],
-            pending: vec![],
-        };
-        engine
-            .begin_run(
-                synthetic_run_plan("synthetic-run-restore", &baseline, "1000000"),
-                instant,
-            )
-            .unwrap();
-        let incomplete = StateSnapshot {
-            complete: false,
-            coverage: vec![],
-            ..baseline.clone()
-        };
-        let pending = engine
-            .finish_run("synthetic-run-restore", incomplete, instant)
-            .unwrap();
-        assert_eq!(pending.status, RunStatus::CleanupOutstanding);
-        assert!(!pending.differences.is_empty());
-        let restored = engine
-            .finish_run("synthetic-run-restore", baseline.clone(), instant)
-            .unwrap();
-        assert_eq!(
-            restored.status,
-            RunStatus::Restored,
-            "{:?}",
-            restored.differences
-        );
-        assert!(restored.differences.is_empty());
-
-        engine
-            .begin_run(
-                synthetic_run_plan("synthetic-run-excess-cost", &baseline, "1000000"),
-                instant,
-            )
-            .unwrap();
-        let mut over_costed: RunLedger = engine.load_run("synthetic-run-excess-cost").unwrap();
-        over_costed.costs = vec![ResourceAmount {
-            resource: baseline.state.holdings[0].resource.clone(),
-            amount: Amount {
-                asset: baseline.state.holdings[0].amount.asset.clone(),
-                atoms: quantity("1000000000000000001"),
-            },
-        }];
-        engine.save_run(&over_costed).unwrap();
-        let over_spent = engine
-            .finish_run("synthetic-run-excess-cost", baseline, instant)
-            .unwrap();
-        assert_eq!(over_spent.status, RunStatus::CleanupOutstanding);
-        assert!(
-            over_spent
-                .differences
-                .keys()
-                .any(|key| key.starts_with("cost:"))
-        );
-    }
-
-    #[test]
     fn final_projection_cannot_absorb_intermediate_cash_into_unselected_holdings() {
         let wallet = resource("selected-wallet");
         let native = asset("synthetic:1", "native", 18);
@@ -25568,93 +24957,6 @@ mod tests {
         assert_eq!(selected[0].origin, allocation_origin(&child_b));
         assert_eq!(lots.len(), 1);
         assert_eq!(lots[0].origin, allocation_origin(&child_a));
-    }
-
-    #[tokio::test]
-    async fn run_keeps_origin_through_cross_custody_transfer_and_requires_return() {
-        let directory = tempfile::tempdir().unwrap();
-        let adapter = Arc::new(SyntheticAdapter::new_with_valuation(true));
-        let engine = synthetic_engine(
-            &directory.path().join("origin-run.sqlite3"),
-            adapter.clone(),
-        );
-        let instant = chrono::Utc::now();
-        let observed_at = instant.to_rfc3339();
-        let source = resource("binance-account");
-        let target = resource("ethereum-wallet");
-        let source_amount = ResourceAmount {
-            resource: source.clone(),
-            amount: Amount {
-                asset: asset("binance", "ETH", 18),
-                atoms: quantity("1000000000000000000"),
-            },
-        };
-        let baseline = StateSnapshot {
-            state: FinancialState {
-                holdings: vec![source_amount.clone()],
-                ..Default::default()
-            },
-            observed_at: observed_at.clone(),
-            complete: true,
-            coverage: vec![source.0.clone(), target.0.clone()],
-            pending: vec![],
-        };
-        engine
-            .begin_run(
-                synthetic_run_plan("synthetic-origin-run", &baseline, "1000000"),
-                instant,
-            )
-            .unwrap();
-        adapter.completed_response();
-        let record = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-origin-transfer".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({"amount":"1"}),
-                run_id: Some("synthetic-origin-run".into()),
-            })
-            .await
-            .unwrap();
-        assert_eq!(record.status, Status::Completed);
-        let run: RunLedger = engine.load_run("synthetic-origin-run").unwrap();
-        assert_eq!(run.provenance_events.len(), 1);
-        assert_eq!(
-            run.provenance_events[0].from,
-            AccountingLocation::Cash {
-                resource: source.clone()
-            }
-        );
-        assert_eq!(
-            run.provenance_events[0].to,
-            AccountingLocation::Cash {
-                resource: target.clone()
-            }
-        );
-        assert_eq!(run.provenance_events[0].origins.len(), 1);
-        assert!(run.provenance_events[0].origins[0].starts_with("allocation:"));
-        let final_state = StateSnapshot {
-            state: FinancialState {
-                holdings: vec![ResourceAmount {
-                    resource: target,
-                    amount: Amount {
-                        asset: asset("ethereum:1", "native", 18),
-                        atoms: quantity("995000000000000000"),
-                    },
-                }],
-                ..Default::default()
-            },
-            observed_at: now(),
-            complete: true,
-            coverage: baseline.coverage.clone(),
-            pending: vec![],
-        };
-        assert_eq!(
-            engine
-                .finish_run("synthetic-origin-run", final_state, chrono::Utc::now())
-                .unwrap()
-                .status,
-            RunStatus::CleanupOutstanding
-        );
     }
 
     fn position_anchor(
@@ -26673,136 +25975,6 @@ mod tests {
     }
 
     #[test]
-    fn custody_return_reserves_home_principal_and_separate_fee_then_restores() {
-        let directory = tempfile::tempdir().unwrap();
-        let (engine, original, operation) =
-            custody_return_fixture(&directory.path().join("custody-return.sqlite3"));
-        let prepared = operation.preview.as_ref().unwrap();
-        let mut run = engine
-            .reserve_run_operation(&original.id, &operation, prepared)
-            .unwrap();
-        let reservation = &run.reservations[&operation.id];
-        let origin_a = format!(
-            "allocation:{}",
-            resource_asset_key(&original.allocations[0].holding).unwrap()
-        );
-        let origin_b = format!(
-            "allocation:{}",
-            resource_asset_key(&original.allocations[1].holding).unwrap()
-        );
-        assert_eq!(reservation.provenance.len(), 1);
-        assert_eq!(reservation.provenance[0].origin, origin_a);
-        assert_eq!(reservation.provenance[0].atoms, "100");
-        assert_eq!(reservation.additional_cost_provenance.len(), 1);
-        assert_eq!(reservation.additional_cost_provenance[0].origin, origin_b);
-        assert_eq!(reservation.additional_cost_provenance[0].atoms, "2");
-        let verified = proof(&operation, custody_return_effects(&operation, true));
-        validate_origin_links(&verified.effects).unwrap();
-        engine.settle_run(&mut run, &operation, &verified).unwrap();
-        assert!(run.reservations.is_empty());
-        assert!(!run.route_invalidated);
-        assert_eq!(
-            run.costs,
-            vec![ResourceAmount {
-                resource: original.allocations[1].holding.resource.clone(),
-                amount: Amount {
-                    asset: prepared.intent.debits[0].amount.asset.clone(),
-                    atoms: quantity("1")
-                },
-            }]
-        );
-        assert_eq!(run.spent_cost_usd_micros, "1000");
-        assert!(run.provenance.iter().all(|lot| {
-            allocation_origin_key(&lot.origin)
-                .and_then(|key| decode_resource_asset_key(key).ok())
-                .is_some_and(|(home, asset)| {
-                    lot.location == AccountingLocation::Cash { resource: home }
-                        && lot.asset == asset
-                })
-        }));
-        engine.save_run(&run).unwrap();
-        let final_snapshot = StateSnapshot {
-            state: FinancialState {
-                holdings: run.available.clone(),
-                ..Default::default()
-            },
-            observed_at: now(),
-            complete: true,
-            coverage: original.baseline.coverage,
-            pending: vec![],
-        };
-        let result = engine
-            .finish_run(&run.id, final_snapshot, Utc::now())
-            .unwrap();
-        assert_eq!(
-            result.status,
-            RunStatus::Restored,
-            "{:?}",
-            result.differences
-        );
-    }
-
-    #[test]
-    fn custody_return_fee_only_failure_refunds_principal_and_requires_funded_replan() {
-        let directory = tempfile::tempdir().unwrap();
-        let (engine, original, mut operation) =
-            custody_return_fixture(&directory.path().join("custody-revert.sqlite3"));
-        let mut run = engine
-            .reserve_run_operation(
-                &original.id,
-                &operation,
-                operation.preview.as_ref().unwrap(),
-            )
-            .unwrap();
-        operation.status = Status::Failed;
-        let identity = operation.submission.clone();
-        engine
-            .settle_run(
-                &mut run,
-                &operation,
-                &proof(&operation, custody_return_effects(&operation, false)),
-            )
-            .unwrap();
-        assert_eq!(operation.submission, identity);
-        assert!(run.reservations.is_empty());
-        assert!(run.route_invalidated);
-        assert_eq!(run.status, RunStatus::CleanupOutstanding);
-        assert!(run.settled_route_steps.is_empty());
-        let mut expected = original.provenance;
-        expected[0].atoms = "9".into();
-        assert_eq!(
-            run.provenance, expected,
-            "only the reserved B fee is consumed; A principal and source order survive"
-        );
-        assert_eq!(run.spent_cost_usd_micros, "1000");
-        engine.save_run(&run).unwrap();
-        assert_eq!(
-            engine
-                .reserve_run_operation(&run.id, &operation, operation.preview.as_ref().unwrap())
-                .unwrap_err()
-                .code,
-            "RETURN_ROUTE_INVALIDATED"
-        );
-        let final_snapshot = StateSnapshot {
-            state: FinancialState {
-                holdings: run.available.clone(),
-                ..Default::default()
-            },
-            observed_at: now(),
-            complete: true,
-            coverage: original.baseline.coverage,
-            pending: vec![],
-        };
-        assert_eq!(
-            engine
-                .finish_run(&run.id, final_snapshot, Utc::now())
-                .unwrap()
-                .status,
-            RunStatus::CleanupOutstanding
-        );
-    }
-
-    #[test]
     fn custody_return_human_rejection_restores_exact_pre_reservation_order() {
         let directory = tempfile::tempdir().unwrap();
         let (engine, original, mut operation) =
@@ -26875,424 +26047,6 @@ mod tests {
             before
         );
         assert_eq!(operation.submission, identity);
-    }
-
-    #[test]
-    fn lending_round_trip_preserves_selected_principal_yield_and_included_costs() {
-        let directory = tempfile::tempdir().unwrap();
-        let engine = synthetic_engine(
-            &directory.path().join("lending-roundtrip.sqlite3"),
-            Arc::new(SyntheticAdapter::new_with_valuation(true)),
-        );
-        let wallet = resource("ethereum-wallet");
-        let market = resource("aave-market");
-        let usdc = asset("ethereum:1", "USDC", 6);
-        let cash = AccountingLocation::Cash {
-            resource: wallet.clone(),
-        };
-        let supply = AccountingLocation::Position {
-            resource: market.clone(),
-            position: "aUSDC".into(),
-            position_kind: PositionKind::Supply,
-        };
-        let debt = AccountingLocation::Position {
-            resource: market.clone(),
-            position: "variableDebtUSDC".into(),
-            position_kind: PositionKind::VariableDebt,
-        };
-        let holding = ResourceAmount {
-            resource: wallet.clone(),
-            amount: Amount {
-                asset: usdc.clone(),
-                atoms: quantity("60000000"),
-            },
-        };
-        let instant = Utc::now();
-        let baseline = StateSnapshot {
-            state: gofin_domain::FinancialState {
-                holdings: vec![holding.clone()],
-                ..Default::default()
-            },
-            observed_at: instant.to_rfc3339(),
-            complete: true,
-            coverage: vec![wallet.0.clone(), market.0.clone()],
-            pending: vec![],
-        };
-        let mut run = empty_run_for_provenance(baseline.clone());
-        run.id = "synthetic-lending-roundtrip".into();
-        run.initial_allocation_usd_micros = "60000000".into();
-        run.borrowed_proceeds_reserve_usd_micros = "40000000".into();
-        run.return_cost_reserve_usd_micros = "1100000".into();
-        run.available = vec![holding.clone()];
-        run.allocations.push(RunAllocation {
-            holding: holding.clone(),
-            value_usd_micros: "60000000".into(),
-            observed_at: instant.to_rfc3339(),
-            source: "synthetic selected allocation".into(),
-        });
-        run.provenance.push(ProvenanceLot {
-            origin: format!("allocation:{}", resource_asset_key(&holding).unwrap()),
-            location: cash.clone(),
-            asset: usdc.clone(),
-            atoms: "60000000".into(),
-        });
-
-        let valuation = gofin_domain::Valuation {
-            movement_usd_micros: quantity("100000000"),
-            maximum_fee_usd_micros: quantity("1100000"),
-            additional_allocation_usd_micros: quantity("40000000"),
-            observed_at: instant.to_rfc3339(),
-            source: "synthetic test fixture".into(),
-            prices: vec![gofin_domain::AssetPrice {
-                asset: usdc.clone(),
-                usd_micros_per_unit: quantity("1000000"),
-                unit_atoms: quantity("1000000"),
-                observed_at: instant.to_rfc3339(),
-                source: "synthetic test fixture".into(),
-            }],
-        };
-        run.asset_prices = valuation.prices.clone();
-        let position_zero = position_anchor("aave-market", "aUSDC", PositionKind::Supply, "0");
-        let supply_anchor =
-            position_anchor("aave-market", "aUSDC", PositionKind::Supply, "61200000");
-        let debt_zero = position_anchor(
-            "aave-market",
-            "variableDebtUSDC",
-            PositionKind::VariableDebt,
-            "0",
-        );
-        let debt_borrowed = position_anchor(
-            "aave-market",
-            "variableDebtUSDC",
-            PositionKind::VariableDebt,
-            "40000000",
-        );
-        let debt_accrued = position_anchor(
-            "aave-market",
-            "variableDebtUSDC",
-            PositionKind::VariableDebt,
-            "41000000",
-        );
-        let mut cash_lots = take_provenance(
-            &mut run.provenance,
-            &cash,
-            &usdc,
-            &BigUint::from(60_000_000u64),
-        )
-        .unwrap();
-        let supply_effects = vec![
-            FinancialEffect::CashDebit {
-                resource: wallet.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("60000000"),
-                },
-            },
-            FinancialEffect::OriginMovement {
-                from: cash.clone(),
-                to: supply.clone(),
-                debit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("60000000"),
-                },
-                credit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("60000000"),
-                },
-            },
-            FinancialEffect::Accrual {
-                resource: market.clone(),
-                position: "aUSDC".into(),
-                asset: usdc.clone(),
-                position_kind: PositionKind::Supply,
-                delta: SignedQuantity::new("1200000").unwrap(),
-            },
-            FinancialEffect::PositionChange {
-                resource: market.clone(),
-                position: "aUSDC".into(),
-                asset: usdc.clone(),
-                delta: SignedQuantity::new("60000000").unwrap(),
-                scaled_receipt: None,
-                anchor: Some(supply_anchor.clone()),
-            },
-        ];
-        validate_origin_links(&supply_effects).unwrap();
-        validate_anchor_transitions(
-            &proof(&record(vec![], vec![]), supply_effects.clone()),
-            &PreparationContext {
-                logical_operation_id: None,
-                positions: vec![position_zero],
-            },
-        )
-        .unwrap();
-        apply_effect_provenance(
-            &mut run,
-            "synthetic-supply",
-            &mut cash_lots,
-            &mut vec![],
-            &supply_effects,
-            &valuation,
-        )
-        .unwrap();
-        assert!(cash_lots.is_empty());
-
-        let borrow_effects = vec![
-            FinancialEffect::DebtChange {
-                resource: market.clone(),
-                debt: "variableDebtUSDC".into(),
-                asset: usdc.clone(),
-                delta: SignedQuantity::new("40000000").unwrap(),
-                anchor: Some(debt_borrowed.clone()),
-            },
-            FinancialEffect::UsableCredit {
-                to: wallet.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("40000000"),
-                },
-            },
-            FinancialEffect::OriginMovement {
-                from: debt.clone(),
-                to: cash.clone(),
-                debit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("40000000"),
-                },
-                credit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("40000000"),
-                },
-            },
-        ];
-        validate_origin_links(&borrow_effects).unwrap();
-        validate_anchor_transitions(
-            &proof(&record(vec![], vec![]), borrow_effects.clone()),
-            &PreparationContext {
-                logical_operation_id: None,
-                positions: vec![debt_zero],
-            },
-        )
-        .unwrap();
-        apply_effect_provenance(
-            &mut run,
-            "synthetic-borrow",
-            &mut vec![],
-            &mut vec![],
-            &borrow_effects,
-            &valuation,
-        )
-        .unwrap();
-
-        let debt_interest = vec![
-            FinancialEffect::Accrual {
-                resource: market.clone(),
-                position: "variableDebtUSDC".into(),
-                asset: usdc.clone(),
-                position_kind: PositionKind::VariableDebt,
-                delta: SignedQuantity::new("1000000").unwrap(),
-            },
-            FinancialEffect::DebtChange {
-                resource: market.clone(),
-                debt: "variableDebtUSDC".into(),
-                asset: usdc.clone(),
-                delta: SignedQuantity::new("0").unwrap(),
-                anchor: Some(debt_accrued.clone()),
-            },
-        ];
-        validate_anchor_transitions(
-            &proof(&record(vec![], vec![]), debt_interest.clone()),
-            &PreparationContext {
-                logical_operation_id: None,
-                positions: vec![debt_borrowed],
-            },
-        )
-        .unwrap();
-        apply_effect_provenance(
-            &mut run,
-            "synthetic-debt-interest",
-            &mut vec![],
-            &mut vec![],
-            &debt_interest,
-            &valuation,
-        )
-        .unwrap();
-
-        let withdrawal_effects = vec![
-            FinancialEffect::PositionChange {
-                resource: market.clone(),
-                position: "aUSDC".into(),
-                asset: usdc.clone(),
-                delta: SignedQuantity::new("-61200000").unwrap(),
-                scaled_receipt: None,
-                anchor: Some(position_anchor(
-                    "aave-market",
-                    "aUSDC",
-                    PositionKind::Supply,
-                    "0",
-                )),
-            },
-            FinancialEffect::UsableCredit {
-                to: wallet.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("61190000"),
-                },
-            },
-            FinancialEffect::OriginMovement {
-                from: supply.clone(),
-                to: cash.clone(),
-                debit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("61200000"),
-                },
-                credit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("61190000"),
-                },
-            },
-            FinancialEffect::Cost {
-                location: supply.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("10000"),
-                },
-                category: "synthetic withdraw rounding loss".into(),
-                treatment: CostTreatment::IncludedInDebit,
-            },
-        ];
-        validate_origin_links(&withdrawal_effects).unwrap();
-        validate_anchor_transitions(
-            &proof(&record(vec![], vec![]), withdrawal_effects.clone()),
-            &PreparationContext {
-                logical_operation_id: None,
-                positions: vec![supply_anchor],
-            },
-        )
-        .unwrap();
-        let mapped = apply_effect_provenance(
-            &mut run,
-            "synthetic-withdraw",
-            &mut vec![],
-            &mut vec![],
-            &withdrawal_effects,
-            &valuation,
-        )
-        .unwrap();
-        run.costs = add_amounts(&run.costs, &mapped).unwrap();
-
-        cash_lots = take_provenance_ordered(
-            &mut run.provenance,
-            &cash,
-            &usdc,
-            &BigUint::from(41_000_000u64),
-            true,
-        )
-        .unwrap();
-        let repayment_effects = vec![
-            FinancialEffect::DebtChange {
-                resource: market.clone(),
-                debt: "variableDebtUSDC".into(),
-                asset: usdc.clone(),
-                delta: SignedQuantity::new("-41000000").unwrap(),
-                anchor: Some(position_anchor(
-                    "aave-market",
-                    "variableDebtUSDC",
-                    PositionKind::VariableDebt,
-                    "0",
-                )),
-            },
-            FinancialEffect::CashDebit {
-                resource: wallet.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("41000000"),
-                },
-            },
-            FinancialEffect::OriginMovement {
-                from: cash.clone(),
-                to: debt.clone(),
-                debit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("41000000"),
-                },
-                credit: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("41000000"),
-                },
-            },
-            FinancialEffect::Cost {
-                location: cash.clone(),
-                amount: Amount {
-                    asset: usdc.clone(),
-                    atoms: quantity("1000000"),
-                },
-                category: "synthetic accrued interest paid".into(),
-                treatment: CostTreatment::IncludedInDebit,
-            },
-        ];
-        validate_origin_links(&repayment_effects).unwrap();
-        validate_anchor_transitions(
-            &proof(&record(vec![], vec![]), repayment_effects.clone()),
-            &PreparationContext {
-                logical_operation_id: None,
-                positions: vec![debt_accrued],
-            },
-        )
-        .unwrap();
-        let mapped = apply_effect_provenance(
-            &mut run,
-            "synthetic-repay",
-            &mut cash_lots,
-            &mut vec![],
-            &repayment_effects,
-            &valuation,
-        )
-        .unwrap();
-        run.costs = add_amounts(&run.costs, &mapped).unwrap();
-        assert!(cash_lots.is_empty());
-        assert!(
-            run.provenance
-                .iter()
-                .all(|lot| !lot.origin.starts_with("borrowed:")),
-            "full repayment must consume borrowed proceeds before older selected cash"
-        );
-
-        run.available = vec![ResourceAmount {
-            resource: wallet.clone(),
-            amount: Amount {
-                asset: usdc.clone(),
-                atoms: quantity("60190000"),
-            },
-        }];
-        engine.save_run(&run).unwrap();
-        let final_snapshot = StateSnapshot {
-            state: gofin_domain::FinancialState {
-                holdings: run.available.clone(),
-                ..Default::default()
-            },
-            observed_at: now(),
-            complete: true,
-            coverage: baseline.coverage.clone(),
-            pending: vec![],
-        };
-        let result = engine
-            .finish_run(&run.id, final_snapshot, Utc::now())
-            .unwrap();
-        assert_eq!(
-            result.status,
-            RunStatus::Restored,
-            "{:?}",
-            result.differences
-        );
-        assert_eq!(run.costs[0].amount.atoms.as_str(), "1010000");
-        assert_eq!(
-            run.provenance
-                .iter()
-                .filter(|lot| lot.origin.starts_with("accrual:"))
-                .map(|lot| lot.atoms.parse::<u64>().unwrap())
-                .sum::<u64>(),
-            1_200_000
-        );
     }
 
     #[test]
@@ -28637,12 +27391,16 @@ mod tests {
             .as_mut()
             .unwrap()
             .maximum_fee_usd_micros = quantity("499");
-        assert_eq!(
+        assert!(
             engine
                 .validate_submission_cancellation(&understated, None)
-                .unwrap_err()
-                .code,
-            "CANCELLATION_FEE_VALUATION_MISMATCH"
+                .unwrap()
+        );
+        understated.valuation = None;
+        assert!(
+            engine
+                .validate_submission_cancellation(&understated, None)
+                .unwrap()
         );
         engine.options.max_run_allocation_usd_micros = "1000499".into();
         let first_preview = child_preview;
@@ -28937,116 +27695,6 @@ mod tests {
         validate_origin_links(&verified.effects).unwrap();
     }
 
-    #[tokio::test]
-    async fn cancellation_sibling_settlement_leaves_pending_run_reservation_and_route_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = synthetic_engine(
-            &dir.path().join("cancel-scoped.sqlite"),
-            Arc::new(SyntheticAdapter::new()),
-        );
-        let mut original = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-scoped-original".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({"amount":"1"}),
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        let baseline = StateSnapshot {
-            state: FinancialState::default(),
-            observed_at: now(),
-            complete: true,
-            coverage: vec![],
-            pending: vec![],
-        };
-        let mut run = empty_run_for_provenance(baseline);
-        original.run_id = Some(run.id.clone());
-        engine.update_record(&original).unwrap();
-        run.reservations.insert(
-            original.id.clone(),
-            RunReservation {
-                debits: original.preview.as_ref().unwrap().intent.debits.clone(),
-                maximum_costs: vec![],
-                provenance: vec![],
-                additional_cost_provenance: vec![],
-                cash_provenance_version: 0,
-                cash_sources: None,
-                maximum_fee_usd_micros: "0".into(),
-                additional_allocation_usd_micros: "0".into(),
-                binding_hash: original.approval.as_ref().unwrap().binding_hash.clone(),
-                route_step_index: Some(0),
-            },
-        );
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .create_run(&run.id, &to_value(&run).unwrap(), &now())
-            .unwrap();
-        let before = to_value(&run).unwrap();
-        let target = EffectConstraint::SubmissionCancellation {
-            operation_id: original.id.clone(),
-            submission: original.submission.clone().unwrap(),
-        };
-        let mut sibling = record(vec![target], vec![]);
-        sibling.id = "synthetic-scoped-cancel".into();
-        sibling.request_id = "synthetic-scoped-cancel-request".into();
-        sibling.run_id = original.run_id.clone();
-        sibling.preview.as_mut().unwrap().intent.debits.clear();
-        sibling.preview.as_mut().unwrap().intent.locks =
-            original.preview.as_ref().unwrap().intent.locks.clone();
-        trading_rebind(&mut sibling);
-        assert!(
-            engine
-                .validate_submission_cancellation(
-                    sibling.preview.as_ref().unwrap(),
-                    sibling.run_id.as_deref()
-                )
-                .unwrap()
-        );
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .create_request(
-                &sibling.id,
-                &sibling.request_id,
-                &sibling.fingerprint,
-                &sibling.operation,
-                sibling.run_id.as_deref(),
-                "pending",
-                &to_value(&sibling).unwrap(),
-                &now(),
-            )
-            .unwrap();
-        let verified = proof(
-            &sibling,
-            vec![FinancialEffect::SubmissionCancellation {
-                operation_id: original.id.clone(),
-                submission: original.submission.clone().unwrap(),
-            }],
-        );
-        let completed = engine
-            .apply_reconciliation(
-                sibling,
-                Reconciliation {
-                    status: Status::Completed,
-                    evidence: json!({"synthetic":"cancelled remainder"}),
-                    verified: Some(verified),
-                },
-            )
-            .unwrap();
-        assert_eq!(completed.status, Status::Completed);
-        assert_eq!(
-            to_value(&engine.load_run(&run.id).unwrap()).unwrap(),
-            before
-        );
-        assert_eq!(
-            engine.status(&original.id, false).await.unwrap().status,
-            Status::Pending
-        );
-    }
     #[test]
     fn projected_position_close_requires_proved_zero_exposure_after_partial_or_no_fill() {
         let collateral = asset("ethereum:1", "USDC", 6);
@@ -29316,153 +27964,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_restart_keeps_both_holds_and_late_parent_fills_separate() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("replacement.sqlite3");
-        let adapter = Arc::new(ReplacementAdapter::new());
-        let engine = synthetic_engine(&path, adapter.clone());
-        let parent = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-order-parent".into(),
-                operation: "synthetic.order".into(),
-                input: json!({"client_order_id":"parent-cloid"}),
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(parent.status, Status::Pending);
-        let child = engine
-            .execute(replacement_request(
-                "synthetic-order-replace",
-                &parent,
-                "replacement-cloid",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(child.status, Status::Pending);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-        let parent_hold = engine
-            .store
-            .lock()
-            .unwrap()
-            .reservations(&parent.id)
-            .unwrap();
-        let child_hold = engine
-            .store
-            .lock()
-            .unwrap()
-            .reservations(&child.id)
-            .unwrap();
-        assert_eq!(parent_hold, child_hold);
-        assert!(
-            parent_hold
-                .iter()
-                .any(|row| row.resource.starts_with("lock:"))
-        );
-
-        let restarted = synthetic_engine(&path, adapter.clone());
-        let parent_progress = ReplacementAdapter::progress_proof(
-            parent.submission.clone().unwrap(),
-            "400000",
-            "390000",
-            1,
-            "parent-partial",
-            "parent-fill-1",
-        );
-        adapter.set_response(
-            "synthetic.order",
-            Reconciliation {
-                status: Status::Pending,
-                evidence: parent_progress.evidence.clone(),
-                verified: Some(parent_progress.clone()),
-            },
-        );
-        let observed_parent = restarted.status(&parent.id, true).await.unwrap();
-        assert_eq!(observed_parent.effects, Some(parent_progress.clone()));
-        let parent_after_progress = restarted
-            .store
-            .lock()
-            .unwrap()
-            .reservations(&parent.id)
-            .unwrap();
-        assert_eq!(
-            parent_after_progress
-                .iter()
-                .find(|row| row.units == "600000")
-                .unwrap()
-                .units,
-            "600000"
-        );
-
-        let parent_final = ReplacementAdapter::progress_proof(
-            parent.submission.clone().unwrap(),
-            "400000",
-            "390000",
-            2,
-            "parent-cancelled-after-fill",
-            "parent-fill-1",
-        );
-        adapter.set_response(
-            "synthetic.order",
-            Reconciliation {
-                status: Status::Failed,
-                evidence: parent_final.evidence.clone(),
-                verified: Some(parent_final.clone()),
-            },
-        );
-        let settled_parent = restarted.status(&parent.id, true).await.unwrap();
-        assert_eq!(settled_parent.status, Status::Failed);
-        assert_eq!(settled_parent.effects, Some(parent_final));
-        assert!(
-            restarted
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            !restarted
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&child.id)
-                .unwrap()
-                .is_empty()
-        );
-
-        let child_final = ReplacementAdapter::progress_proof(
-            child.submission.clone().unwrap(),
-            "600000",
-            "590000",
-            1,
-            "replacement-filled",
-            "replacement-fill-1",
-        );
-        adapter.set_response(
-            "synthetic.order_replace",
-            Reconciliation {
-                status: Status::Completed,
-                evidence: child_final.evidence.clone(),
-                verified: Some(child_final.clone()),
-            },
-        );
-        let settled_child = restarted.status(&child.id, true).await.unwrap();
-        assert_eq!(settled_child.status, Status::Completed);
-        assert_eq!(settled_child.effects, Some(child_final));
-        assert_eq!(
-            settled_parent.effects.unwrap().submission,
-            parent.submission.unwrap()
-        );
-        assert_eq!(
-            settled_child.effects.unwrap().submission,
-            child.submission.unwrap()
-        );
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
     async fn replacement_rejects_wrong_parent_and_blocks_siblings_and_other_conflicts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("replacement-guards.sqlite3");
@@ -29506,26 +28007,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             sibling.error.as_ref().unwrap().code,
-            "REPLACEMENT_TARGET_MISMATCH"
+            "REPLACEMENT_IN_PROGRESS"
         );
-        let unrelated = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-guard-unrelated".into(),
-                operation: "synthetic.order".into(),
-                input: json!({"client_order_id":"unrelated-cloid"}),
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(unrelated.error.as_ref().unwrap().code, "RESOURCE_RESERVED");
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-        {
-            let held = engine.store.lock().unwrap();
-            assert_eq!(
-                held.reservations(&parent.id).unwrap(),
-                held.reservations(&first.id).unwrap()
-            );
-        }
         let failed_child_progress = ReplacementAdapter::progress_proof(
             first.submission.clone().unwrap(),
             "300000",
@@ -29572,15 +28055,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            !engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
         adapter.set_response(
             "synthetic.order_replace",
             Reconciliation {
@@ -29597,8 +28071,11 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(next_replacement.status, Status::Pending);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            next_replacement.error.unwrap().code,
+            "REPLACEMENT_IN_PROGRESS"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -29951,15 +28428,6 @@ mod tests {
             .unwrap();
         assert_eq!(child.status, Status::Pending);
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-        assert!(
-            !engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]
@@ -29987,7 +28455,6 @@ mod tests {
             .unwrap()
             .reservations(&parent.id)
             .unwrap();
-        assert!(!parent_holds.is_empty());
 
         let child = engine
             .execute(OperationRequest {
@@ -30133,15 +28600,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(parent.status, Status::Pending);
-        assert!(
-            !engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
 
         let child = engine
             .execute(OperationRequest {
@@ -30158,214 +28616,6 @@ mod tests {
         assert_eq!(child.status, Status::Pending);
         assert!(child.submission.is_some());
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn replacement_requires_budget_for_both_full_order_obligations() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("replacement-budget.sqlite3");
-        let adapter = Arc::new(ReplacementAdapter::new());
-        let mut engine = synthetic_engine(&path, adapter.clone());
-        engine.options.max_run_allocation_usd_micros = "1500000".into();
-        let parent = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-budget-parent".into(),
-                operation: "synthetic.order".into(),
-                input: json!({"client_order_id":"parent-cloid"}),
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        let child = engine
-            .execute(replacement_request(
-                "synthetic-budget-replacement",
-                &parent,
-                "replacement-cloid",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(child.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-        assert!(
-            !engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&parent.id)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .reservations(&child.id)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn ordinary_completed_holdings_need_no_run_or_restoration_and_keep_gross_allocation() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("ordinary.sqlite3");
-        let adapter = Arc::new(SyntheticAdapter::new());
-        adapter.completed_response();
-        let mut engine = synthetic_engine(&path, adapter.clone());
-        engine.options.max_run_allocation_usd_micros = "1500000".into();
-        // An old unrestored verification document is archival, never an execution gate.
-        let history = json!({"id":"legacy","status":"cleanup_outstanding","purpose":"verification","reservations":{},"baseline":{"fixture":"preserve"}});
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .create_run("legacy", &history, &now())
-            .unwrap();
-        let completed = engine
-            .execute(ordinary_request("ordinary-first"))
-            .await
-            .unwrap();
-        assert_eq!(completed.status, Status::Completed);
-        assert!(completed.run_id.is_none());
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-        assert_eq!(engine.historical_run("legacy").unwrap(), history);
-        drop(engine);
-        let mut restarted = synthetic_engine(&path, adapter.clone());
-        restarted.options.max_run_allocation_usd_micros = "1500000".into();
-        let denied = restarted
-            .execute(ordinary_request("ordinary-second"))
-            .await
-            .unwrap();
-        assert_eq!(denied.error.unwrap().code, "ALLOCATION_LIMIT");
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-        let replay = restarted
-            .execute(ordinary_request("ordinary-first"))
-            .await
-            .unwrap();
-        assert_eq!(replay.id, completed.id);
-        assert_eq!(replay.submission, completed.submission);
-        assert_eq!(replay.effects, completed.effects);
-        // Only terminal submitted allocation ages out, at least24h after settlement.
-        let mut aged = completed;
-        aged.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
-        restarted.update_record(&aged).unwrap();
-        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "0");
-    }
-
-    #[tokio::test]
-    async fn bridge_handoff_keeps_one_allocation_owner_after_24h_and_restart() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("bridge-allocation.sqlite3");
-        let adapter = Arc::new(SyntheticAdapter::new());
-        adapter.completed_response();
-        let engine = synthetic_engine(&path, adapter.clone());
-        let source = engine
-            .execute(ordinary_request("bridge-source-budget-op"))
-            .await
-            .unwrap();
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-        let principal = gofin_domain::TransitResource {
-            transfer_id: "SYNTHETIC-transfer-budget".into(),
-            amount: Amount {
-                asset: asset("synthetic", "USDC", 6),
-                atoms: quantity("1000000"),
-            },
-            evidence_id: "SYNTHETIC:source-event".into(),
-            destination_locator: None,
-            proof_digest: "SYNTHETIC-source-proof".into(),
-            observed_at: now(),
-            spendable: false,
-        };
-        let transfer = gofin_domain::BridgeTransferRecord {
-            version: 1,
-            id: principal.transfer_id.clone(),
-            grant_id: None,
-            plan_scope: None,
-            metadata: json!({"fixture":"synthetic frozen bridge scope"}),
-            settlement_expectation: Some(gofin_domain::BridgeSettlementExpectation {
-                destination: vec![gofin_domain::BridgeSettlementTarget {
-                    resource: ResourceId(
-                        "ethereum:42161:0x1111111111111111111111111111111111111111".into(),
-                    ),
-                    asset: asset("ethereum:42161", "USDC", 6),
-                    minimum_atoms: quantity("995000"),
-                }],
-                refund: vec![],
-            }),
-            approved_bounds: Some(json!({"synthetic":"approved bounds"})),
-            prospective_debit: None,
-            state: gofin_domain::BridgeTransferState::InTransit,
-            quote_revisions: vec![],
-            steps: vec![],
-            allocation_owner: gofin_domain::BridgeAllocationOwner::Transfer {
-                transfer_id: principal.transfer_id.clone(),
-            },
-            transit: Some(principal),
-            applied_proofs: vec!["SYNTHETIC-source-proof".into()],
-            settlement_proofs: vec![],
-        };
-        {
-            let mut store = engine.store.lock().unwrap();
-            store.save_bridge_transfer(&transfer).unwrap();
-            store
-                .record_bridge_transit(transfer.transit.as_ref().unwrap())
-                .unwrap();
-            store
-                .handoff_bridge_allocation(&source.id, &transfer.id, "1000000", &source.updated_at)
-                .unwrap();
-        }
-        // The source OperationRecord and its transfer owner are one charge.
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-        let mut old_source = source.clone();
-        old_source.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
-        engine.update_record(&old_source).unwrap();
-        // An unresolved transfer keeps the same charge past the operation's 24h window.
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-        drop(engine);
-        let restarted = synthetic_engine(&path, adapter);
-        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
-        let mut final_proof = gofin_domain::BridgeSettlementProof {
-            transfer_id: transfer.id.clone(),
-            outcome: gofin_domain::BridgeSettlementOutcome::Destination,
-            evidence_id: format!("ethereum:42161:0x{}:1", "a".repeat(64)),
-            effects: vec![FinancialEffect::UsableCredit {
-                to: ResourceId("ethereum:42161:0x1111111111111111111111111111111111111111".into()),
-                amount: Amount {
-                    asset: asset("ethereum:42161", "USDC", 6),
-                    atoms: quantity("995000"),
-                },
-            }],
-            evidence: json!({
-                "transfer_id": transfer.id,
-                "evidence_id": format!("ethereum:42161:0x{}:1", "a".repeat(64)),
-                "chain_id": "42161",
-                "transaction_hash": format!("0x{}", "a".repeat(64)),
-                "log_index": "1",
-                "correlation": "SYNTHETIC-correlated receipt",
-                "recipient": "0x1111111111111111111111111111111111111111",
-                "recipient_resource": "ethereum:42161:0x1111111111111111111111111111111111111111",
-                "asset": asset("ethereum:42161", "USDC", 6),
-                "amount_atoms": "995000"
-            }),
-            observed_at: now(),
-            proof_digest: String::new(),
-        };
-        final_proof.proof_digest = gofin_domain::bridge_settlement_digest(&final_proof).unwrap();
-        let settled = restarted
-            .commit_bridge_external_settlement(final_proof.clone())
-            .unwrap();
-        assert_eq!(settled.state, gofin_domain::BridgeTransferState::Completed);
-        assert!(settled.transit.is_none());
-        assert_eq!(settled.settlement_proofs, vec![final_proof.clone()]);
-        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
-        assert_eq!(
-            restarted
-                .commit_bridge_external_settlement(final_proof)
-                .unwrap(),
-            settled
-        );
-        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
     }
 
     #[test]
@@ -30910,562 +29160,6 @@ mod tests {
         assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn bridge_grant_renews_after_settled_approval_without_resetting_cumulative_usage() {
-        let directory = tempfile::tempdir().unwrap();
-        let transfer_id = "SYNTHETIC-renew-after-approval";
-        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
-        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
-        let engine = Engine::new(
-            Store::open(directory.path().join("bridge-renew.sqlite")).unwrap(),
-            vec![adapter.clone()],
-            authorizer.clone(),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        seed_lifecycle_transfer(
-            &engine,
-            transfer_id,
-            &[
-                gofin_domain::BridgeStepKind::Approval,
-                gofin_domain::BridgeStepKind::ResetAllowance,
-            ],
-        );
-
-        let first = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-renew-grant-1",
-                transfer_id,
-                "SYNTHETIC-step-0",
-                gofin_domain::BridgeStepKind::Approval,
-                "900000",
-                None,
-            ))
-            .await
-            .unwrap();
-        let first_operation = engine
-            .execute_boundary(
-                &first.id,
-                lifecycle_operation_request(
-                    "SYNTHETIC-renew-op-1",
-                    transfer_id,
-                    "SYNTHETIC-step-0",
-                    gofin_domain::BridgeStepKind::Approval,
-                    "900000",
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            first_operation.status,
-            Status::Completed,
-            "{:?}",
-            first_operation.error
-        );
-        let first_transfer = engine
-            .store
-            .lock()
-            .unwrap()
-            .bridge_transfer(transfer_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            first_transfer.steps[0].state,
-            gofin_domain::BridgeStepState::Settled
-        );
-        assert_eq!(
-            first_transfer.steps[0].grant_id.as_deref(),
-            Some(first.id.as_str())
-        );
-        let first_grant: BoundaryAuthorizationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .boundary_authorization(&first.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(first_grant.authorization.spent_debits.len(), 1);
-        let cumulative_debits = first_grant.authorization.spent_debits.clone();
-        assert_eq!(first_grant.authorization.spent_costs.len(), 1);
-        let cumulative_costs = first_grant.authorization.spent_costs.clone();
-
-        // Let the first grant expire after its approval step consumed authority.
-        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        assert_eq!(
-            engine
-                .boundary_status(&first.id)
-                .await
-                .unwrap()
-                .authorization
-                .status,
-            BoundaryAuthorizationStatus::Expired
-        );
-        let mut changed_ceiling = lifecycle_boundary_request(
-            "SYNTHETIC-renew-grant-changed-ceiling",
-            transfer_id,
-            "SYNTHETIC-step-1",
-            gofin_domain::BridgeStepKind::ResetAllowance,
-            "850000",
-            Some(first.id.clone()),
-        );
-        changed_ceiling.bounds["authorization_seconds"] = json!(600);
-        changed_ceiling.input["selectedBounds"]["authorization_seconds"] = json!(600);
-        assert_eq!(
-            engine
-                .authorize_boundary(changed_ceiling)
-                .await
-                .unwrap_err()
-                .code,
-            "BOUNDARY_VIOLATION"
-        );
-        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
-        let renewed = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-renew-grant-2",
-                transfer_id,
-                "SYNTHETIC-step-1",
-                gofin_domain::BridgeStepKind::ResetAllowance,
-                "850000",
-                Some(first.id.clone()),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(authorizer.challenges.lock().unwrap().len(), 2);
-        assert_eq!(renewed.replaces.as_deref(), Some(first.id.as_str()));
-        assert_eq!(renewed.spent_debits, cumulative_debits);
-        assert_eq!(renewed.spent_costs, cumulative_costs);
-        assert_eq!(
-            renewed.remaining_debits[0].amount.atoms,
-            quantity("2000000000000000000")
-        );
-        assert_eq!(
-            renewed.remaining_costs[0].amount.atoms,
-            quantity("10000000000000000")
-        );
-
-        let second_operation = engine
-            .execute_boundary(
-                &renewed.id,
-                lifecycle_operation_request(
-                    "SYNTHETIC-renew-op-2",
-                    transfer_id,
-                    "SYNTHETIC-step-1",
-                    gofin_domain::BridgeStepKind::ResetAllowance,
-                    "850000",
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            second_operation.status,
-            Status::Completed,
-            "{:?}",
-            second_operation.error
-        );
-        let final_transfer = engine
-            .store
-            .lock()
-            .unwrap()
-            .bridge_transfer(transfer_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            final_transfer.grant_id.as_deref(),
-            Some(renewed.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.approved_bounds,
-            Some(lifecycle_bounds("850000"))
-        );
-        assert_eq!(
-            final_transfer.steps[0].grant_id.as_deref(),
-            Some(first.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[0].operation_id.as_deref(),
-            Some(first_operation.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[0].state,
-            gofin_domain::BridgeStepState::Settled
-        );
-        assert_eq!(
-            final_transfer.steps[1].grant_id.as_deref(),
-            Some(renewed.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[1].operation_id.as_deref(),
-            Some(second_operation.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[1].state,
-            gofin_domain::BridgeStepState::Settled
-        );
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
-        let final_grant: BoundaryAuthorizationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .boundary_authorization(&renewed.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            final_grant.authorization.spent_debits[0].amount.atoms,
-            quantity("2000000000000000000")
-        );
-        assert_eq!(
-            final_grant.authorization.spent_costs[0].amount.atoms,
-            quantity("20000000000000000")
-        );
-    }
-
-    #[tokio::test]
-    async fn bridge_authorization_duration_ceiling_rejects_before_touch_id() {
-        let directory = tempfile::tempdir().unwrap();
-        let transfer_id = "SYNTHETIC-authorization-duration";
-        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
-        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
-        let engine = Engine::new(
-            Store::open(directory.path().join("bridge-duration.sqlite")).unwrap(),
-            vec![adapter],
-            authorizer.clone(),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        seed_lifecycle_transfer(
-            &engine,
-            transfer_id,
-            &[gofin_domain::BridgeStepKind::Approval],
-        );
-
-        let mut zero_ceiling = lifecycle_boundary_request(
-            "SYNTHETIC-zero-duration",
-            transfer_id,
-            "SYNTHETIC-step-0",
-            gofin_domain::BridgeStepKind::Approval,
-            "900000",
-            None,
-        );
-        zero_ceiling.bounds["authorization_seconds"] = json!(0);
-        zero_ceiling.input["selectedBounds"]["authorization_seconds"] = json!(0);
-        assert_eq!(
-            engine
-                .authorize_boundary(zero_ceiling)
-                .await
-                .unwrap_err()
-                .code,
-            "BOUNDARY_VIOLATION"
-        );
-        assert!(authorizer.challenges.lock().unwrap().is_empty());
-
-        let mut exceeded = lifecycle_boundary_request(
-            "SYNTHETIC-exceeded-duration",
-            transfer_id,
-            "SYNTHETIC-step-0",
-            gofin_domain::BridgeStepKind::Approval,
-            "900000",
-            None,
-        );
-        exceeded.bounds["authorization_seconds"] = json!(5);
-        exceeded.input["selectedBounds"]["authorization_seconds"] = json!(5);
-        exceeded.valid_for_seconds = 6;
-        let error = engine.authorize_boundary(exceeded).await.unwrap_err();
-        assert_eq!(error.code, "BOUNDARY_VIOLATION");
-        assert!(
-            error.details.is_some(),
-            "duration violations must be structured"
-        );
-        assert!(authorizer.challenges.lock().unwrap().is_empty());
-        assert_eq!(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .bridge_transfer(transfer_id)
-                .unwrap()
-                .unwrap()
-                .grant_id,
-            None,
-            "invalid duration requests must not partially bind the transfer"
-        );
-    }
-
-    #[tokio::test]
-    async fn bridge_grant_cannot_renew_after_source_deposit_broadcast_is_uncertain() {
-        let directory = tempfile::tempdir().unwrap();
-        let transfer_id = "SYNTHETIC-renew-after-broadcast";
-        let adapter = Arc::new(BridgeLifecycleAdapter::new(false));
-        let engine = Engine::new(
-            Store::open(directory.path().join("bridge-broadcast.sqlite")).unwrap(),
-            vec![adapter.clone()],
-            Arc::new(ChallengeValidatingAuthorizer::default()),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        seed_lifecycle_transfer(
-            &engine,
-            transfer_id,
-            &[gofin_domain::BridgeStepKind::Deposit],
-        );
-        let first = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-broadcast-grant-1",
-                transfer_id,
-                "SYNTHETIC-step-0",
-                gofin_domain::BridgeStepKind::Deposit,
-                "900000",
-                None,
-            ))
-            .await
-            .unwrap();
-        let attempt = engine
-            .execute_boundary(
-                &first.id,
-                lifecycle_operation_request(
-                    "SYNTHETIC-broadcast-op-1",
-                    transfer_id,
-                    "SYNTHETIC-step-0",
-                    gofin_domain::BridgeStepKind::Deposit,
-                    "900000",
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(attempt.status, Status::Pending);
-        assert!(attempt.submission.is_some());
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-        let error = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-broadcast-grant-2",
-                transfer_id,
-                "SYNTHETIC-step-0",
-                gofin_domain::BridgeStepKind::Deposit,
-                "850000",
-                Some(first.id.clone()),
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "RESOURCE_RESERVED");
-        let transfer = engine
-            .store
-            .lock()
-            .unwrap()
-            .bridge_transfer(transfer_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(transfer.grant_id.as_deref(), Some(first.id.as_str()));
-        assert_eq!(
-            transfer.steps[0].grant_id.as_deref(),
-            Some(first.id.as_str())
-        );
-        assert_eq!(
-            transfer.steps[0].operation_id.as_deref(),
-            Some(attempt.id.as_str())
-        );
-        assert_eq!(
-            transfer.steps[0].state,
-            gofin_domain::BridgeStepState::Submitted
-        );
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn bridge_terminal_pre_submit_rejection_releases_claim_for_explicit_new_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        let transfer_id = "SYNTHETIC-explicit-retry-transfer";
-        let adapter = Arc::new(BridgeLifecycleAdapter::rejected_before_submission());
-        let engine = Engine::new(
-            Store::open(directory.path().join("bridge-explicit-retry.sqlite")).unwrap(),
-            vec![adapter.clone()],
-            Arc::new(ChallengeValidatingAuthorizer::default()),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        seed_lifecycle_transfer(
-            &engine,
-            transfer_id,
-            &[gofin_domain::BridgeStepKind::ResetAllowance],
-        );
-        let first = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-explicit-grant-1",
-                transfer_id,
-                "SYNTHETIC-step-0",
-                gofin_domain::BridgeStepKind::ResetAllowance,
-                "900000",
-                None,
-            ))
-            .await
-            .unwrap();
-        let rejected = engine
-            .execute_boundary(
-                &first.id,
-                lifecycle_operation_request(
-                    "SYNTHETIC-explicit-op-1",
-                    transfer_id,
-                    "SYNTHETIC-step-0",
-                    gofin_domain::BridgeStepKind::ResetAllowance,
-                    "900000",
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(rejected.status, Status::Rejected);
-        assert!(rejected.submission.is_none());
-        let released = engine
-            .store
-            .lock()
-            .unwrap()
-            .bridge_transfer(transfer_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(released.grant_id.as_deref(), Some(first.id.as_str()));
-        assert_eq!(released.steps[0].operation_id, None);
-        assert_eq!(
-            released.steps[0].state,
-            gofin_domain::BridgeStepState::Unsubmitted
-        );
-
-        let renewed = engine
-            .authorize_boundary(lifecycle_boundary_request(
-                "SYNTHETIC-explicit-grant-2",
-                transfer_id,
-                "SYNTHETIC-step-0",
-                gofin_domain::BridgeStepKind::ResetAllowance,
-                "850000",
-                Some(first.id.clone()),
-            ))
-            .await
-            .unwrap();
-        adapter
-            .fail_before_submission
-            .store(false, Ordering::SeqCst);
-        let retried = engine
-            .execute_boundary(
-                &renewed.id,
-                lifecycle_operation_request(
-                    "SYNTHETIC-explicit-op-2",
-                    transfer_id,
-                    "SYNTHETIC-step-0",
-                    gofin_domain::BridgeStepKind::ResetAllowance,
-                    "850000",
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(retried.status, Status::Completed, "{:?}", retried.error);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-        let original: OperationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .get_record(&rejected.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(original.status, Status::Rejected);
-        assert_eq!(original.submission, None);
-        let final_transfer = engine
-            .store
-            .lock()
-            .unwrap()
-            .bridge_transfer(transfer_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            final_transfer.steps[0].grant_id.as_deref(),
-            Some(renewed.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[0].operation_id.as_deref(),
-            Some(retried.id.as_str())
-        );
-        assert_eq!(
-            final_transfer.steps[0].state,
-            gofin_domain::BridgeStepState::Settled
-        );
-    }
-
-    #[tokio::test]
-    async fn ordinary_pending_reservation_outlives_window_and_zero_does_not_unlock_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let adapter = Arc::new(SyntheticAdapter::new());
-        let mut engine =
-            synthetic_engine(&directory.path().join("pending.sqlite3"), adapter.clone());
-        engine.options.max_movement_and_cost_usd_micros = "0".into();
-        engine.options.max_run_allocation_usd_micros = "0".into();
-        let mut pending = engine
-            .execute(ordinary_request("pending-first"))
-            .await
-            .unwrap();
-        assert_eq!(pending.status, Status::Pending);
-        pending.created_at = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
-        pending.updated_at = pending.created_at.clone();
-        engine.update_record(&pending).unwrap();
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-        engine.recover_interrupted().unwrap();
-        let blocked = engine
-            .execute(ordinary_request("pending-second"))
-            .await
-            .unwrap();
-        assert_eq!(blocked.error.unwrap().code, "RESOURCE_RESERVED");
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            engine
-                .operations()
-                .unwrap()
-                .into_iter()
-                .find(|row| row.id == pending.id)
-                .unwrap()
-                .submission,
-            pending.submission
-        );
-    }
-
-    #[tokio::test]
-    async fn ordinary_finite_movement_and_zero_policy_are_enforced_before_approval() {
-        for (limit, expected) in [
-            ("999999", Some("MOVEMENT_LIMIT")),
-            ("1000000", None),
-            ("0", None),
-        ] {
-            let adapter = Arc::new(SyntheticAdapter::new());
-            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                auth.clone(),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: limit.into(),
-                    max_run_allocation_usd_micros: "0".into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap();
-            let result = engine
-                .execute(ordinary_request("finite-zero"))
-                .await
-                .unwrap();
-            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
-            assert_eq!(
-                auth.challenges.lock().unwrap().len(),
-                usize::from(expected.is_none())
-            );
-            assert_eq!(
-                adapter.submissions.load(Ordering::SeqCst),
-                usize::from(expected.is_none())
-            );
-        }
-    }
-
     struct RefusingApproval(bool);
     #[async_trait]
     impl Authorizer for RefusingApproval {
@@ -31515,40 +29209,7 @@ mod tests {
             assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
         }
     }
-    #[tokio::test]
-    async fn ordinary_policy_counts_costs_and_borrowing_with_no_hidden_verification_ceiling() {
-        for (movement, allocation, expected) in [
-            ("154999999", "0", Some("MOVEMENT_LIMIT")),
-            ("155000000", "164999999", Some("ALLOCATION_LIMIT")),
-            ("155000000", "165000000", None),
-            ("0", "0", None),
-        ] {
-            let adapter = Arc::new(SyntheticAdapter::new());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                Arc::new(SyntheticAuthorizer),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: movement.into(),
-                    max_run_allocation_usd_micros: allocation.into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap();
-            let mut request = ordinary_request("above-former-test-budget");
-            request.input = json!({"movementMicros":"150000000","feeMicros":"5000000","borrowMicros":"10000000"});
-            let result = engine.execute(request).await.unwrap();
-            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
-            assert_eq!(
-                adapter.submissions.load(Ordering::SeqCst),
-                usize::from(expected.is_none())
-            );
-            assert_eq!(
-                engine.allocation_used_usd_micros().unwrap(),
-                if expected.is_none() { "165000000" } else { "0" }
-            );
-        }
-    }
+
     struct UnpricedAdapter {
         inner: SyntheticAdapter,
         malformed: Option<&'static str>,
@@ -31601,242 +29262,6 @@ mod tests {
         async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
             self.inner.reconcile(record).await
         }
-    }
-
-    #[tokio::test]
-    async fn unpriced_ordinary_exception_is_protected_and_keeps_priced_caps_and_approval() {
-        for (enabled, priced, movement, allocation, expected) in [
-            (
-                false,
-                "0",
-                "0",
-                "0",
-                Some("UNPRICED_EXCHANGE_ASSET_DISABLED"),
-            ),
-            (true, "0", "1000000", "1000000", None),
-            (true, "1000001", "1000000", "0", Some("MOVEMENT_LIMIT")),
-            (true, "1000001", "0", "1000000", Some("ALLOCATION_LIMIT")),
-        ] {
-            let adapter = Arc::new(UnpricedAdapter {
-                inner: SyntheticAdapter::new(),
-                malformed: None,
-            });
-            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                auth.clone(),
-                EngineOptions {
-                    allow_unpriced_exchange_assets: enabled,
-                    max_movement_and_cost_usd_micros: movement.into(),
-                    max_run_allocation_usd_micros: allocation.into(),
-                },
-            )
-            .unwrap();
-            let mut request = ordinary_request("SYNTHETIC-unpriced");
-            request.input["pricedMicros"] = json!(priced);
-            let result = engine.execute(request.clone()).await.unwrap();
-            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
-            assert_eq!(
-                auth.challenges.lock().unwrap().len(),
-                usize::from(expected.is_none())
-            );
-            assert_eq!(
-                adapter.inner.submissions.load(Ordering::SeqCst),
-                usize::from(expected.is_none())
-            );
-            if expected.is_none() {
-                assert_eq!(engine.allocation_unpriced_operations().unwrap(), 1);
-                assert_eq!(engine.execute(request).await.unwrap().id, result.id);
-                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn unpriced_forged_onchain_and_stale_zero_rows_are_rejected_before_approval() {
-        for malformed in ["forged", "onchain", "stale"] {
-            let adapter = Arc::new(UnpricedAdapter {
-                inner: SyntheticAdapter::new(),
-                malformed: Some(malformed),
-            });
-            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                auth.clone(),
-                EngineOptions {
-                    allow_unpriced_exchange_assets: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            let result = engine
-                .execute(ordinary_request("SYNTHETIC-bad-zero"))
-                .await
-                .unwrap();
-            assert!(result.error.is_some(), "{malformed}");
-            assert!(auth.challenges.lock().unwrap().is_empty());
-            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
-        }
-    }
-
-    struct PaperPrincipalAdapter {
-        inner: SyntheticAdapter,
-        wrong_asset: bool,
-        mixed_usdc_debit: bool,
-        maximum_fee_micros: &'static str,
-    }
-    #[async_trait]
-    impl Adapter for PaperPrincipalAdapter {
-        fn definitions(&self) -> Vec<Definition> {
-            self.inner.definitions()
-        }
-        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
-            self.inner.read(operation, input).await
-        }
-        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
-            let mut prepared = self.inner.prepare(operation, input).await?;
-            let mut principal = gofin_domain::AssetId {
-                network: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_NETWORK.into(),
-                reference: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_REFERENCE.into(),
-                decimals: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_DECIMALS,
-            };
-            if self.wrong_asset {
-                principal.reference = "0x0000000000000000000000000000000000000001".into();
-            }
-            let source = gofin_domain::unpriced::papertrade_principal_source(&principal)
-                .unwrap_or("GoFin reviewed unpriced principal coverage; forged")
-                .to_owned();
-            let valuation = prepared.valuation.as_mut().unwrap();
-            valuation.movement_usd_micros = quantity(if self.mixed_usdc_debit {
-                "1000000"
-            } else {
-                "0"
-            });
-            valuation.maximum_fee_usd_micros = quantity(self.maximum_fee_micros);
-            valuation.additional_allocation_usd_micros = Quantity::zero();
-            valuation.prices = vec![AssetPrice {
-                asset: principal,
-                unit_atoms: quantity("1000000000000000000"),
-                usd_micros_per_unit: Quantity::zero(),
-                observed_at: now(),
-                source,
-            }];
-            if self.mixed_usdc_debit {
-                let usdc = gofin_domain::AssetId {
-                    network: "hyperliquid:mainnet".into(),
-                    reference: "USDC".into(),
-                    decimals: 6,
-                };
-                valuation.prices.push(AssetPrice {
-                    asset: usdc.clone(),
-                    unit_atoms: quantity("1000000"),
-                    usd_micros_per_unit: quantity("1000000"),
-                    observed_at: now(),
-                    source: "synthetic verified USDC price fixture".into(),
-                });
-                prepared.intent.debits = vec![ResourceAmount {
-                    resource: resource("papertrade:mainnet:owner:trading_cash"),
-                    amount: Amount {
-                        asset: usdc,
-                        atoms: quantity("1000000"),
-                    },
-                }];
-            }
-            prepared
-                .warnings
-                .push(gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_WARNING.into());
-            Ok(prepared)
-        }
-        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
-            Ok(prepared.clone())
-        }
-        async fn submit(
-            &self,
-            prepared: &PreparedOperation,
-            journal: Arc<dyn SubmissionJournal>,
-        ) -> Result<Submission> {
-            self.inner.submit(prepared, journal).await
-        }
-        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
-            self.inner.reconcile(record).await
-        }
-    }
-
-    #[tokio::test]
-    async fn reviewed_paper_principal_is_excluded_from_usd_quota_but_costs_still_count() {
-        for (fee, movement_limit, expected) in [
-            ("0", "1000000", None),
-            ("2", "1000000", Some("MOVEMENT_LIMIT")),
-            ("1", "2000000", None),
-        ] {
-            let adapter = Arc::new(PaperPrincipalAdapter {
-                inner: SyntheticAdapter::new(),
-                wrong_asset: false,
-                mixed_usdc_debit: true,
-                maximum_fee_micros: fee,
-            });
-            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
-            let engine = Engine::new(
-                Store::in_memory().unwrap(),
-                vec![adapter.clone()],
-                auth.clone(),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: movement_limit.into(),
-                    max_run_allocation_usd_micros: movement_limit.into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap();
-            let result = engine
-                .execute(ordinary_request("PAPER-principal"))
-                .await
-                .unwrap();
-            assert_eq!(
-                result.error.as_ref().map(|error| error.code.as_str()),
-                expected
-            );
-            assert_eq!(
-                auth.challenges.lock().unwrap().len(),
-                usize::from(expected.is_none())
-            );
-            assert_eq!(
-                adapter.inner.submissions.load(Ordering::SeqCst),
-                usize::from(expected.is_none())
-            );
-            if expected.is_none() && fee == "0" {
-                assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn paper_principal_marker_cannot_cover_another_contract() {
-        let adapter = Arc::new(PaperPrincipalAdapter {
-            inner: SyntheticAdapter::new(),
-            wrong_asset: true,
-            mixed_usdc_debit: false,
-            maximum_fee_micros: "0",
-        });
-        let auth = Arc::new(ChallengeValidatingAuthorizer::default());
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            auth.clone(),
-            EngineOptions {
-                allow_unpriced_exchange_assets: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let result = engine
-            .execute(ordinary_request("PAPER-wrong-contract"))
-            .await
-            .unwrap();
-        assert!(result.error.is_some());
-        assert!(auth.challenges.lock().unwrap().is_empty());
-        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -31914,291 +29339,6 @@ mod tests {
             "UNPRICED_ASSET"
         );
     }
-    #[test]
-    fn ordinary_transfer_source_progress_is_bounded_nonspendable_and_settles_only_delta() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("ordinary-transfer-progress.sqlite");
-        let source = resource("ethereum:42161:synthetic-owner");
-        let target = resource("hyperliquid:synthetic-owner:perpetual");
-        let usdc = asset(
-            "ethereum:42161",
-            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            6,
-        );
-        let hl_usdc = asset("hyperliquid:mainnet", "USDC", 6);
-        let native = asset("ethereum:42161", "native", 18);
-        let principal = Amount {
-            asset: usdc.clone(),
-            atoms: quantity("5000000"),
-        };
-        let gas = FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: source.clone(),
-            },
-            amount: Amount {
-                asset: native.clone(),
-                atoms: quantity("7"),
-            },
-            category: "ethereum_gas".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        };
-        let expected = EffectConstraint::Transfer {
-            from: source.clone(),
-            to: target.clone(),
-            debit_asset: usdc.clone(),
-            credit_asset: hl_usdc.clone(),
-            maximum_debit: quantity("5000000"),
-            minimum_credit: quantity("4999999"),
-        };
-        let mut operation = record(
-            vec![expected],
-            vec![CostBound {
-                location: AccountingLocation::Cash {
-                    resource: source.clone(),
-                },
-                amount: Amount {
-                    asset: native.clone(),
-                    atoms: quantity("10"),
-                },
-                treatment: CostTreatment::AdditionalDebit,
-            }],
-        );
-        operation.submission = Some(Submission {
-            kind: "ethereum_tx".into(),
-            reference: format!("0x{}", "a".repeat(64)),
-            data: json!({"nonce":"synthetic-1"}),
-        });
-        let prepared = operation.preview.as_mut().unwrap();
-        prepared.intent.debits = vec![ResourceAmount {
-            resource: source.clone(),
-            amount: principal.clone(),
-        }];
-        prepared.intent.locks = vec![source.clone(), target.clone()];
-        operation.approval.as_mut().unwrap().binding_hash =
-            binding_hash(&authorization_binding(prepared)).unwrap();
-
-        let source_digest = "a".repeat(64);
-        let mut source_proof = proof(
-            &operation,
-            vec![
-                FinancialEffect::CashDebit {
-                    resource: source.clone(),
-                    amount: principal.clone(),
-                },
-                FinancialEffect::TransitPrincipal {
-                    transfer_id: operation.submission.as_ref().unwrap().reference.clone(),
-                    amount: principal.clone(),
-                },
-                gas.clone(),
-            ],
-        );
-        source_proof.evidence = json!({
-            "transit": {
-                "transfer_id":operation.submission.as_ref().unwrap().reference,
-                "source_submission":operation.submission.as_ref().unwrap().reference,
-                "evidence_id":"ethereum:42161:source-receipt",
-                "resource":source.0,
-                "recipient_resource":target.0,
-                "amount_atoms":"5000000",
-                "asset":usdc,
-            },
-            "settlement_progress": {
-                "version":1,
-                "sequence":1,
-                "snapshot_id":"source-receipt-1",
-                "event_digests":{format!("source:{}", operation.submission.as_ref().unwrap().reference):source_digest},
-            }
-        });
-        source_proof.proof_digest = verified_effect_digest(&source_proof).unwrap();
-        validate_effects_mode(&operation, &source_proof, &Status::Pending, true).unwrap();
-
-        let submission = operation.submission.clone().unwrap();
-        let mut store = Store::open(&path).unwrap();
-        store
-            .create_request(
-                &operation.id,
-                &operation.request_id,
-                &operation.fingerprint,
-                &operation.operation,
-                None,
-                "pending",
-                &to_value(&operation).unwrap(),
-                &operation.created_at,
-            )
-            .unwrap();
-        store
-            .persist_submission(
-                &operation.id,
-                &SubmissionRow {
-                    kind: submission.kind.clone(),
-                    reference: submission.reference.clone(),
-                    data: submission.data.clone(),
-                },
-                &operation.updated_at,
-            )
-            .unwrap();
-        store
-            .reserve(
-                &operation.id,
-                &store_reservations_for_intent(operation.preview.as_ref().unwrap()).unwrap(),
-            )
-            .unwrap();
-        let engine = Engine::new(
-            store,
-            vec![],
-            Arc::new(SyntheticAuthorizer),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let persisted = engine
-            .apply_reconciliation(
-                operation.clone(),
-                Reconciliation {
-                    status: Status::Pending,
-                    evidence: source_proof.evidence.clone(),
-                    verified: Some(source_proof.clone()),
-                },
-            )
-            .unwrap();
-        assert_eq!(persisted.effects.as_ref(), Some(&source_proof));
-        let retained = engine
-            .store
-            .lock()
-            .unwrap()
-            .reservations(&operation.id)
-            .unwrap();
-        let active_amounts = retained
-            .iter()
-            .filter(|row| !row.resource.starts_with("lock:"))
-            .collect::<Vec<_>>();
-        assert_eq!(active_amounts.len(), 1);
-        assert_eq!(active_amounts[0].units, "0");
-        assert_eq!(active_amounts[0].fee_units, "3");
-        assert_eq!(
-            retained
-                .iter()
-                .filter(|row| row.resource.starts_with("lock:"))
-                .count(),
-            operation.preview.as_ref().unwrap().intent.locks.len()
-        );
-        drop(engine);
-
-        let mut mismatched_source = source_proof.clone();
-        mismatched_source.evidence["transit"]["recipient_resource"] =
-            json!("hyperliquid:other-owner:perpetual");
-        mismatched_source.proof_digest = verified_effect_digest(&mismatched_source).unwrap();
-        assert_eq!(
-            validate_effects_mode(&operation, &mismatched_source, &Status::Pending, true)
-                .unwrap_err()
-                .code,
-            "INVALID_TRANSIT_EFFECT"
-        );
-
-        let mut terminal = proof(
-            &operation,
-            vec![
-                FinancialEffect::Transfer {
-                    from: source.clone(),
-                    to: target.clone(),
-                    debit: principal.clone(),
-                    credit: Amount {
-                        asset: hl_usdc,
-                        atoms: quantity("5000000"),
-                    },
-                },
-                gas,
-            ],
-        );
-        terminal.evidence = json!({
-            "settlement_progress": {
-                "version":1,
-                "sequence":2,
-                "snapshot_id":"destination-credit-1",
-                "event_digests":{
-                    format!("source:{}", operation.submission.as_ref().unwrap().reference):source_digest,
-                    "destination:native-tx-1":"b".repeat(64),
-                },
-            }
-        });
-        terminal.proof_digest = verified_effect_digest(&terminal).unwrap();
-        validate_cumulative_settlement_components(Some(&source_proof.effects), &terminal.effects)
-            .unwrap();
-        validate_effects_mode(&operation, &terminal, &Status::Completed, false).unwrap();
-        assert!(
-            cumulative_boundary_delta(Some(&source_proof), &terminal)
-                .unwrap()
-                .effects
-                .is_empty()
-        );
-
-        let engine = Engine::new(
-            Store::open(&path).unwrap(),
-            vec![],
-            Arc::new(SyntheticAuthorizer),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let reloaded: OperationRecord = from_value(
-            engine
-                .store
-                .lock()
-                .unwrap()
-                .get_record(&operation.id)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(reloaded.effects.as_ref(), Some(&source_proof));
-        let duplicate = engine
-            .apply_reconciliation(
-                reloaded.clone(),
-                Reconciliation {
-                    status: Status::Pending,
-                    evidence: source_proof.evidence.clone(),
-                    verified: Some(source_proof.clone()),
-                },
-            )
-            .unwrap();
-        assert_eq!(duplicate.effects.as_ref(), Some(&source_proof));
-        let mut changed_source = terminal.clone();
-        changed_source.evidence["settlement_progress"]["event_digests"][format!(
-            "source:{}",
-            operation.submission.as_ref().unwrap().reference
-        )] = json!("c".repeat(64));
-        changed_source.proof_digest = verified_effect_digest(&changed_source).unwrap();
-        assert_eq!(
-            engine
-                .apply_reconciliation(
-                    duplicate.clone(),
-                    Reconciliation {
-                        status: Status::Completed,
-                        evidence: changed_source.evidence.clone(),
-                        verified: Some(changed_source),
-                    },
-                )
-                .unwrap_err()
-                .code,
-            "INVALID_PROGRESS_PROOF"
-        );
-        let completed = engine
-            .apply_reconciliation(
-                duplicate,
-                Reconciliation {
-                    status: Status::Completed,
-                    evidence: terminal.evidence.clone(),
-                    verified: Some(terminal.clone()),
-                },
-            )
-            .unwrap();
-        assert_eq!(completed.status, Status::Completed);
-        assert_eq!(completed.effects.as_ref(), Some(&terminal));
-        assert!(
-            !terminal
-                .effects
-                .iter()
-                .any(|effect| matches!(effect, FinancialEffect::TransitPrincipal { .. }))
-        );
-    }
 
     fn synthetic_amendment(
         original: &OperationRecord,
@@ -32229,7 +29369,7 @@ mod tests {
         prepared
     }
     #[tokio::test]
-    async fn amendment_scope_preserves_owner_exact_delta_and_full_policy() {
+    async fn amendment_scope_preserves_owner_and_native_delta_without_usd_gate() {
         let directory = tempfile::tempdir().unwrap();
         let engine = synthetic_engine(
             &directory.path().join("amendment.sqlite"),
@@ -32271,7 +29411,7 @@ mod tests {
         assert!(
             engine
                 .validate_submission_amendment(&bad, None, false)
-                .is_err()
+                .is_ok()
         );
         let mut bad = prepared.clone();
         if let EffectConstraint::SubmissionAmendment { revision, .. } = &mut bad.intent.expected[0]
@@ -32283,22 +29423,17 @@ mod tests {
                 .validate_submission_amendment(&bad, None, false)
                 .is_err()
         );
-        let mut bad = prepared.clone();
-        if let EffectConstraint::SubmissionAmendment { revision, .. } = &mut bad.intent.expected[0]
+        let mut unpriced = prepared.clone();
+        unpriced.valuation = None;
+        if let EffectConstraint::SubmissionAmendment { revision, .. } =
+            &mut unpriced.intent.expected[0]
         {
-            revision.valuation.as_mut().unwrap().movement_usd_micros = quantity("200000000");
+            revision.valuation = None;
         }
         assert!(
             engine
-                .validate_submission_amendment(&bad, None, false)
-                .is_err()
-        );
-        let mut bad = prepared.clone();
-        bad.valuation.as_mut().unwrap().movement_usd_micros = quantity("0");
-        assert!(
-            engine
-                .validate_submission_amendment(&bad, None, false)
-                .is_err()
+                .validate_submission_amendment(&unpriced, None, false)
+                .is_ok()
         );
         let mut bad = prepared.clone();
         if let EffectConstraint::SubmissionAmendment { submission, .. } =
@@ -32310,214 +29445,6 @@ mod tests {
             engine
                 .validate_submission_amendment(&bad, None, false)
                 .is_err()
-        );
-    }
-    #[tokio::test]
-    async fn amendment_completion_atomically_expands_original_reservation_without_fill_duplication()
-    {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("amendments.sqlite");
-        let engine = synthetic_engine(&path, Arc::new(SyntheticAdapter::new()));
-        let original = engine
-            .execute(OperationRequest {
-                request_id: "synthetic-fill-owner".into(),
-                operation: "synthetic.transfer".into(),
-                input: json!({}),
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        let prepared = synthetic_amendment(
-            &original,
-            "2000000000000000000",
-            "2000000",
-            "1000000000000000000",
-        );
-        let mut mutation = original.clone();
-        mutation.id = "synthetic-mutation-owner".into();
-        mutation.request_id = "synthetic-mutation-request".into();
-        mutation.fingerprint = "synthetic-mutation-fingerprint".into();
-        mutation.preview = Some(prepared.clone());
-        mutation.status = Status::AwaitingApproval;
-        mutation.submission = None;
-        mutation.effects = None;
-        mutation.last_reconciliation_evidence = None;
-        mutation.approval.as_mut().unwrap().binding_hash =
-            binding_hash(&authorization_binding(&prepared)).unwrap();
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .create_request(
-                &mutation.id,
-                &mutation.request_id,
-                &mutation.fingerprint,
-                &mutation.operation,
-                None,
-                "awaiting_approval",
-                &to_value(&mutation).unwrap(),
-                &now(),
-            )
-            .unwrap();
-        engine
-            .validate_submission_amendment_for_attempt(&prepared, None, false, Some(&mutation.id))
-            .unwrap();
-        engine
-            .reserve_ordinary_operation(&mut mutation, &prepared, None, None, None)
-            .await
-            .unwrap();
-        assert!(engine.has_pending_amendment(&original.id).unwrap());
-        assert!(
-            engine
-                .validate_submission_amendment(&prepared, None, false)
-                .is_err()
-        );
-        assert_eq!(engine.status(&original.id, true).await.unwrap(), original);
-        let submission = Submission {
-            kind: "synthetic_tx".into(),
-            reference: "synthetic-mutation-tx".into(),
-            data: json!({"synthetic":true}),
-        };
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .persist_submission(
-                &mutation.id,
-                &SubmissionRow {
-                    kind: submission.kind.clone(),
-                    reference: submission.reference.clone(),
-                    data: submission.data.clone(),
-                },
-                &now(),
-            )
-            .unwrap();
-        mutation.submission = Some(submission.clone());
-        mutation.status = Status::Submitted;
-        let mut verified = VerifiedEffects {
-            evidence_version: 1,
-            submission,
-            effects: vec![FinancialEffect::SubmissionAmendment {
-                operation_id: original.id.clone(),
-                submission: original.submission.clone().unwrap(),
-                successor: Some(Submission {
-                    kind: "synthetic_tx".into(),
-                    reference: "synthetic-successor-tx".into(),
-                    data: json!({"synthetic":true}),
-                }),
-            }],
-            evidence: json!({"synthetic":"exact mutation receipt"}),
-            observed_at: now(),
-            proof_digest: String::new(),
-        };
-        verified.proof_digest = verified_effect_digest(&verified).unwrap();
-        let completed = engine
-            .apply_reconciliation(
-                mutation,
-                Reconciliation {
-                    status: Status::Completed,
-                    evidence: verified.evidence.clone(),
-                    verified: Some(verified),
-                },
-            )
-            .unwrap();
-        assert_eq!(completed.status, Status::Completed);
-        assert!(!engine.has_pending_amendment(&original.id).unwrap());
-        assert_eq!(engine.load_record(&original.id).unwrap(), original);
-        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "2000000");
-        let mut expired_delta = completed.clone();
-        expired_delta.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
-        engine.update_record(&expired_delta).unwrap();
-        assert_eq!(
-            engine.allocation_used_usd_micros().unwrap(),
-            "2000000",
-            "amendment delta remains reserved beyond24h while original expanded order is unresolved"
-        );
-        let context = engine.amendment_context(&original.id).unwrap();
-        assert_eq!(context.revisions.len(), 1);
-        assert_eq!(
-            context.effective_scope().unwrap().intent.debits[0]
-                .amount
-                .atoms,
-            quantity("2000000000000000000")
-        );
-        let store = engine.store.lock().unwrap();
-        assert_eq!(store.reservation_count(&completed.id).unwrap(), 0);
-        assert!(store.reservation_count(&original.id).unwrap() > 0);
-        drop(store);
-        let mut receipt = VerifiedEffects {
-            evidence_version: 1,
-            submission: original.submission.clone().unwrap(),
-            effects: vec![transfer_effect()],
-            evidence: json!({"synthetic":"successor cumulative fill"}),
-            observed_at: now(),
-            proof_digest: String::new(),
-        };
-        if let FinancialEffect::Transfer { debit, .. } = &mut receipt.effects[0] {
-            debit.atoms = quantity("1500000000000000000");
-        }
-        receipt.proof_digest = verified_effect_digest(&receipt).unwrap();
-        assert!(validate_effects(&original, &receipt, &Status::Completed).is_err());
-        assert!(
-            validate_effects_with_scope(
-                &original,
-                &receipt,
-                &Status::Completed,
-                false,
-                Some(&context.effective_scope().unwrap().intent)
-            )
-            .is_ok()
-        );
-        // Earlier approved fills remain covered when a later mutation narrows future venue size.
-        let mut narrowed = context.clone();
-        let mut revision = narrowed.revisions[0].clone();
-        revision.amendment_operation_id = "synthetic-narrowing".into();
-        revision.scope.intent.debits[0].amount.atoms = quantity("1500000000000000000");
-        if let EffectConstraint::Transfer { maximum_debit, .. } =
-            &mut revision.scope.intent.expected[0]
-        {
-            *maximum_debit = quantity("1500000000000000000");
-        }
-        narrowed.revisions.push(revision);
-        let envelope = amendments::accounting_intent(&narrowed).unwrap().unwrap();
-        assert_eq!(
-            envelope.debits[0].amount.atoms,
-            quantity("2000000000000000000")
-        );
-        assert!(
-            validate_effects_with_scope(
-                &original,
-                &receipt,
-                &Status::Completed,
-                false,
-                Some(&envelope)
-            )
-            .is_ok()
-        );
-        let second = synthetic_amendment(
-            &original,
-            "3000000000000000000",
-            "3000000",
-            "1000000000000000000",
-        );
-        assert!(
-            engine
-                .validate_submission_amendment(&second, None, false)
-                .is_ok()
-        );
-        let mut wrong = second.clone();
-        wrong.intent.debits[0].amount.atoms = quantity("2000000000000000000");
-        assert!(
-            engine
-                .validate_submission_amendment(&wrong, None, false)
-                .is_err()
-        );
-        drop(engine);
-        let reopened = synthetic_engine(&path, Arc::new(SyntheticAdapter::new()));
-        assert_eq!(reopened.load_record(&original.id).unwrap(), original);
-        assert_eq!(
-            reopened.amendment_context(&original.id).unwrap().revisions,
-            context.revisions
         );
     }
 
@@ -32634,6 +29561,21 @@ mod tests {
                 &now(),
             )
             .unwrap();
+        let submission = original.submission.as_ref().unwrap();
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .persist_submission(
+                &original.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                &now(),
+            )
+            .unwrap();
         let make = |atoms: &str| {
             let mut anchor = position_anchor(
                 "synthetic-position",
@@ -32666,19 +29608,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            engine.preparation_context(None).unwrap().positions[0]
-                .principal
-                .atoms,
-            quantity("1")
-        );
+        assert_eq!(pending.effects.as_ref().unwrap().effects, vec![make("1")]);
         let mut terminal = proof(&pending, vec![make("2")]);
         terminal.evidence = json!({"proofEvents":[first,second]});
         terminal.proof_digest = verified_effect_digest(&terminal).unwrap();
-        assert!(
-            validate_anchor_transitions(&terminal, &engine.preparation_context(None).unwrap())
-                .is_err()
-        );
         let completed = engine
             .apply_reconciliation(
                 pending,
@@ -32690,14 +29623,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(completed.status, Status::Completed);
-        assert_eq!(
-            engine.preparation_context(None).unwrap().positions[0]
-                .principal
-                .atoms,
-            quantity("2")
-        );
-    }
-    mod boundary_progress_accounting_tests {
-        include!("boundary_progress_accounting_tests.rs");
+        assert_eq!(completed.effects.as_ref().unwrap().effects, vec![make("2")]);
     }
 }

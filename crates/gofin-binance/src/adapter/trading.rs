@@ -70,9 +70,11 @@ pub struct OrderInput {
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_profit: Option<String>,
+    /// Maximum funding loss from this submission through reconciliation; excludes earlier funding.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_loss: Option<String>,
+    /// Maximum funding profit from this submission through reconciliation; excludes earlier funding.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_profit: Option<String>,
@@ -92,7 +94,7 @@ pub(super) fn is_write(operation: &str) -> bool {
 pub(super) fn definitions() -> Vec<Definition> {
     let mut result:Vec<_> = [false,true].into_iter().map(|futures| Definition {
         name: order_name(futures).into(),
-        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes." } else { "Place a native SPOT MARKET, LIMIT IOC/FOK/GTC, or LIMIT_MAKER order. MARKET BUY uses an exact quote budget; MARKET SELL uses exact base quantity. Resting orders remain pending until terminal reconciliation." }.into(),
+        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only and uses the fresh venue position independently of historical reconciliation. Settings must already match; no implicit configuration changes." } else { "Place a native SPOT MARKET, LIMIT IOC/FOK/GTC, or LIMIT_MAKER order. MARKET BUY uses an exact quote budget; MARKET SELL uses exact base quantity. Resting orders remain pending until terminal reconciliation." }.into(),
         kind: OperationKind::Write, execution_actor: ExecutionActor::AgentInvocable,
         input_schema: native_spot::input_schema(futures), output_schema: json!({"type":"object"}), error_schema: schema_for!(GoFinError).into(),
         examples: vec![if futures {
@@ -229,26 +231,6 @@ fn order_id(input: &OrderInput, futures: bool) -> String {
         input.request_id
     ));
     format!("gofin1{}", &hex::encode(digest)[..26])
-}
-pub(super) fn valuation_matches(a: &PreparedOperation, b: &PreparedOperation) -> bool {
-    match (&a.valuation, &b.valuation) {
-        (Some(a), Some(b)) => {
-            a.movement_usd_micros == b.movement_usd_micros
-                && a.maximum_fee_usd_micros == b.maximum_fee_usd_micros
-                && a.additional_allocation_usd_micros == b.additional_allocation_usd_micros
-                && a.prices.len() == b.prices.len()
-                && a.prices.iter().all(|p| {
-                    b.prices.iter().any(|q| {
-                        p.asset == q.asset
-                            && p.usd_micros_per_unit == q.usd_micros_per_unit
-                            && p.unit_atoms == q.unit_atoms
-                            && p.source == q.source
-                    })
-                })
-        }
-        (None, None) => true,
-        _ => false,
-    }
 }
 struct Market {
     base: String,
@@ -442,82 +424,6 @@ impl BinanceProfile {
         })
     }
 
-    pub(in crate::adapter) async fn trading_prepare_with_anchor(
-        &self,
-        operation: &str,
-        raw: &Value,
-        context: &gofin_domain::PreparationContext,
-    ) -> Result<PreparedOperation, GoFinError> {
-        let mut prepared = self.trading_prepare(operation, raw, None).await?;
-        let input: OrderInput = self.parse_input(raw).await?;
-        if !input.reduce_only {
-            return Ok(prepared);
-        }
-        let resource: ResourceId = serde_json::from_value(prepared.binding["resource"].clone())
-            .map_err(|_| {
-                error(
-                    "PREVIEW_INVALID",
-                    "preview",
-                    "Derivative resource is invalid.",
-                )
-            })?;
-        let kind: PositionKind = serde_json::from_value(prepared.binding["positionKind"].clone())
-            .map_err(|_| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative direction is invalid.",
-            )
-        })?;
-        let position = position_name(&input.symbol, &kind);
-        let anchors: Vec<_> = context
-            .positions
-            .iter()
-            .filter(|a| a.resource == resource && a.position == position && a.position_kind == kind)
-            .collect();
-        let anchor = match anchors.as_slice() {
-            [anchor] => *anchor,
-            _ => {
-                return Err(error(
-                    "POSITION_PROVENANCE_MISSING",
-                    "preview",
-                    "Closing requires the original verified GoFin position anchor.",
-                ));
-            }
-        };
-        let before = BigInt::parse_bytes(
-            prepared.binding["positionBefore"]
-                .as_str()
-                .unwrap_or_default()
-                .as_bytes(),
-            10,
-        )
-        .ok_or_else(|| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative exposure is invalid.",
-            )
-        })?;
-        if anchor.principal.atoms.integer() != before.abs().to_biguint().unwrap_or_default()
-            || anchor.evidence["collateralBalance"].as_str().is_none()
-            || anchor.evidence["settledThroughMillis"].as_i64().is_none()
-        {
-            return Err(error(
-                "POSITION_PROVENANCE_MISMATCH",
-                "preview",
-                "Observed derivative exposure lacks compatible collateral and funding evidence.",
-            ));
-        }
-        prepared.binding["priorAnchor"] = serde_json::to_value(anchor).map_err(|_| {
-            error(
-                "PREVIEW_INVALID",
-                "preview",
-                "Derivative anchor cannot be bound.",
-            )
-        })?;
-        Ok(prepared)
-    }
     async fn trading_funding(
         &self,
         account: &BinanceAccount,
@@ -687,9 +593,13 @@ impl BinanceProfile {
             if let Some((loss_coin, _)) = loss {
                 coins.insert(loss_coin.to_owned());
             }
-            provider
+            if provider
                 .prefetch_usd(&coins.into_iter().collect::<Vec<_>>())
-                .await?;
+                .await
+                .is_err()
+            {
+                return Ok(None);
+            }
         }
         let Some(mut value) = self.valuation(coin, &movement.canonical(), "0").await? else {
             return Ok(None);
@@ -823,6 +733,20 @@ impl BinanceProfile {
                     "Futures exposure observation is unavailable.",
                 )
             })?;
+            // Position Information V3 returns only symbols with a position or
+            // open orders. A complete empty array therefore represents zero.
+            // https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Position-Information-V3
+            if rows.iter().any(|r| {
+                r["symbol"].as_str().is_none()
+                    || r["positionSide"].as_str() != Some("BOTH")
+                    || r["positionAmt"].as_str().is_none()
+            }) {
+                return Err(error(
+                    "VENUE_RESPONSE_INVALID",
+                    "preview",
+                    "Futures exposure observation is incomplete or inconsistent with one-way mode.",
+                ));
+            }
             let matches: Vec<_> = rows
                 .iter()
                 .filter(|r| r["symbol"] == input.symbol && r["positionSide"] == "BOTH")
@@ -1419,6 +1343,22 @@ impl BinanceProfile {
             }
         }
         if futures {
+            if projected.is_none() {
+                binding[gofin_domain::BASELINE_ANCHORS_KEY] = json!([PositionAnchor {
+                    resource: resource.clone(),
+                    position: position_name(&input.symbol, &kind),
+                    position_kind: kind.clone(),
+                    principal: Amount {
+                        asset: base.clone(),
+                        atoms: Quantity::new(position_before.abs().to_string())
+                            .map_err(domain_error)?,
+                    },
+                    scaled_receipt: None,
+                    evidence_version: 1,
+                    evidence: json!({"source":"binance_futures_positions", "symbol":input.symbol, "positionSide":"BOTH", "positionAmtAtoms":position_before.to_string()}),
+                    observed_at: now(),
+                }]);
+            }
             let (leverage, margin) = configuration::requested(&input)?;
             binding["leverage"] = json!(leverage);
             binding["marginType"] = json!(margin);
@@ -1685,8 +1625,96 @@ impl BinanceProfile {
                     )
                 })?;
             let name = position_name(b["symbol"].as_str().unwrap_or_default(), &kind);
-            let mut anchor: PositionAnchor = serde_json::from_value(b["priorAnchor"].clone())
+            if b.get("priorAnchor").is_none() {
+                let baseline: Vec<PositionAnchor> = serde_json::from_value(
+                    b[gofin_domain::BASELINE_ANCHORS_KEY].clone(),
+                )
                 .map_err(|_| {
+                    error(
+                        "NOOP_ANCHOR_MISSING",
+                        "reconciliation",
+                        "The native zero-exposure baseline is missing.",
+                    )
+                })?;
+                if b["positionBefore"] != "0"
+                    || baseline.len() != 1
+                    || baseline[0].resource != resource
+                    || baseline[0].position != name
+                    || baseline[0].position_kind != kind
+                    || baseline[0].principal.asset != base
+                    || !baseline[0].principal.atoms.is_zero()
+                    || baseline[0].evidence["positionAmtAtoms"] != "0"
+                {
+                    return Err(error(
+                        "NOOP_ANCHOR_INVALID",
+                        "reconciliation",
+                        "The native zero-exposure baseline is invalid.",
+                    ));
+                }
+                let account =
+                    self.account(submission.data["account"].as_str().unwrap_or_default())?;
+                let rows = self
+                    .call(
+                        account,
+                        BinanceRequest::new(BinanceEndpoint::FuturesPositions)
+                            .push("symbol", b["symbol"].as_str().unwrap_or_default()),
+                        "reconciliation",
+                    )
+                    .await?;
+                let Some(rows) = rows.as_array() else {
+                    return Ok(unknown("The current derivative position is unavailable."));
+                };
+                if rows.iter().any(|r| {
+                    r["symbol"] != b["symbol"]
+                        || r["positionSide"].as_str() != Some("BOTH")
+                        || r["positionAmt"].as_str().is_none()
+                }) {
+                    return Ok(unknown(
+                        "The current derivative position response is incomplete.",
+                    ));
+                }
+                let matching: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r["symbol"] == b["symbol"] && r["positionSide"] == "BOTH")
+                    .collect();
+                if matching.len() > 1
+                    || matching
+                        .first()
+                        .map(|row| signed(row, "positionAmt"))
+                        .transpose()?
+                        .is_some_and(|position| !position.is_zero())
+                {
+                    return Ok(unknown(
+                        "The derivative position changed during the empty cleanup.",
+                    ));
+                }
+            }
+            let prior_anchor = if b.get("priorAnchor").is_some() {
+                b["priorAnchor"].clone()
+            } else {
+                let submitted = DateTime::parse_from_rfc3339(
+                    submission.data["submittedAt"].as_str().unwrap_or_default(),
+                )
+                .map_err(|_| {
+                    error(
+                        "SUBMISSION_INVALID",
+                        "reconciliation",
+                        "Submission funding boundary is invalid.",
+                    )
+                })?;
+                serde_json::to_value(PositionAnchor {
+                    resource: resource.clone(),
+                    position: name.clone(),
+                    position_kind: kind.clone(),
+                    principal: Amount { asset: base.clone(), atoms: Quantity::zero() },
+                    scaled_receipt: None,
+                    evidence_version: 1,
+                    evidence: json!({"positionSide":"BOTH", "positionAmtAtoms":"0", "collateralBalance":submission.data["balancesBefore"]["USDT"], "settledThroughMillis":submitted.timestamp_millis()}),
+                    observed_at: now(),
+                }).map_err(|_| error("SUBMISSION_INVALID", "reconciliation", "Cleanup position baseline is invalid."))?
+            };
+            let mut anchor: PositionAnchor =
+                serde_json::from_value(prior_anchor).map_err(|_| {
                     error(
                         "NOOP_ANCHOR_MISSING",
                         "reconciliation",
@@ -1708,9 +1736,8 @@ impl BinanceProfile {
                     "The empty derivative cleanup requires the original compatible zero-exposure backing and funding cursor.",
                 ));
             }
-            // No venue action changed the zero exposure. Keep the collateral
-            // backing and exclusive funding cursor from its already-proved
-            // anchor, so subsequent preparation cannot lose that history.
+            // Preserve a legacy cursor when present; new cleanup actions use
+            // their own submission snapshot and do not claim historical funding.
             anchor.observed_at = now();
             effects.push(FinancialEffect::PositionChange {
                 resource: resource.clone(),
@@ -2125,7 +2152,7 @@ impl BinanceProfile {
         if matches!(outcome, "NEW" | "PARTIALLY_FILLED" | "PENDING_CANCEL") {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"clientOrderId":submission.reference,"order":order}),
+                evidence: json!({"clientOrderId":submission.reference,"order":order,"outcome_live_order":true}),
                 verified: None,
             });
         }
@@ -2245,6 +2272,7 @@ impl BinanceProfile {
             36,
         )?
         .integer();
+        let mut discrepancies = Vec::new();
         if !futures {
             let maximum_spent: Quantity = serde_json::from_value(binding["maximumSpent"].clone())
                 .map_err(|_| {
@@ -2252,54 +2280,30 @@ impl BinanceProfile {
             })?;
             let actual_spent = if buy { &quote_total } else { &base_total };
             if actual_spent > &maximum_spent.integer() {
-                return Ok(unknown(
-                    "Actual spot principal debit exceeds its approved bound.",
-                ));
+                discrepancies.push(json!({"term":"maximum_spent","asset": if buy { &quote.reference } else { &base.reference }, "actual":Quantity::new(actual_spent.to_string()).map_err(domain_error)?.to_decimal(36),"approved":maximum_spent.to_decimal(36)}));
             }
         }
         if futures
             && quote_total > decimal_to_atoms(&exact(binding, "riskNotional")?, 36)?.integer()
         {
-            return Ok(unknown(
-                "Executed futures quote notional exceeds the approved conservative notional bound.",
-            ));
+            discrepancies.push(json!({"term":"risk_notional","asset":quote.reference,"actual":Quantity::new(quote_total.to_string()).map_err(domain_error)?.to_decimal(36),"approved":binding["riskNotional"]}));
         }
         if base_total != filled || quote_total != cumulative {
             return Ok(unknown(
                 "Fill history does not account for the full terminal order; do not replay it.",
             ));
         }
-        if filled.is_zero() && (!futures || binding["positionBefore"] == "0") {
-            let before: BTreeMap<String, String> = serde_json::from_value(
-                submission.data["balancesBefore"].clone(),
-            )
-            .map_err(|_| {
-                error(
-                    "SUBMISSION_INVALID",
-                    "reconciliation",
-                    "Pre-order balances unavailable.",
-                )
-            })?;
-            if before != self.trading_totals(account, futures).await? {
-                return Ok(unknown("A no-fill order has unexplained wallet changes."));
-            }
-            let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"noFill":true});
+        if filled.is_zero() {
+            let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"noFill":true,"outcome_replay_safe":true});
             return Ok(Reconciliation {
                 status: Status::Failed,
                 verified: Some(make_verified(submission.clone(), vec![], evidence.clone())?),
                 evidence,
             });
         }
-        let before: BTreeMap<String, String> =
-            serde_json::from_value(submission.data["balancesBefore"].clone()).map_err(|_| {
-                error(
-                    "SUBMISSION_INVALID",
-                    "reconciliation",
-                    "Persisted pre-order balances are unavailable.",
-                )
-            })?;
-        let mut after = self.trading_totals(account, futures).await?;
-        let mut deltas = BTreeMap::<String, BigInt>::new();
+        // Futures position accounting still needs its own pre/post snapshot. Spot
+        // execution is established by the correlated order and fill records;
+        // concurrent activity makes account-wide balance deltas non-attributable.
         let mut effects = Vec::new();
         if futures {
             let kind: PositionKind = serde_json::from_value(binding["positionKind"].clone())
@@ -2356,9 +2360,11 @@ impl BinanceProfile {
                 -BigInt::from(base_total.clone())
             };
             if post.clone() - prior.clone() != expected_change {
-                return Ok(unknown(
-                    "Derivative exposure does not match the exact proven fills.",
-                ));
+                return Ok(Reconciliation {
+                    status: Status::Unknown,
+                    evidence: json!({"reason":"The correlated fills are complete, but the aggregate derivative position changed by a different amount; the difference may reflect concurrent activity and prevents a reliable position anchor.", "clientOrderId":submission.reference, "orderId":id.as_str(), "venueOutcome":outcome, "executedQty":order["executedQty"], "cumulativeQuote":order["cumQuote"], "tradeIds":seen, "positionBeforeAtoms":prior.to_string(), "positionAfterAtoms":post.to_string(), "expectedChangeAtoms":expected_change.to_string()}),
+                    verified: None,
+                });
             }
             let delta = post.abs() - prior.abs();
             let end = Utc::now().timestamp_millis();
@@ -2386,7 +2392,7 @@ impl BinanceProfile {
                 .timestamp_millis()
             };
             let (funding, funding_ids) = self.trading_funding(account, symbol, start, end).await?;
-            after = self.trading_totals(account, true).await?;
+            let after = self.trading_totals(account, true).await?;
             let observed = now();
             let principal = Amount {
                 asset: base.clone(),
@@ -2406,7 +2412,6 @@ impl BinanceProfile {
                 category: SettlementCategory::Funding,
                 delta: SignedQuantity::new(funding.to_string()).map_err(domain_error)?,
             });
-            *deltas.entry(quote.reference.clone()).or_default() += pnl.clone() + funding.clone();
             if funding.is_negative() {
                 effects.push(FinancialEffect::Cost {
                     location: AccountingLocation::Cash {
@@ -2449,10 +2454,6 @@ impl BinanceProfile {
                     quote_total.clone(),
                 )
             };
-            *deltas.entry(spent.reference.clone()).or_default() -=
-                BigInt::from(spent_total.clone());
-            *deltas.entry(received.reference.clone()).or_default() +=
-                BigInt::from(received_total.clone());
             effects.push(FinancialEffect::Conversion {
                 resource: resource.clone(),
                 spent: Amount {
@@ -2469,11 +2470,10 @@ impl BinanceProfile {
             if amount.is_zero() {
                 continue;
             }
-            let cap=binding["fees"][&coin].as_str().ok_or_else(||error("UNRESERVED_COMMISSION","reconciliation","Order commission was charged in an unreserved asset; cleanup remains unresolved."))?;
-            if amount > decimal_to_atoms(&observed_decimal(cap)?, 36)?.integer() {
-                return Ok(unknown("Actual commission exceeds its approved asset cap."));
+            match binding["fees"][&coin].as_str() {
+                Some(cap) if amount <= decimal_to_atoms(&observed_decimal(cap)?, 36)?.integer() => {}
+                cap => discrepancies.push(json!({"term":"fee", "asset":coin, "actual":Quantity::new(amount.to_string()).map_err(domain_error)?.to_decimal(36), "approved":cap})),
             }
-            *deltas.entry(coin.clone()).or_default() -= BigInt::from(amount.clone());
             let received: AssetId =
                 serde_json::from_value(binding["received"].clone()).map_err(|_| {
                     error(
@@ -2498,24 +2498,10 @@ impl BinanceProfile {
                 },
             });
         }
-        for (coin, delta) in deltas {
-            let old = decimal_to_atoms(
-                &observed_decimal(before.get(&coin).map(String::as_str).unwrap_or("0"))?,
-                36,
-            )?
-            .integer();
-            let new = decimal_to_atoms(
-                &observed_decimal(after.get(&coin).map(String::as_str).unwrap_or("0"))?,
-                36,
-            )?
-            .integer();
-            if BigInt::from(new) - BigInt::from(old) != delta {
-                return Ok(unknown(
-                    "Observed wallet change differs from fills, fees and realized settlement; unrelated activity or funding remains unresolved.",
-                ));
-            }
+        let mut evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":false,"evidenceCorrelation":"order and fill identifiers"});
+        if !discrepancies.is_empty() {
+            evidence["outcome_attention"] = json!({"kind":"discrepancy", "actual":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["actual"]})).collect::<Vec<_>>(), "approved":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["approved"]})).collect::<Vec<_>>()});
         }
-        let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":true});
         let _ = record;
         Ok(Reconciliation {
             status: Status::Completed,

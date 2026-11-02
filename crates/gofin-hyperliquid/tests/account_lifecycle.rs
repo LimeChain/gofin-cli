@@ -940,6 +940,10 @@ async fn withdrawal_waits_for_sequenced_arbitrum_proof_across_restart() {
     .await;
     let settled = with_proof.status(&pending.id, true).await.unwrap();
     assert_eq!(settled.status, Status::Completed, "{settled:#?}");
+    let view = with_proof.operation_view(&settled).unwrap();
+    assert_eq!(view["outcome"]["phase"], "done", "{view}");
+    assert_eq!(view["outcome"]["transfer"], "available", "{view}");
+    assert_eq!(view["outcome"]["next_action"]["code"], "none", "{view}");
     let proof = settled.effects.as_ref().unwrap();
     assert_eq!(proof.submission, original_submission.unwrap());
     assert_eq!(
@@ -965,6 +969,11 @@ async fn withdrawal_waits_for_sequenced_arbitrum_proof_across_restart() {
         gofin_domain::FinancialEffect::Cost { category, .. }
             if category == "hyperliquid_withdrawal_fee"
     )));
+    assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
+    let duplicate = with_proof.execute(withdrawal_request).await.unwrap();
+    assert_eq!(duplicate.id, settled.id);
+    assert_eq!(duplicate.approval, settled.approval);
+    assert_eq!(duplicate.submission, settled.submission);
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
 }
 

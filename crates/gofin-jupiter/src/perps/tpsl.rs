@@ -1092,7 +1092,7 @@ pub(super) async fn prepare_update(
         .to_owned();
     let position_lock = position_lock_resource(&existing.position);
     let network_asset = asset("native", 9);
-    let (valuation, _) = crate::adapter::valuation(
+    let valuation = crate::adapter::valuation(
         adapter.prices.clone(),
         network_asset.clone(),
         0,
@@ -1101,7 +1101,9 @@ pub(super) async fn prepare_update(
         maximum_network_fee,
         wallet.address(),
     )
-    .await?;
+    .await
+    .ok()
+    .map(|(valuation, _)| valuation);
     let mut binding = json!({
         "operation":OP_TPSL_UPDATE,"wallet_address":wallet.address(),"request":request_address,
         "position":existing.position,"position_resource":position_lock,"request_resource":request_resource,
@@ -1131,7 +1133,7 @@ pub(super) async fn prepare_update(
         warnings: vec!["The original TP/SL stays pending until its own keeper or cancellation proof is reconciled.".into()],
         observed_at: Utc::now().to_rfc3339(),
         expires_at: (Utc::now() + ChronoDuration::seconds(20)).to_rfc3339(),
-        valuation: Some(valuation),
+        valuation,
         intent: FinancialIntent {
             debits: vec![],
             maximum_costs: vec![CostBound {
@@ -1363,10 +1365,10 @@ pub(super) async fn prepare_cancel(
         warnings: vec!["Cancellation can race a keeper fill; GoFin reconciles the saved request and finalized child proof before settling the original create.".into()],
         observed_at: Utc::now().to_rfc3339(),
         expires_at: (Utc::now() + ChronoDuration::seconds(20)).to_rfc3339(),
-        valuation: Some(crate::adapter::valuation(
+        valuation: crate::adapter::valuation(
             adapter.prices.clone(), asset("native", 9), 0, asset("native", 9), 0,
             maximum_network_fee, wallet.address(),
-        ).await?.0),
+        ).await.ok().map(|(valuation, _)| valuation),
         intent: FinancialIntent {
             debits: vec![],
             maximum_costs: vec![fee_bound],
@@ -1650,11 +1652,18 @@ pub(super) async fn reconcile_update(
     } = outcome
     else {
         return match outcome {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason}),
@@ -1774,11 +1783,18 @@ pub(super) async fn reconcile_cancel(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
-        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-            status: Status::Pending,
-            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-            verified: None,
-        }),
+        ReceiptOutcome::ExpiredWithoutInclusion {
+            signature,
+            message_sha256,
+            reason,
+            proof,
+        } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+            submission,
+            &signature,
+            &message_sha256,
+            &reason,
+            &proof,
+        ),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason,"request":binding["request"]}),
@@ -2334,11 +2350,18 @@ pub(super) async fn reconcile_create(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
-        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-            status: Status::Pending,
-            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-            verified: None,
-        }),
+        ReceiptOutcome::ExpiredWithoutInclusion {
+            signature,
+            message_sha256,
+            reason,
+            proof,
+        } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+            submission,
+            &signature,
+            &message_sha256,
+            &reason,
+            &proof,
+        ),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason,"request":binding["request"]}),

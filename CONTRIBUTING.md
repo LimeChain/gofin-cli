@@ -114,7 +114,7 @@ you ran, including failures, ignored tests and missing prerequisites. Follow the
 verification is needed.
 
 For financial execution changes, verify approval bounds, original operation
-identities, reservations and restart recovery. A transaction hash does not
+identities, continuation tokens and restart recovery. A transaction hash does not
 establish settlement. Reconcile uncertain results instead of submitting a new
 write identity.
 

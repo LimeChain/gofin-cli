@@ -18,7 +18,33 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     }
     let action = binding["action"].as_str().unwrap_or("");
     let mut lines = Vec::new();
-    if action == "configure" {
+    if action == "runtime_update" {
+        if binding["execution_contract"] != 1
+            || binding["retire_personal_limits"] != true
+            || binding["preserve_enabled_yolo"] != true
+        {
+            return Err(error(
+                "INVALID_CHALLENGE",
+                "The execution update review is invalid.",
+            ));
+        }
+        lines.push("Update GoFin".into());
+        lines.push("Financial approvals use native quantities and bounds; personal USD limits no longer apply.".into());
+        lines.push(
+            "Keep Yolo enabled if already enabled, allowing actions without per-action approval."
+                .into(),
+        );
+    } else if action == "operation_dismiss" {
+        let id = binding["operation_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Operation identity is missing."))?;
+        lines.push(format!(
+            "Dismiss unconfirmed operation {} from the open list",
+            safe(id)
+        ));
+        lines.push("This is only a human label. It changes no financial evidence, authorizes no write and never makes the action safe to replay. Status remains available.".into());
+    } else if action == "configure" {
         let operation = binding["operation"]
             .as_str()
             .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration operation is missing."))?;
@@ -39,50 +65,12 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             lines.push(format!("{}: {}", safe(name), safe(&value.to_string())));
         }
         lines.push(safe(binding["warning"].as_str().unwrap_or("")));
-        lines.push("Your terminal confirmation approves this exact venue configuration attempt. No financial plan can authorize it.".into());
+        lines.push("Your terminal confirmation approves this exact venue configuration attempt. Financial action approval does not authorize configuration changes.".into());
     } else if action == "policy_set" {
-        let previous: BrokerPolicy = serde_json::from_value(binding["previous_policy"].clone())
-            .map_err(|_| error("INVALID_CHALLENGE", "Previous policy is invalid."))?;
-        let next: BrokerPolicy = serde_json::from_value(binding["policy"].clone())
-            .map_err(|_| error("INVALID_CHALLENGE", "Policy is invalid."))?;
-        if previous.require_run_for_writes != next.require_run_for_writes
-            || previous.preview_ttl_seconds != next.preview_ttl_seconds
-        {
-            return Err(error(
-                "INVALID_CHALLENGE",
-                "Only financial limits and the unpriced exchange exception may change.",
-            ));
-        }
-        use gofin_domain::policy::{ALLOCATION_INCLUDES, MOVEMENT_INCLUDES, format_limit};
-        lines.push(format!(
-            "Movement limit: {} → {}",
-            format_limit(&previous.max_movement_usd_micros)?,
-            format_limit(&next.max_movement_usd_micros)?
+        return Err(error(
+            "POLICY_RETIRED",
+            "Personal USD policies are retired. Financial actions use native approval bounds.",
         ));
-        lines.push(MOVEMENT_INCLUDES.into());
-        lines.push(format!(
-            "24-hour allocation limit: {} → {}",
-            format_limit(&previous.max_run_allocation_usd_micros)?,
-            format_limit(&next.max_run_allocation_usd_micros)?
-        ));
-        lines.push(ALLOCATION_INCLUDES.into());
-        lines.push(format!(
-            "Unpriced exchange writes: {} → {}",
-            if previous.allow_unpriced_exchange_assets {
-                "Allowed"
-            } else {
-                "Blocked"
-            },
-            if next.allow_unpriced_exchange_assets {
-                "Allowed"
-            } else {
-                "Blocked"
-            }
-        ));
-        if next.allow_unpriced_exchange_assets {
-            lines.push(gofin_domain::unpriced::WARNING.into());
-        }
-        lines.push("Your terminal confirmation saves this policy. Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo.".into());
     } else if action == "initialize" {
         let config: BrokerConfigV2 = serde_json::from_value(binding["configuration"].clone())
             .map_err(|_| {
@@ -92,10 +80,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 )
             })?;
         config.validate()?;
-        let mut expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
-        expected.policy.max_movement_usd_micros = config.policy.max_movement_usd_micros.clone();
-        expected.policy.max_run_allocation_usd_micros =
-            config.policy.max_run_allocation_usd_micros.clone();
+        let expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
         if serde_json::to_value(&config).ok() != serde_json::to_value(&expected).ok() {
             return Err(error(
                 "INVALID_CHALLENGE",
@@ -104,17 +89,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         }
         lines.extend([
             "Confirm this Mac account as GoFin's approver.".into(),
-            format!(
-                "Movement limit: {}",
-                gofin_domain::policy::format_limit(&config.policy.max_movement_usd_micros)?
-            ),
-            gofin_domain::policy::MOVEMENT_INCLUDES.into(),
-            format!(
-                "24-hour allocation limit: {}",
-                gofin_domain::policy::format_limit(&config.policy.max_run_allocation_usd_micros)?
-            ),
-            gofin_domain::policy::ALLOCATION_INCLUDES.into(),
-            "Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo.".into(),
+            "No personal USD limits are enforced. Financial writes require approval of their native economic terms, or explicitly enabled protected Yolo.".into(),
             "Your terminal confirmation approves GoFin setup; sudo permitted installation.".into(),
         ]);
     } else {
@@ -543,10 +518,10 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     if let Some(warning) = binding["warning"].as_str() {
         lines.push(format!("Warning: {}", safe(warning)));
     }
-    if action != "initialize" {
+    if action != "initialize" && action != "runtime_update" {
         lines.push("Storage: protected local files in /Library/GoFin/private (credentials, configuration and journal).".into());
         lines.push(
-            "No funds move now. Later financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo."
+            "No funds move now. Later financial writes require fresh Touch ID, valid native action authority, or explicitly enabled Yolo."
                 .into(),
         );
     }
@@ -572,29 +547,9 @@ mod tests {
     }
 
     #[test]
-    fn policy_review_shows_exact_changes_and_preserves_write_approval() {
-        let previous = BrokerPolicy::beta();
-        let mut next = previous.clone();
-        next.max_movement_usd_micros = "1000000001".into();
-        next.max_run_allocation_usd_micros = "5000000000".into();
-        let mut binding = json!({"action":"policy_set","previous_policy":previous,"policy":next,"financial_movement":false,"future_financial_authority":false});
-        let text = review(&binding).unwrap();
-        for expected in [
-            "$100 USD → $1000.000001 USD",
-            "$100 USD → $5000 USD",
-            "rolling 24-hour",
-            "fresh Touch ID",
-        ] {
-            assert!(text.contains(expected), "{text}");
-        }
-        binding["policy"]["max_movement_usd_micros"] = json!("0");
-        assert!(review(&binding).unwrap().contains("$100 USD → No limit"));
-        binding["policy"]["allow_unpriced_exchange_assets"] = json!(true);
-        let exception = review(&binding).unwrap();
-        assert!(exception.contains("Unpriced exchange writes: Blocked → Allowed"));
-        assert!(exception.contains(gofin_domain::unpriced::WARNING));
-        binding["policy"]["require_run_for_writes"] = json!(true);
-        assert!(review(&binding).is_err());
+    fn retired_policy_changes_cannot_be_presented_as_enforced_controls() {
+        let binding = json!({"action":"policy_set","previous_policy":BrokerPolicy::beta(),"policy":BrokerPolicy::beta(),"financial_movement":false,"future_financial_authority":false});
+        assert_eq!(review(&binding).unwrap_err().code, "POLICY_RETIRED");
     }
 
     #[test]
@@ -747,18 +702,11 @@ mod tests {
         assert!(text.contains("Confirm this Mac account as GoFin's approver."));
         assert!(text.contains("sudo permitted installation"));
         assert!(text.contains("terminal confirmation approves GoFin setup"));
-        assert!(text.contains("Movement limit: $100 USD"));
-        assert!(text.contains("24-hour allocation limit: $100 USD"));
-        binding["configuration"]["policy"]["max_movement_usd_micros"] = "200000000".into();
-        assert!(review(&binding).unwrap().contains("$200 USD"));
-        binding["configuration"]["policy"]["max_movement_usd_micros"] = "0".into();
-        assert!(
-            review(&binding)
-                .unwrap()
-                .contains("Movement limit: No limit")
-        );
-        binding["configuration"]["policy"]["require_run_for_writes"] = true.into();
-        assert!(review(&binding).is_err());
+        assert!(text.contains("No personal USD limits"));
+        for value in ["200000000", "1"] {
+            binding["configuration"]["policy"]["max_movement_usd_micros"] = value.into();
+            assert!(review(&binding).is_err());
+        }
     }
 
     #[test]

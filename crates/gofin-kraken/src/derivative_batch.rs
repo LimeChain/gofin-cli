@@ -447,7 +447,7 @@ impl KrakenProfile {
         );
         current.observed_at = gofin_domain::now();
         current.expires_at = (Utc::now() + Duration::seconds(90)).to_rfc3339();
-        gofin_domain::value_bounds::bind(&mut current);
+
         Ok(current)
     }
     pub(crate) async fn reconcile_derivative_batch(
@@ -747,23 +747,31 @@ impl KrakenProfile {
                 &other,
                 &scope.intent.maximum_costs,
             )? {
-                let markers = other
-                    .iter()
-                    .filter(|effect| crate::unresolved_consumption::is_marker(effect))
-                    .cloned()
-                    .collect();
                 return crate::unresolved_consumption::new_write_overrun_with_progress(
                     record,
                     submission,
+                    if !terminal {
+                        Status::Pending
+                    } else if any_fill && !any_rejected_mutation {
+                        Status::Completed
+                    } else {
+                        Status::Failed
+                    },
                     &other,
-                    markers,
-                    json!({"code":"KRAKEN_BATCH_NEW_WRITE_COST_BOUND_EXCEEDED","batch":observations,"proofEvents":events,"unknownChildren":unknown_children,"newFinancialEffectsUnsettled":true}),
+                    json!({"code":"KRAKEN_BATCH_NEW_WRITE_COST_BOUND_EXCEEDED","batch":observations,"proofEvents":events,"unknownChildren":unknown_children}),
                 );
             }
         }
         if crate::unresolved_consumption::costs_exceed_bounds(&other, &bounds)? {
-            return crate::unresolved_consumption::cost_overrun(
+            return crate::unresolved_consumption::proven_cost_overrun(
                 submission,
+                if !terminal {
+                    Status::Pending
+                } else if any_fill && !any_rejected_mutation {
+                    Status::Completed
+                } else {
+                    Status::Failed
+                },
                 &other,
                 json!({"code":"KRAKEN_BATCH_COST_BOUND_EXCEEDED","batch":observations,"proofEvents":events,"unknownChildren":unknown_children}),
             );

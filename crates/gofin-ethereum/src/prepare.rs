@@ -239,6 +239,7 @@ impl EthereumAdapter {
             tick_spacing: None,
             pool_deployer: None,
             factory: None,
+            quoter: None,
             swap_fee_ppm: None,
             max_pool_fee_ppm: None,
             protocol: None,
@@ -773,6 +774,7 @@ impl EthereumAdapter {
                         self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
                     b.dex = Some(profile.dex_id.into());
                     b.factory = Some(profile.factory.to_owned());
+                    b.quoter = Some(profile.quoter.to_owned());
                     b.pool_deployer = profile.pool_deployer.map(str::to_owned);
                 }
                 if is_ramses {
@@ -780,6 +782,7 @@ impl EthereumAdapter {
                     b.tick_spacing = quote.tick_spacing;
                     b.pool_deployer = Some(self.ramses()?.pool_deployer.clone());
                     b.factory = Some(self.ramses()?.factory.clone());
+                    b.quoter = Some(self.ramses()?.quoter.clone());
                     b.swap_fee_ppm = quote.swap_fee_ppm;
                     b.max_pool_fee_ppm = max_pool_fee;
                 }
@@ -1830,7 +1833,14 @@ impl EthereumAdapter {
             location: AccountingLocation::Cash {
                 resource: resource.clone(),
             },
-            amount: amount(&self.native_asset(), gas),
+            amount: amount(
+                &self.native_asset(),
+                if operation == "wallet.transfer" {
+                    maximum_fee
+                } else {
+                    gas
+                },
+            ),
             treatment: CostTreatment::AdditionalDebit,
         });
         let mut movement = if operation == "aave.collateral" {
@@ -1842,87 +1852,103 @@ impl EthereumAdapter {
         if operation == "wallet.approve"
             && let Some((underlying, claim)) = self
                 .morpho_allowance_value(&principal_asset, b.spender.as_deref(), qty)
-                .await?
+                .await
+                .ok()
+                .flatten()
         {
             valuation_asset = underlying;
             movement = claim;
             warnings.push("Morpho share allowance value uses the vault's current underlying backing; receipt shares are not separately priced.".into());
         }
-        // Derive all USD scalars from the same attributable final unit rows.
-        // Separate amount quotes can expire or change during preparation;
-        // old quote timestamps are never restamped or silently discarded.
-        let native_asset = self.native_asset();
-        let mut assets = vec![valuation_asset.clone()];
-        if native_asset != valuation_asset {
-            assets.push(native_asset.clone());
-        }
-        if let Some(output) = &b.output
-            && !assets.contains(output)
-        {
-            assets.push(output.clone());
-        }
-        let amounts = assets
-            .into_iter()
-            .map(|asset| {
-                Ok(Amount {
-                    atoms: quantity(pow10(asset.decimals)?),
-                    asset,
+        // USD presentation is optional and never gates native intent. Protocol
+        // health, quote and slippage checks above remain independently enforced.
+        let valuation = async {
+            // Derive all USD scalars from the same attributable final unit rows.
+            // Separate amount quotes can expire or change during preparation;
+            // old quote timestamps are never restamped or silently discarded.
+            let native_asset = self.native_asset();
+            let mut assets = vec![valuation_asset.clone()];
+            if native_asset != valuation_asset {
+                assets.push(native_asset.clone());
+            }
+            if let Some(output) = &b.output
+                && !assets.contains(output)
+            {
+                assets.push(output.clone());
+            }
+            let amounts = assets
+                .into_iter()
+                .map(|asset| {
+                    Ok(Amount {
+                        atoms: quantity(pow10(asset.decimals)?),
+                        asset,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // One exact batch lets shared providers group requests and recheck all
-        // timestamps after the last source responds, without extending freshness.
-        let prices: Vec<_> = self
-            .quote_verified_assets_usd_observed(&amounts)
-            .await?
-            .into_iter()
-            .zip(amounts)
-            .map(|((usd, source, observed_at), amount)| AssetPrice {
-                asset: amount.asset,
-                usd_micros_per_unit: usd,
-                unit_atoms: amount.atoms,
-                observed_at,
-                source,
-            })
-            .collect();
-        let price_observations: Vec<_> = prices
-            .iter()
-            .map(|price| price.observed_at.clone())
-            .collect();
-        let observed = self.clock.now().to_rfc3339();
-        let usd_from_row = |asset: &AssetId, units: Quantity| -> Result<Quantity> {
-            let row = prices
+                .collect::<Result<Vec<_>>>()?;
+            // One exact batch lets shared providers group requests and recheck all
+            // timestamps after the last source responds, without extending freshness.
+            let prices: Vec<_> = self
+                .quote_verified_assets_usd_observed(&amounts)
+                .await?
+                .into_iter()
+                .zip(amounts)
+                .map(|((usd, source, observed_at), amount)| AssetPrice {
+                    asset: amount.asset,
+                    usd_micros_per_unit: usd,
+                    unit_atoms: amount.atoms,
+                    observed_at,
+                    source,
+                })
+                .collect();
+            let price_observations: Vec<_> = prices
                 .iter()
-                .find(|p| p.asset == *asset)
-                .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))?;
-            units.mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
-        };
-        let movement_usd = usd_from_row(&valuation_asset, movement)?;
-        let fee_usd = usd_from_row(&self.native_asset(), quantity(gas))?;
-        let source = prices
-            .iter()
-            .find(|p| p.asset == valuation_asset)
-            .expect("principal row")
-            .source
-            .clone();
-        let additional_allocation = if operation == "aave.borrow" {
-            usd_from_row(
-                &principal_asset,
-                quantity(add(
-                    qty,
-                    u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
-                )?),
-            )?
-        } else {
-            Quantity::zero()
-        };
-        let valuation_observed = price_observations
-            .into_iter()
-            .min_by_key(|timestamp| {
-                chrono::DateTime::parse_from_rfc3339(timestamp)
-                    .expect("validated observation timestamp")
+                .map(|price| price.observed_at.clone())
+                .collect();
+            let usd_from_row = |asset: &AssetId, units: Quantity| -> Result<Quantity> {
+                let row = prices
+                    .iter()
+                    .find(|p| p.asset == *asset)
+                    .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))?;
+                units.mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
+            };
+            let movement_usd = usd_from_row(&valuation_asset, movement)?;
+            let fee_usd = usd_from_row(&self.native_asset(), quantity(gas))?;
+            let source = prices
+                .iter()
+                .find(|p| p.asset == valuation_asset)
+                .expect("principal row")
+                .source
+                .clone();
+            let additional_allocation = if operation == "aave.borrow" {
+                usd_from_row(
+                    &principal_asset,
+                    quantity(add(
+                        qty,
+                        u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
+                    )?),
+                )?
+            } else {
+                Quantity::zero()
+            };
+            let valuation_observed = price_observations
+                .into_iter()
+                .min_by_key(|timestamp| {
+                    chrono::DateTime::parse_from_rfc3339(timestamp)
+                        .expect("validated observation timestamp")
+                })
+                .expect("principal and fee observations");
+            Ok::<Valuation, GoFinError>(Valuation {
+                movement_usd_micros: movement_usd,
+                maximum_fee_usd_micros: fee_usd,
+                additional_allocation_usd_micros: additional_allocation,
+                observed_at: valuation_observed,
+                source,
+                prices,
             })
-            .expect("principal and fee observations");
+        }
+        .await
+        .ok();
+        let observed = self.clock.now().to_rfc3339();
         let expires = (self.clock.now() + chrono::Duration::seconds(300))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if matches!(
@@ -2143,7 +2169,11 @@ impl EthereumAdapter {
                 w.name,
                 self.config.chain_id,
                 qty,
-                gas
+                if operation == "wallet.transfer" {
+                    maximum_fee
+                } else {
+                    gas
+                }
             )
         };
         Ok(PreparedOperation {
@@ -2155,14 +2185,7 @@ impl EthereumAdapter {
             warnings,
             observed_at: observed.clone(),
             expires_at: expires,
-            valuation: Some(Valuation {
-                movement_usd_micros: movement_usd,
-                maximum_fee_usd_micros: fee_usd,
-                additional_allocation_usd_micros: additional_allocation,
-                observed_at: valuation_observed,
-                source,
-                prices,
-            }),
+            valuation,
             intent,
             operation_version: 1,
             action_deadline: None,
@@ -2188,27 +2211,29 @@ mod permit_signer_tests {
 #[cfg(test)]
 mod validation_error_tests {
     use super::*;
-    use crate::tests::{Fixture, adapter, swap_input};
+    use crate::tests::{Fixture, local_sushi_adapter, swap_input};
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn excessive_price_impact_has_its_own_error_and_never_reaches_submission() {
         let rpc = Arc::new(Fixture::new());
-        let adapter = adapter(rpc.clone());
+        *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+        let adapter = local_sushi_adapter(rpc.clone());
         let mut input = swap_input();
+        input["fee_tier"] = json!(500);
         input["max_price_impact_bps"] = json!(100);
         for inner in [false, true] {
             let result = if inner {
                 adapter
                     .prepare_operation_inner(
-                        "uniswap.swap",
+                        "sushi.swap",
                         &input,
                         None,
                         &PreparationContext::default(),
                     )
                     .await
             } else {
-                adapter.prepare("uniswap.swap", &input).await
+                adapter.prepare("sushi.swap", &input).await
             };
             let err = result.unwrap_err();
             assert_eq!(err.code, "PRICE_IMPACT_LIMIT");
@@ -2223,14 +2248,14 @@ mod validation_error_tests {
             let result = if inner {
                 adapter
                     .prepare_operation_inner(
-                        "uniswap.swap",
+                        "sushi.swap",
                         &input,
                         None,
                         &PreparationContext::default(),
                     )
                     .await
             } else {
-                adapter.prepare("uniswap.swap", &input).await
+                adapter.prepare("sushi.swap", &input).await
             };
             let error = result.unwrap_err();
             assert_eq!(error.code, "SLIPPAGE_LIMIT");

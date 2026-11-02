@@ -25,9 +25,8 @@ curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
 
 GoFin is for people using local AI agents to work with exchange accounts,
 wallets and DeFi. Tell your agent the goal; it uses GoFin to read balances and
-markets, prepare a plan and submit supported actions. The protected local broker
-uses your credentials and independently enforces financial limits and the
-authority you have granted.
+markets, prepare native economic intent and submit supported actions. The protected local broker
+uses your credentials and independently enforces the native bounds and authority you approve.
 
 ## What it can do?
 
@@ -36,7 +35,8 @@ It’s best to ask your agent. But if you want to read it yourself:
 GoFin supports exploring balances and markets, trading on exchanges, transferring
 and bridging funds, swapping tokens, and managing Meteora DLMM and DAMM v2
 liquidity alongside lending and borrowing through Aave.
-Your agent can also combine supported actions into a plan for you to approve.
+Your agent coordinates actions and observes their original identities. Compound
+actions can complete their declared stages under one approval.
 
 Your agent can discover what’s available in your installed version and explain
 what you can do with your connected accounts. For Meteora swap and position
@@ -52,11 +52,11 @@ they do the job, so GoFin helps them do so. It also comes with boundaries you ca
 - **Your secrets stay private.** Enter credentials in GoFin’s protected prompt.
   The local broker uses your API keys and private keys without exposing their
   values to your agent.
-- **Your limits apply.** Choose movement and rolling 24-hour allocation limits.
-  GoFin enforces them independently of the agent.
+- **Your terms apply.** Approve exact native amounts, destinations, worst acceptable
+  outcomes and fees. GoFin checks them independently of the agent.
 - **You control approval.** GoFin checks that financial actions match your
-  authority before dispatch. By default standalone writes require fresh Touch ID;
-  supported bounded approvals and plans cover only their approved scope.
+  authority before dispatch. By default actions require Touch ID; compound stages share their original
+  reviewed scope and deadline.
   The human can explicitly enable dangerous [Yolo mode](docs/usage.md#yolo-mode)
   to let agents submit financial operations without further human approval.
 
@@ -126,8 +126,7 @@ Provider setup is covered in [connections and usage](docs/usage.md#connections-a
 - **Protected setup and administration:** macOS 13+ on Apple Silicon or Intel,
   administrator access, and Apple Terminal or a human-operated macOS system
   OpenSSH session. SSH over Tailscale is supported; the client may use any OS.
-- **Financial execution:** fresh Touch ID by default, existing bounded authority,
-  or explicitly enabled protected Yolo.
+- **Financial execution:** per-action Touch ID by default or explicitly enabled protected Yolo.
 - **Prebuilt runtime:** no Rust, Swift, Node.js or npm required.
 - **Source builds:** the pinned Rust toolchain; macOS native builds also need
   Apple’s Command Line Tools and Swift. See the [contributor guide](CONTRIBUTING.md).
@@ -153,7 +152,7 @@ and the separate live-development workflow.
 
 For you, your agent, or both:
 
-- [Usage reference](docs/usage.md): setup, commands, providers, plans and recovery.
+- [Usage reference](docs/usage.md): setup, commands, providers, outcomes and continuation.
 - [Documentation index](docs/README.md): architecture, integrations and testing.
 - [Agent skill](docs/companion-skill.md): installation and maintenance.
 

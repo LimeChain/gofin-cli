@@ -171,6 +171,10 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
     let store = Arc::new(Mutex::new(store));
     let mut journal = OperationSubmissionJournal {
         operation_id: record.id.clone(),
+        approved_candidate: record.preview.clone(),
+        compound_stage: None,
+        resource_guards: Mutex::new(None),
+        release_resource_guards_on_admission: false,
         authorization_route: SubmissionAuthorizationRoute::Financial,
         expected_binding_hash: hash,
         approval: audit,

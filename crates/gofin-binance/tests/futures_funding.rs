@@ -378,13 +378,6 @@ async fn lost_response_restart_recovers_original_transfer_without_reapproval_or_
     assert!(initial.effects.is_none());
     let submission = initial.submission.clone().unwrap();
     drop(e);
-    assert!(
-        Store::open(&path)
-            .unwrap()
-            .reservation_count(&initial.id)
-            .unwrap()
-            > 0
-    );
     v.history_mode.store(0, Ordering::SeqCst);
     let e = engine(Store::open(&path).unwrap(), a, auth.clone());
     e.recover_interrupted().unwrap();
@@ -392,13 +385,6 @@ async fn lost_response_restart_recovers_original_transfer_without_reapproval_or_
     assert_eq!(recovered.id, initial.id);
     assert_eq!(recovered.status, Status::Completed);
     assert_eq!(recovered.submission, Some(submission));
-    assert_eq!(
-        Store::open(&path)
-            .unwrap()
-            .reservation_count(&initial.id)
-            .unwrap(),
-        0
-    );
     assert_eq!(v.posts.load(Ordering::SeqCst), 1);
     assert_eq!(auth.count.load(Ordering::SeqCst), 1);
 }

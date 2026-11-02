@@ -82,7 +82,8 @@ submission gate under the environment directory, and removes ordinary automatic
 development approval from that runtime. With `enabled:false`, financial
 authorization is unavailable; it cannot silently fall back to development approval.
 
-Keep finite policy and operation bounds. Disable by stopping that environment,
+Keep finite native operation bounds and follow the live-test skill's agent-side
+budget. Disable by stopping that environment,
 changing the explicit fixture to `enabled:false`, and starting it again; preserve
 the journal and reconcile original identities. Leaving out the fixture retains
 ordinary development behavior. Mode alone never enables it. State is local to

@@ -436,7 +436,7 @@ impl KrakenProfile {
         );
         // Mutations carry delta principal only; native contract exposure stays in each full revision.
         self.compound_margin_admission(&current).await?;
-        gofin_domain::value_bounds::bind(&mut current);
+
         Ok(current)
     }
 }

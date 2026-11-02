@@ -51,21 +51,11 @@ fn definition(
             | "hyperliquid.orders.edit_batch"
     ) {
         semantics["execution_price"] = json!(
-            "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds and fee accounting; favorable fills outside that band remain unresolved."
+            "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy."
         );
         semantics["reconciliation_limits"] = json!(
-            "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are not guaranteed by the venue; an observed overrun remains unresolved under the original identity. Do not resubmit an order to repair settlement."
+            "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity."
         );
-        semantics["exact_plan_accounting"] = json!({
-            "market_type": "perpetual",
-            "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
-            "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit.",
-            "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
-            "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
-            "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
-            "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
-            "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority."
-        });
     }
     if kind != OperationKind::Read {
         semantics["example_inputs"] = json!(
@@ -500,20 +490,6 @@ pub fn definitions() -> Vec<Definition> {
         admin::<SubaccountInput>("hyperliquid.account.create_subaccount", "Create a named subaccount.", json!({"approval":"human-only administrative authorization"})),
     ]);
     for definition in &mut d {
-        if matches!(
-            definition.name.as_str(),
-            "hyperliquid.orders.place"
-                | "hyperliquid.orders.batch"
-                | "hyperliquid.orders.edit"
-                | "hyperliquid.orders.edit_batch"
-        ) {
-            definition.semantics["plan_immediate_orders"] = json!(true);
-            definition.semantics["plan_funding_accounting"] = json!({
-                "spot": "Uses the exact input-asset principal debit and separately classified costs.",
-                "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
-                "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion."
-            });
-        }
         if definition.kind == OperationKind::Write
             && !matches!(
                 definition.name.as_str(),

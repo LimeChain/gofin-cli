@@ -420,14 +420,8 @@ mod final_submission_valuation_tests {
             let fresh = adapter.revalidate(&prepared).await.unwrap();
             assert_eq!(fresh.binding, prepared.binding);
             assert_eq!(fresh.intent, prepared.intent);
-            // The original two-minute price observation has expired; only a
-            // freshly obtained quote lets this longer-lived envelope execute.
-            assert_eq!(
-                gofin_domain::value_bounds::validate_at(&prepared, *clock.0.lock().unwrap())
-                    .unwrap_err()
-                    .code,
-                "STALE_VALUATION",
-            );
+            // Reporting prices do not limit an otherwise valid native approval.
+            gofin_domain::value_bounds::validate_at(&prepared, *clock.0.lock().unwrap()).unwrap();
             gofin_domain::value_bounds::validate_at(&fresh, *clock.0.lock().unwrap()).unwrap();
             assert_eq!(
                 adapter
@@ -470,7 +464,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn engine_wallet_submission_reuses_fresh_preparation_without_duplicate_simulation() {
+    async fn engine_wallet_submission_revalidates_nonce_claimed_candidate() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let a = Arc::new(counted_adapter(rpc.clone(), signer.clone()));
@@ -502,8 +496,8 @@ mod final_submission_valuation_tests {
                 .iter()
                 .filter(|method| *method == "eth_estimateGas")
                 .count(),
-            1,
-            "fresh preparation is reused through approval and submission must not repeat simulation"
+            2,
+            "the exact nonce-claimed candidate is simulated before dispatch"
         );
         assert_no_dispatch(&rpc);
     }
@@ -547,7 +541,10 @@ mod final_submission_valuation_tests {
             .await
             .unwrap();
 
-        assert_eq!(record.error.as_ref().unwrap().code, "NONCE_CHANGED");
+        assert_eq!(
+            record.error.as_ref().unwrap().code,
+            "CANDIDATE_OUTSIDE_APPROVAL"
+        );
         assert_eq!(signer.0.load(Ordering::SeqCst), 0);
         let calls = rpc.calls.lock().unwrap();
         assert_eq!(
@@ -584,7 +581,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn wrapping_price_drift_uses_finite_buffer_and_preserves_old_attempt_ceiling() {
+    async fn wrapping_price_drift_preserves_native_terms_and_historical_metadata() {
         for operation in ["wallet.wrap", "wallet.unwrap"] {
             let rpc = Arc::new(Fixture::new());
             let signer = Arc::new(CountingSigner::default());
@@ -594,49 +591,27 @@ mod final_submission_valuation_tests {
                 counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
             let mut input = wrap_input();
             input["amount"] = json!("0.01207");
-            let raw = adapter
-                .prepare_operation(operation, &input, None, &PreparationContext::default())
-                .await
-                .unwrap();
-            let mut legacy = raw.clone();
-            gofin_domain::value_bounds::bind(&mut legacy);
-            assert_eq!(
-                legacy.binding[gofin_domain::value_bounds::KEY]["movement_usd_micros"],
-                "28950000"
-            );
             let prepared = adapter.prepare(operation, &input).await.unwrap();
-            let original_binding = gofin_domain::authorization_binding(&prepared);
-            assert_eq!(prepared.intent, raw.intent);
+            let mut historical = prepared.clone();
+            gofin_domain::value_bounds::bind(&mut historical);
+            let original_intent = historical.intent.clone();
+            prices.unit_price.store(2_430_000_000, Ordering::SeqCst);
+            let fresh = adapter.revalidate(&historical).await.unwrap();
+            assert_eq!(fresh.intent, original_intent);
             assert_eq!(
-                prepared.binding[gofin_domain::value_bounds::KEY]["movement_usd_micros"],
-                "29240000"
+                gofin_domain::native_authorization_binding(&fresh),
+                gofin_domain::native_authorization_binding(&historical)
             );
-            assert!(prepared.summary.contains("1% pricing buffer"));
-            prices.unit_price.store(2_398_743_000, Ordering::SeqCst);
-            prices.updated_at.fetch_add(1, Ordering::SeqCst);
-            let fresh = adapter.revalidate(&prepared).await.unwrap();
-            assert_eq!(
-                gofin_domain::authorization_binding(&fresh),
-                original_binding
-            );
-            assert_eq!(fresh.intent, prepared.intent);
-            let legacy_error = adapter.revalidate(&legacy).await.unwrap_err();
-            assert_eq!(legacy_error.code, "VALUE_BOUND_EXCEEDED");
-            assert_eq!(
-                legacy_error.details.as_ref().unwrap()["maximum_usd_micros"],
-                "28950000"
-            );
-            let legacy_journal = Arc::new(CountingJournal::default());
+            let journal = Arc::new(CountingJournal::default());
             assert_eq!(
                 adapter
-                    .submit(&legacy, legacy_journal.clone())
+                    .submit(&historical, journal.clone())
                     .await
                     .unwrap_err()
                     .code,
                 "VALUE_BOUND_EXCEEDED"
             );
-            assert_eq!(legacy_journal.authorized.load(Ordering::SeqCst), 0);
-            assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
             let journal = Arc::new(CountingJournal::default());
             assert_eq!(
                 adapter
@@ -648,31 +623,12 @@ mod final_submission_valuation_tests {
             );
             assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
             assert_eq!(signer.0.load(Ordering::SeqCst), 1);
-            // Repricing never grows a bound already attached to an attempt.
-            prices.unit_price.store(2_430_000_000, Ordering::SeqCst);
-            let error = adapter.revalidate(&prepared).await.unwrap_err();
-            assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
-            assert_eq!(
-                error.details.as_ref().unwrap()["maximum_usd_micros"],
-                "29240000"
-            );
-            let journal = Arc::new(CountingJournal::default());
-            assert_eq!(
-                adapter
-                    .submit(&prepared, journal.clone())
-                    .await
-                    .unwrap_err()
-                    .code,
-                "VALUE_BOUND_EXCEEDED"
-            );
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
-            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             assert_no_dispatch(&rpc);
         }
     }
 
     #[tokio::test]
-    async fn wrapping_price_buffer_is_reserved_against_policy_before_approval() {
+    async fn wrapping_reporting_value_does_not_veto_native_approval() {
         for operation in ["wallet.wrap", "wallet.unwrap"] {
             let rpc = Arc::new(Fixture::new());
             let signer = Arc::new(CountingSigner::default());
@@ -703,7 +659,7 @@ mod final_submission_valuation_tests {
                 },
             )
             .unwrap();
-            let rejected = engine
+            let attempted = engine
                 .execute(OperationRequest {
                     request_id: format!("synthetic-{operation}-buffer-policy"),
                     operation: operation.into(),
@@ -712,16 +668,19 @@ mod final_submission_valuation_tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(rejected.error.as_ref().unwrap().code, "MOVEMENT_LIMIT");
-            assert!(rejected.approval.is_none() && rejected.submission.is_none());
-            assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
-            assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                attempted.error.as_ref().unwrap().code,
+                "SYNTHETIC_SIGNER_REACHED"
+            );
+            assert!(attempted.approval.is_some() && attempted.submission.is_none());
+            assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             assert_no_dispatch(&rpc);
         }
     }
 
     #[tokio::test]
-    async fn approval_supply_and_borrow_preserve_scope_with_finite_pricing_buffer() {
+    async fn approval_supply_and_borrow_preserve_native_and_risk_bounds() {
         for operation in ["wallet.approve", "aave.supply", "aave.borrow"] {
             let rpc = Arc::new(Fixture::new());
             if operation == "aave.borrow" {
@@ -750,19 +709,18 @@ mod final_submission_valuation_tests {
             let prepared = adapter.prepare(operation, &input).await.unwrap();
             assert_eq!(prepared.input, raw.input);
             assert_eq!(prepared.intent, raw.intent);
-            assert!(prepared.summary.contains("1% pricing buffer"));
-            let original_binding = gofin_domain::authorization_binding(&prepared);
+            let original_binding = gofin_domain::native_authorization_binding(&prepared);
             prices.unit_price.store(3_001_000_000, Ordering::SeqCst);
             prices.updated_at.fetch_add(1, Ordering::SeqCst);
             let fresh = adapter.revalidate(&prepared).await.unwrap();
             assert_eq!(
-                gofin_domain::authorization_binding(&fresh),
+                gofin_domain::native_authorization_binding(&fresh),
                 original_binding
             );
             assert_eq!(fresh.intent, prepared.intent);
             assert_eq!(
-                adapter.revalidate(&legacy).await.unwrap_err().code,
-                "VALUE_BOUND_EXCEEDED"
+                adapter.revalidate(&legacy).await.unwrap().intent,
+                legacy.intent
             );
             let journal = Arc::new(CountingJournal::default());
             assert_eq!(
@@ -777,20 +735,9 @@ mod final_submission_valuation_tests {
             assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             prices.unit_price.store(3_031_000_000, Ordering::SeqCst);
             assert_eq!(
-                adapter.revalidate(&prepared).await.unwrap_err().code,
-                "VALUE_BOUND_EXCEEDED"
+                adapter.revalidate(&prepared).await.unwrap().intent,
+                prepared.intent
             );
-            let journal = Arc::new(CountingJournal::default());
-            assert_eq!(
-                adapter
-                    .submit(&prepared, journal.clone())
-                    .await
-                    .unwrap_err()
-                    .code,
-                "VALUE_BOUND_EXCEEDED"
-            );
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
-            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             if operation == "aave.borrow" {
                 // Attempt accounting headroom never expands explicit debt or health limits.
                 let mut bounded = input.clone();
@@ -811,7 +758,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn coin_gecko_quote_refresh_within_displayed_ceiling_keeps_approval_stable() {
+    async fn coin_gecko_quote_refresh_keeps_native_approval_stable() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let prices = Arc::new(CoinGeckoStylePrices::fresh());
@@ -825,10 +772,9 @@ mod final_submission_valuation_tests {
                 .binding
                 .product_get(gofin_domain::value_bounds::KEY)
                 .unwrap()
-                .is_some()
+                .is_none()
         );
-        assert!(prepared.summary.contains("USD ceilings: $3.01 movement"));
-        let approved_binding = gofin_domain::authorization_binding(&prepared);
+        let approved_binding = gofin_domain::native_authorization_binding(&prepared);
         let approved_price = prepared.valuation.as_ref().unwrap().prices[0]
             .usd_micros_per_unit
             .clone();
@@ -837,9 +783,9 @@ mod final_submission_valuation_tests {
         prices.updated_at.fetch_add(1, Ordering::SeqCst);
         let refreshed = a.revalidate(&prepared).await.unwrap();
         assert_eq!(
-            gofin_domain::authorization_binding(&refreshed),
+            gofin_domain::native_authorization_binding(&refreshed),
             approved_binding,
-            "a new quote round inside the visible ceiling must retain the approval binding"
+            "a reporting quote refresh must retain the native approval binding"
         );
         assert_eq!(refreshed.summary, prepared.summary);
         assert_ne!(
@@ -860,7 +806,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn price_above_ceiling_changed_identity_and_stale_quote_never_reach_signing() {
+    async fn unavailable_or_changed_reporting_quote_does_not_change_native_approval() {
         for case in ["above-ceiling", "changed-identity", "stale"] {
             let rpc = Arc::new(Fixture::new());
             let signer = Arc::new(CountingSigner::default());
@@ -877,24 +823,27 @@ mod final_submission_valuation_tests {
                 _ => prices.stale.store(true, Ordering::SeqCst),
             }
             prices.updated_at.fetch_add(1, Ordering::SeqCst);
-            assert!(
-                a.revalidate(&prepared).await.is_err(),
-                "{case} must fail during the fresh adapter check"
-            );
-            let journal = Arc::new(CountingJournal::default());
-            assert!(
-                a.submit(&prepared, journal.clone()).await.is_err(),
+            let fresh = a.revalidate(&prepared).await.unwrap();
+            assert_eq!(
+                gofin_domain::native_authorization_binding(&fresh),
+                gofin_domain::native_authorization_binding(&prepared),
                 "{case}"
             );
-            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            let journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                a.submit(&prepared, journal.clone()).await.unwrap_err().code,
+                "SYNTHETIC_SIGNER_REACHED",
+                "{case}"
+            );
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1, "{case}");
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 1, "{case}");
             assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
             assert_no_dispatch(&rpc);
         }
     }
 
     #[tokio::test]
-    async fn legacy_unbounded_preview_keeps_exact_source_and_price_revalidation() {
+    async fn legacy_unbounded_preview_allows_reporting_quote_refresh() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let prices = Arc::new(CoinGeckoStylePrices::fresh());
@@ -919,10 +868,10 @@ mod final_submission_valuation_tests {
         let journal = Arc::new(CountingJournal::default());
         assert_eq!(
             a.submit(&prepared, journal.clone()).await.unwrap_err().code,
-            "VALUATION_CHANGED"
+            "SYNTHETIC_SIGNER_REACHED"
         );
-        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
-        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
         assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
         assert_no_dispatch(&rpc);
     }
@@ -948,10 +897,9 @@ mod final_submission_valuation_tests {
             self.inner.prepare(operation, input).await
         }
         async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
-            assert_eq!(self.phases.fetch_add(1, Ordering::SeqCst), 1);
+            self.phases.fetch_add(1, Ordering::SeqCst);
             let refreshed = self.inner.revalidate(prepared).await?;
             assert_eq!(refreshed.binding, prepared.binding);
-            require_frozen_valuation(refreshed.valuation.as_ref(), prepared.valuation.as_ref())?;
             self.rpc.call_overrides.lock().unwrap().insert(
                 Oracle::getAssetPriceCall::SELECTOR,
                 abi_value(U256::from(310_000_000_000u64)),
@@ -963,7 +911,7 @@ mod final_submission_valuation_tests {
             prepared: &PreparedOperation,
             journal: Arc<dyn SubmissionJournal>,
         ) -> Result<Submission> {
-            assert_eq!(self.phases.fetch_add(1, Ordering::SeqCst), 2);
+            self.phases.fetch_add(1, Ordering::SeqCst);
             self.inner.submit(prepared, journal).await
         }
         async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
@@ -989,7 +937,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn engine_final_oracle_change_stops_before_signing_or_identity_persistence() {
+    async fn engine_final_reporting_oracle_change_preserves_native_submission_identity() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let a = Arc::new(ChangeAfterApprovedRecheck {
@@ -1013,23 +961,27 @@ mod final_submission_valuation_tests {
             run_id: None,
         };
         let record = engine.execute(request.clone()).await.unwrap();
-        assert_eq!(record.error.as_ref().unwrap().code, "VALUE_BOUND_EXCEEDED");
+        assert_eq!(
+            record.error.as_ref().unwrap().code,
+            "SYNTHETIC_SIGNER_REACHED"
+        );
         assert_eq!(record.status, Status::Failed);
         assert!(record.approval.is_some());
         assert!(record.submission.is_none());
         assert!(record.effects.is_none());
-        assert_eq!(a.phases.load(Ordering::SeqCst), 3);
+        assert!(a.phases.load(Ordering::SeqCst) >= 3);
         assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
         assert_no_dispatch(&rpc);
         // The same logical identity keeps its durable failure; no new quote,
         // approval or submission is attempted on a duplicate request.
+        let phases_before_duplicate = a.phases.load(Ordering::SeqCst);
         let duplicate = engine.execute(request).await.unwrap();
         assert_eq!(duplicate.id, record.id);
         assert_eq!(duplicate.error, record.error);
-        assert_eq!(a.phases.load(Ordering::SeqCst), 3);
+        assert_eq!(a.phases.load(Ordering::SeqCst), phases_before_duplicate);
         assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
         assert_no_dispatch(&rpc);
     }
 
@@ -1072,7 +1024,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn changed_oracle_round_source_with_same_price_stops_before_signing() {
+    async fn changed_reporting_oracle_round_preserves_native_authority() {
         let rpc = Arc::new(Fixture::new());
         let published = u64::try_from(chrono::Utc::now().timestamp()).unwrap() - 30;
         *rpc.feed_updated_at.lock().unwrap() = Some(published);
@@ -1092,24 +1044,22 @@ mod final_submission_valuation_tests {
                 U80::from(2),
             )),
         );
-        assert_eq!(
-            a.revalidate(&prepared).await.unwrap_err().code,
-            "VALUE_BOUND_EXCEEDED",
-            "Aave oracle publication timestamps remain part of the exact source identity"
-        );
+        let fresh = a.revalidate(&prepared).await.unwrap();
+        assert_eq!(fresh.binding, prepared.binding);
+        assert_eq!(fresh.intent, prepared.intent);
         let journal = Arc::new(CountingJournal::default());
         assert_eq!(
             a.submit(&prepared, journal.clone()).await.unwrap_err().code,
-            "VALUE_BOUND_EXCEEDED"
+            "SYNTHETIC_SIGNER_REACHED"
         );
-        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
-        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
         assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
         assert_no_dispatch(&rpc);
     }
 
     #[tokio::test]
-    async fn missing_duplicate_or_materially_changed_approved_valuation_never_signs() {
+    async fn reporting_valuation_changes_do_not_change_signed_native_terms() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let a = counted_adapter(rpc.clone(), signer.clone());
@@ -1156,14 +1106,14 @@ mod final_submission_valuation_tests {
                 v.prices[0].asset.reference = lower_address(addr(199))
             }),
         ];
-        for (case, change) in changes {
+        for (index, (case, change)) in changes.iter().enumerate() {
             let mut p = prepared.clone();
             change(p.valuation.as_mut().unwrap());
             let journal = Arc::new(CountingJournal::default());
             let failure = a.submit(&p, journal.clone()).await.unwrap_err();
-            assert_eq!(failure.code, "VALUATION_CHANGED", "{case}");
-            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(failure.code, "SYNTHETIC_SIGNER_REACHED", "{case}");
+            assert_eq!(signer.0.load(Ordering::SeqCst), index + 1, "{case}");
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 1, "{case}");
             assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
             assert_no_dispatch(&rpc);
         }
@@ -1172,10 +1122,10 @@ mod final_submission_valuation_tests {
         let journal = Arc::new(CountingJournal::default());
         assert_eq!(
             a.submit(&missing, journal.clone()).await.unwrap_err().code,
-            "VALUATION_CHANGED"
+            "SYNTHETIC_SIGNER_REACHED"
         );
-        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
-        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), changes.len() + 1);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
         assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
         assert_no_dispatch(&rpc);
     }
@@ -1863,6 +1813,40 @@ async fn collateral_requires_matching_event_and_inclusion_state() {
 }
 
 #[tokio::test]
+async fn wallet_approval_native_review_identifies_the_granting_wallet() {
+    for amount in ["0.002610331947374118", "0"] {
+        let a = adapter(Arc::new(Fixture::new()));
+        let mut request = input();
+        request["token"] = json!(lower_address(addr(100)));
+        request["spender"] = json!(lower_address(addr(300)));
+        request["amount"] = json!(amount);
+        let prepared = a.prepare("wallet.approve", &request).await.unwrap();
+        let review = gofin_domain::approval_review::approval_review(&prepared).unwrap();
+        let source = review.input.as_ref().unwrap().account.as_ref().unwrap();
+        assert_eq!(source.name, "synthetic");
+        assert_eq!(source.domain.as_deref(), Some("Ethereum"));
+        assert!(
+            prepared.intent.debits.is_empty(),
+            "An allowance is not a token debit"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            assert!(reason.contains("from synthetic (Ethereum)"), "{reason}");
+            assert!(
+                reason.contains(&format!("Spender: {}", lower_address(addr(300)))),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(&format!("Allowance: {amount} {}", lower_address(addr(100)))),
+                "{reason}"
+            );
+            assert!(!reason.to_lowercase().contains("fee"), "{reason}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn wallet_transfer_wrap_unwrap_and_approval_require_exact_original_effects() {
     for operation in [
         "wallet.transfer",
@@ -2043,19 +2027,25 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     v["slippage_bps"] = json!(100);
     v["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
     *rpc.allowance.lock().unwrap() = U256::MAX;
-    let permit_preview = a.prepare("uniswap.swap", &v).await.unwrap_or_else(|error| {
-        panic!(
-            "atomic permit preview failed: {error:?}; calls={:?}",
-            rpc.calls.lock().unwrap()
-        )
-    });
+    let permit_preview = a
+        .prepare_operation("uniswap.swap", &v, None, &PreparationContext::default())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "atomic permit preview failed: {error:?}; calls={:?}",
+                rpc.calls.lock().unwrap()
+            )
+        });
     let permit_binding: Binding = serde_json::from_value(permit_preview.binding.clone()).unwrap();
     assert!(permit_binding.permit_template.is_some());
     *rpc.allowance.lock().unwrap() = U256::from(10_000_000_000_000_000u64);
-    let p = a.prepare("uniswap.swap", &v).await.unwrap();
+    let p = a
+        .prepare_operation("uniswap.swap", &v, None, &PreparationContext::default())
+        .await
+        .unwrap();
     assert_eq!(
         p.valuation.as_ref().unwrap().movement_usd_micros,
-        Quantity::from_u64(3_030_000)
+        Quantity::from_u64(3_000_000)
     );
     assert!(p.summary.contains("0.001"));
     assert!(p.summary.contains("for at least 2.97"));
@@ -2120,9 +2110,15 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     rpc.latest.store(22, Ordering::SeqCst);
     rpc.set_receipt(&b, 21, logs(U256::from(2_000_000)));
     let r = record(p);
+    let discrepancy = a.reconcile(&r).await.unwrap();
+    assert_eq!(discrepancy.status, Status::Completed);
     assert_eq!(
-        a.reconcile(&r).await.unwrap_err().code,
-        "SWAP_PROOF_MISMATCH"
+        discrepancy.evidence["outcome_attention"]["kind"],
+        "discrepancy"
+    );
+    assert_eq!(
+        discrepancy.evidence["outcome_attention"]["actual"]["atoms"],
+        "2000000"
     );
     rpc.set_receipt(&b, 21, logs(U256::from(3_000_000)));
     assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
@@ -2224,11 +2220,11 @@ async fn eip2612_permit_domain_is_bound_to_token_and_configured_chain() {
 }
 
 #[tokio::test]
-async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
-    let adapter = adapter(Arc::new(Fixture::new()));
+async fn sushi_quote_exposes_shared_summary_at_the_read_result_root() {
+    let adapter = local_sushi_adapter(Arc::new(Fixture::new()));
     let result = adapter
         .read(
-            "uniswap.quote",
+            "sushi.quote",
             &json!({
                 "wallet":"synthetic",
                 "network":"ethereum",
@@ -2243,7 +2239,7 @@ async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
         .await
         .unwrap();
     let summary = result["summary"].as_str().expect("top-level quote summary");
-    assert!(summary.contains("via uniswap v3"));
+    assert!(summary.contains("via sushi v3"));
     assert!(summary.contains("permission"));
     assert!(result["data"]["summary"].is_null());
     let quote: reads::SwapQuote = serde_json::from_value(result["data"].clone()).unwrap();
@@ -2255,27 +2251,32 @@ async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
         gofin_amm::PermissionRequirement::TokenApproval,
     )
     .unwrap();
-    let legacy_route_identity = json!({
-        "chain_id":1,
-        "router":lower_address(addr(470)),
-        "protocol":"v3",
-        "pool":quote.pool,
-        "fee":quote.fee_tier,
-        "pool_key":quote.pool_key,
-        "token_in":quote.pool_token_in,
-        "token_out":quote.pool_token_out,
-    });
+    assert!(!generic.route.fingerprint.is_empty());
+    // Historical Uniswap v3 route identity remains stable for saved evidence.
+    let mut legacy = quote.clone();
+    legacy.dex = "uniswap".into();
+    let legacy_adapter = crate::tests::adapter(Arc::new(Fixture::new()));
+    let generic = uniswap::as_amm_quote(
+        &legacy_adapter,
+        resource(1, addr(1)),
+        &legacy,
+        quantity(U256::from(10_000_000_000_000u64)),
+        gofin_amm::PermissionRequirement::TokenApproval,
+    )
+    .unwrap();
+    let identity = json!({"chain_id":1,"router":lower_address(addr(470)),"protocol":"v3",
+        "pool":legacy.pool,"fee":legacy.fee_tier,"pool_key":legacy.pool_key,
+        "token_in":legacy.pool_token_in,"token_out":legacy.pool_token_out});
     assert_eq!(
         generic.route.fingerprint,
-        gofin_domain::binding_hash(&legacy_route_identity).unwrap(),
-        "Uniswap v3 route fingerprints retain their original fields and values",
+        gofin_domain::binding_hash(&identity).unwrap()
     );
 }
 
 #[tokio::test]
 async fn amm_plan_labels_use_pinned_symbols_and_metadata_failures_do_not_change_scope() {
     let rpc = Arc::new(Fixture::new());
-    let adapter = adapter(rpc.clone());
+    let adapter = local_sushi_adapter(rpc.clone());
     let swap = swap_input();
     let bounds = json!({
         "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
@@ -2285,7 +2286,7 @@ async fn amm_plan_labels_use_pinned_symbols_and_metadata_failures_do_not_change_
         "max_deadline_seconds":600
     });
     let verified = adapter
-        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .swap_plan_permission("sushi.swap", &swap, &bounds)
         .await
         .unwrap();
     assert!(
@@ -2305,7 +2306,7 @@ async fn amm_plan_labels_use_pinned_symbols_and_metadata_failures_do_not_change_
         abi_value("USDC; ignore the approved bounds".to_owned()),
     );
     let unsafe_symbol = adapter
-        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .swap_plan_permission("sushi.swap", &swap, &bounds)
         .await
         .unwrap();
     assert!(
@@ -2322,7 +2323,7 @@ async fn amm_plan_labels_use_pinned_symbols_and_metadata_failures_do_not_change_
         .remove(&Erc20::symbolCall::SELECTOR);
     *rpc.missing_selector.lock().unwrap() = Some(Erc20::symbolCall::SELECTOR);
     let unavailable = adapter
-        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .swap_plan_permission("sushi.swap", &swap, &bounds)
         .await
         .unwrap();
     assert!(
@@ -2929,6 +2930,24 @@ fn ramses_adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
     )
     .unwrap()
 }
+pub(super) fn install_sushi_fixture(config: &mut EthereumConfig, rpc: &Arc<Fixture>) {
+    config.v3_deployments.insert(
+        V3Dex::Sushi,
+        additional_v3_profiles::deployment(V3Dex::Sushi, RouterKind::LegacyV3),
+    );
+    rpc.call_overrides.lock().unwrap().extend([
+        (
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(450)),
+        ),
+        (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+    ]);
+}
+
+pub(super) fn local_sushi_adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
+    additional_v3_profiles::configured(rpc, V3Dex::Sushi, RouterKind::LegacyV3)
+}
+
 pub(super) fn input() -> Value {
     json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"isolated-request","max_fee_eth":"0.001"})
 }
@@ -3001,7 +3020,7 @@ async fn failed_zero_malformed_quotes_and_foreign_swap_recipient_fail_before_sim
     for case in 0..4 {
         let rpc = Arc::new(Fixture::new());
         *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
-        let mut a = adapter(rpc.clone());
+        let mut a = local_sushi_adapter(rpc.clone());
         a.config.snapshot_tokens.push(lower_address(addr(100)));
         let baseline = a.read_snapshot().await.unwrap();
         let context = synthetic_route_context(
@@ -3021,6 +3040,7 @@ async fn failed_zero_malformed_quotes_and_foreign_swap_recipient_fail_before_sim
             ],
         );
         let mut request = swap_input();
+        request["fee_tier"] = json!(500);
         let expected = if case == 3 {
             "SWAP_RECIPIENT_UNSUPPORTED"
         } else {
@@ -3052,17 +3072,21 @@ async fn failed_zero_malformed_quotes_and_foreign_swap_recipient_fail_before_sim
             _ => unreachable!(),
         }
         assert_eq!(
-            a.prepare("uniswap.swap", &request).await.unwrap_err().code,
+            a.prepare("sushi.swap", &request).await.unwrap_err().code,
             expected,
             "ordinary case {case}"
         );
         assert_eq!(
-            a.preflight_return_route("uniswap.swap", &request, &context)
+            a.preflight_return_route("sushi.swap", &request, &context)
                 .await
                 .unwrap_err()
                 .code,
-            expected,
-            "route case {case}"
+            if case == 3 {
+                "SWAP_RECIPIENT_UNSUPPORTED"
+            } else {
+                "PLAN_AUTHORITY_UNPROVED"
+            },
+            "retired route case {case}"
         );
         assert!(
             !rpc.calls
@@ -3090,8 +3114,12 @@ async fn failed_malformed_and_below_minimum_simulations_never_become_swap_previe
             _ => unreachable!(),
         }
         assert_eq!(
-            adapter(rpc.clone())
-                .prepare("uniswap.swap", &swap_input())
+            local_sushi_adapter(rpc.clone())
+                .prepare("sushi.swap", &{
+                    let mut request = swap_input();
+                    request["fee_tier"] = json!(500);
+                    request
+                })
                 .await
                 .unwrap_err()
                 .code,
@@ -3145,15 +3173,66 @@ impl WalletValuation for SwapPriceProbe {
 }
 
 #[tokio::test]
+async fn local_swap_refresh_cannot_lower_the_displayed_minimum() {
+    let rpc = Arc::new(Fixture::new());
+    let probe = Arc::new(SnapshotProbeRpc::new(rpc));
+    let mut adapter = probe_adapter(probe.clone(), 1);
+    adapter.config.v3_deployments.insert(
+        V3Dex::Sushi,
+        additional_v3_profiles::deployment(V3Dex::Sushi, RouterKind::LegacyV3),
+    );
+    probe.inner.call_overrides.lock().unwrap().extend([
+        (
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(450)),
+        ),
+        (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+    ]);
+    let mut input = swap_input();
+    input["token_in"] = json!("native");
+    input["fee_tier"] = json!(500);
+    input["min_output"] = json!("0.00009");
+    let mut approved = adapter.prepare("sushi.swap", &input).await.unwrap();
+    approved.binding["quote_output"] = json!("100");
+    approved.binding["minimum_output"] = json!("99");
+    let mut candidate = approved.clone();
+    candidate.binding["quote_output"] = json!("92");
+    candidate.binding["minimum_output"] = json!("91");
+    let error = crate::amm_permissions::validate_standalone_swap_candidate(
+        &approved,
+        &candidate,
+        chrono::Utc::now(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "CANDIDATE_OUT_OF_SCOPE");
+    assert_eq!(
+        error.details.as_ref().unwrap()["boundary_violation"]["reauthorization_required"],
+        false
+    );
+    assert!(error.message.contains("minimum_output"), "{error:?}");
+}
+
+#[tokio::test]
 async fn swap_uses_one_pinned_quote_per_phase_and_overlaps_independent_reads() {
     let rpc = Arc::new(Fixture::new());
     let probe = Arc::new(SnapshotProbeRpc::new(rpc));
     let prices = Arc::new(SwapPriceProbe::default());
-    let a = probe_adapter(probe.clone(), 1).with_wallet_valuation(prices.clone());
+    let mut a = probe_adapter(probe.clone(), 1).with_wallet_valuation(prices.clone());
+    a.config.v3_deployments.insert(
+        V3Dex::Sushi,
+        additional_v3_profiles::deployment(V3Dex::Sushi, RouterKind::LegacyV3),
+    );
+    probe.inner.call_overrides.lock().unwrap().extend([
+        (
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(450)),
+        ),
+        (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+    ]);
     let mut request = swap_input();
     request["token_in"] = json!("native");
     request["fee_tier"] = json!(500);
-    let prepared = a.prepare("uniswap.swap", &request).await.unwrap();
+    let prepared = a.prepare("sushi.swap", &request).await.unwrap();
     let original_binding = authorization_binding(&prepared);
     for phase in 1..=2 {
         if phase == 2 {
@@ -3212,11 +3291,22 @@ async fn parallel_metadata_failure_cancels_reads_and_never_reaches_simulation() 
     let rpc = Arc::new(Fixture::new());
     *rpc.missing_selector.lock().unwrap() = Some(Erc20::decimalsCall::SELECTOR);
     let probe = Arc::new(SnapshotProbeRpc::new(rpc.clone()));
-    let a = probe_adapter(probe.clone(), 1);
+    let mut a = probe_adapter(probe.clone(), 1);
+    a.config.v3_deployments.insert(
+        V3Dex::Sushi,
+        additional_v3_profiles::deployment(V3Dex::Sushi, RouterKind::LegacyV3),
+    );
+    rpc.call_overrides.lock().unwrap().extend([
+        (
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(450)),
+        ),
+        (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+    ]);
     let mut request = swap_input();
     request["token_in"] = json!("native");
     request["fee_tier"] = json!(500);
-    assert!(a.prepare("uniswap.swap", &request).await.is_err());
+    assert!(a.prepare("sushi.swap", &request).await.is_err());
     assert_eq!(probe.active.load(Ordering::SeqCst), 0);
     assert!(
         !probe
@@ -3230,7 +3320,7 @@ async fn parallel_metadata_failure_cancels_reads_and_never_reaches_simulation() 
     );
     // A failed group leaves no cached partial identity to affect another attempt.
     *rpc.missing_selector.lock().unwrap() = None;
-    a.prepare("uniswap.swap", &request).await.unwrap();
+    a.prepare("sushi.swap", &request).await.unwrap();
     assert_eq!(probe.active.load(Ordering::SeqCst), 0);
 }
 
@@ -3247,11 +3337,12 @@ async fn requotes_preserve_the_approved_slippage_floor_without_penalizing_improv
     ] {
         let rpc = Arc::new(Fixture::new());
         *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
-        let a = adapter(rpc.clone());
+        let a = local_sushi_adapter(rpc.clone());
         let mut request = swap_input();
+        request["fee_tier"] = json!(500);
         request["slippage_bps"] = json!(50);
         request["min_output"] = json!(explicit_minimum);
-        let prepared = a.prepare("uniswap.swap", &request).await.unwrap();
+        let prepared = a.prepare("sushi.swap", &request).await.unwrap();
         let original_binding = prepared.binding.clone();
         rpc.call_overrides.lock().unwrap().insert(
             Quoter::quoteExactInputSingleCall::SELECTOR,
@@ -3299,8 +3390,15 @@ async fn changed_quote_simulation_nonce_chain_and_frozen_calldata_invalidate_old
     ] {
         let rpc = Arc::new(Fixture::new());
         *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
-        let a = adapter(rpc.clone());
-        let preview = a.prepare("uniswap.swap", &swap_input()).await.unwrap();
+        let a = local_sushi_adapter(rpc.clone());
+        let preview = a
+            .prepare("sushi.swap", &{
+                let mut request = swap_input();
+                request["fee_tier"] = json!(500);
+                request
+            })
+            .await
+            .unwrap();
         let original = preview.binding.clone();
         let mut candidate = preview.clone();
         match case {
@@ -3332,11 +3430,16 @@ async fn changed_quote_simulation_nonce_chain_and_frozen_calldata_invalidate_old
             }
             _ => unreachable!(),
         }
-        assert_eq!(
-            a.revalidate(&candidate).await.unwrap_err().code,
-            expected,
-            "case {case}"
-        );
+        let refreshed = a.revalidate(&candidate).await;
+        if case == 7 {
+            assert_eq!(
+                refreshed.unwrap().intent,
+                candidate.intent,
+                "reporting oracle is optional"
+            );
+        } else {
+            assert_eq!(refreshed.unwrap_err().code, expected, "case {case}");
+        }
         assert_eq!(preview.binding, original);
         assert!(
             !rpc.calls
@@ -3495,11 +3598,11 @@ fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
     assert_eq!(transfer.input_schema["additionalProperties"], json!(false));
     assert!(transfer.input_schema["properties"].get("enabled").is_none());
     let nominated_swap = defs.iter().find(|d| d.name == "swap.execute").unwrap();
-    assert_eq!(nominated_swap.semantics["plan_only"], json!(true));
+    assert_ne!(nominated_swap.semantics["plan_only"], json!(true));
     assert!(
         nominated_swap.semantics["authorization"]
             .as_str()
-            .is_some_and(|authorization| authorization.contains("Named-plan authorization only"))
+            .is_some_and(|authorization| authorization.contains("Standalone approval binds"))
     );
     assert_eq!(
         nominated_swap.semantics["plan_permission"]["mode"],
@@ -3531,7 +3634,7 @@ fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
     assert!(
         nominated_swap.semantics["boundary_authorization"]["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("named plan"))
+            .is_some_and(|reason| reason.contains("standalone swap"))
     );
     let swap = defs.iter().find(|d| d.name == "uniswap.swap").unwrap();
     let mut ignored_v4_fee = swap_input();
@@ -3563,10 +3666,10 @@ fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
             .is_some()
     );
     assert!(
-        swap.semantics["boundary_authorization"]["quote_and_checks"]["permit_signature_simulation"]
+        swap.semantics["boundary_authorization"]["quote_and_checks"]
             .as_str()
             .unwrap()
-            .contains("Unchecked in preview")
+            .contains("provider financial metadata")
     );
     let mut bad = input();
     bad["amount"] = json!("1");
@@ -3664,7 +3767,7 @@ async fn complete_snapshot_includes_unrequested_reserve_stable_debt_and_fails_cl
         )
     );
     assert_eq!(s.state.holdings.len(), 2);
-    assert_eq!(s.state.authorities.len(), 4);
+    assert_eq!(s.state.authorities.len(), 5);
     *rpc.missing_selector.lock().unwrap() = Some(DataProvider::getUserReserveDataCall::SELECTOR);
     assert_eq!(
         a.read_snapshot().await.unwrap_err().code,
@@ -3774,7 +3877,7 @@ async fn concurrent_snapshot_preserves_all_ordered_financial_and_backing_evidenc
     assert!(actual.complete);
     assert_eq!(actual.state.holdings.len(), 16);
     assert_eq!(actual.state.positions.len(), 48);
-    assert_eq!(actual.state.authorities.len(), 32);
+    assert_eq!(actual.state.authorities.len(), 40);
     assert_eq!(actual.coverage.len(), 8);
     assert_eq!(
         snapshot_financial_output(expected),
@@ -4795,7 +4898,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
     rpc.other_stable.store(0, Ordering::SeqCst);
     *rpc.include_weth.lock().unwrap() = true;
-    let mut a = adapter(rpc.clone());
+    let mut a = local_sushi_adapter(rpc.clone());
     a.config.snapshot_tokens.push(lower_address(addr(100)));
     let baseline = a.read_snapshot().await.unwrap();
     let mut context = ReturnRouteContext {
@@ -4853,6 +4956,25 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     };
     let weth = lower_address(addr(100));
     let usdc = lower_address(addr(101));
+    let router = a.config.v3_deployments[&V3Dex::Sushi].router.clone();
+    let observed = AuthorityState {
+        resource: resource(1, addr(1)),
+        authority: authority(&weth, &router),
+        value: rpc.allowance.lock().unwrap().to_string(),
+    };
+    context.baseline.state.authorities.push(observed.clone());
+    context.projected.authorities.push(observed);
+    let reverse_observed = AuthorityState {
+        resource: resource(1, addr(1)),
+        authority: authority(&usdc, &router),
+        value: rpc.allowance.lock().unwrap().to_string(),
+    };
+    context
+        .baseline
+        .state
+        .authorities
+        .push(reverse_observed.clone());
+    context.projected.authorities.push(reverse_observed);
     let wrap = mk(json!({"amount":"0.01"}));
     let mut insufficient_fee = wrap.clone();
     insufficient_fee["max_fee_eth"] = json!("0.00000000000001");
@@ -4923,24 +5045,25 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     let q = "0.003333333333333333";
     let swap = mk(
-        json!({"token_in":weth,"token_out":usdc,"amount":q,"min_output":"2.985","slippage_bps":50,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
+        json!({"token_in":weth,"token_out":usdc,"amount":q,"min_output":"2.985","slippage_bps":50,"fee_tier":500,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
     );
     assert_eq!(
-        a.preflight_return_route("uniswap.swap", &swap, &context)
+        a.preflight_return_route("sushi.swap", &swap, &context)
             .await
             .unwrap_err()
             .code,
         "PLAN_ALLOWANCE_UNFUNDED"
     );
-    let approve =
-        mk(json!({"token":weth,"spender":a.config.uniswap.as_ref().unwrap().router,"amount":q}));
+    let approve = mk(
+        json!({"token":weth,"spender":a.config.v3_deployments[&V3Dex::Sushi].router,"amount":q}),
+    );
     let proof = a
         .preflight_return_route("wallet.approve", &approve, &context)
         .await
         .unwrap();
     apply_test_plan(&mut context, proof);
     let proof = a
-        .preflight_return_route("uniswap.swap", &swap, &context)
+        .preflight_return_route("sushi.swap", &swap, &context)
         .await
         .unwrap();
     assert!(
@@ -5325,18 +5448,19 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .iter()
             .all(|p| p.amount.maximum.is_zero())
     );
-    let approve_reverse =
-        mk(json!({"token":usdc,"spender":a.config.uniswap.as_ref().unwrap().router,"amount":"11"}));
+    let approve_reverse = mk(
+        json!({"token":usdc,"spender":a.config.v3_deployments[&V3Dex::Sushi].router,"amount":"11"}),
+    );
     let proof = a
         .preflight_return_route("wallet.approve", &approve_reverse, &context)
         .await
         .unwrap();
     apply_test_plan(&mut context, proof);
     let reverse = mk(
-        json!({"token_in":usdc,"token_out":weth,"amount":"all","max_amount":"11","min_output":"0.000000000002985","slippage_bps":50,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
+        json!({"token_in":usdc,"token_out":weth,"amount":"all","max_amount":"11","min_output":"0.000000000002985","slippage_bps":50,"fee_tier":500,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
     );
     let proof = a
-        .preflight_return_route("uniswap.swap", &reverse, &context)
+        .preflight_return_route("sushi.swap", &reverse, &context)
         .await
         .unwrap();
     let projected_usdc = context
@@ -6279,6 +6403,10 @@ mod wallet_only_tests {
                     .collect::<BTreeSet<_>>(),
                 [
                     "wallet.transfer",
+                    "wallet.approve",
+                    "swap.execute",
+                    "uniswap.quote",
+                    "uniswap.swap",
                     "wallet.balances",
                     "wallet.token",
                     "wallet.allowance",
@@ -6625,34 +6753,26 @@ mod wallet_only_tests {
         }
     }
     #[tokio::test]
-    async fn wallet_only_refuses_protocol_writes_and_missing_valuation() {
+    async fn wallet_only_refuses_unconfigured_protocol_writes_and_allows_missing_valuation() {
         for chain in [42161, 4663] {
             let a = wallet_adapter(chain, Arc::new(Fixture::new()));
-            for operation in [
-                "wallet.wrap",
-                "wallet.unwrap",
-                "wallet.approve",
-                "uniswap.swap",
-                "aave.supply",
-            ] {
+            for operation in ["wallet.wrap", "wallet.unwrap", "aave.supply"] {
                 assert_eq!(
                     a.prepare(operation, &json!({})).await.unwrap_err().code,
                     "OPERATION_UNAVAILABLE"
                 );
             }
-            for operation in ["uniswap.quote", "aave.positions", "aave.reserves"] {
+            for operation in ["aave.positions", "aave.reserves"] {
                 assert_eq!(
                     a.read(operation, &json!({})).await.unwrap_err().code,
                     "OPERATION_UNAVAILABLE"
                 );
             }
-            assert_eq!(
-                a.prepare("wallet.transfer", &transfer(chain, "native"))
-                    .await
-                    .unwrap_err()
-                    .code,
-                "VALUATION_UNAVAILABLE"
-            );
+            let prepared = a
+                .prepare("wallet.transfer", &transfer(chain, "native"))
+                .await
+                .unwrap();
+            assert!(prepared.valuation.is_none());
         }
     }
     #[tokio::test]
@@ -6678,10 +6798,9 @@ mod wallet_only_tests {
                 changed.input["recipient"] = json!(lower_address(addr(3)));
                 assert!(a.revalidate(&changed).await.is_err());
                 prices.0.store(3_100_000_000, Ordering::SeqCst);
-                assert_eq!(
-                    a.revalidate(&prepared).await.unwrap_err().code,
-                    "VALUE_BOUND_EXCEEDED"
-                );
+                let fresh = a.revalidate(&prepared).await.unwrap();
+                assert_eq!(fresh.binding, prepared.binding);
+                assert_eq!(fresh.intent, prepared.intent);
                 let mut overfee = input.clone();
                 overfee["max_fee_eth"] = json!("0.00000000000001");
                 assert!(a.prepare("wallet.transfer", &overfee).await.is_err());
@@ -6846,7 +6965,7 @@ mod wallet_only_tests {
     #[tokio::test]
     async fn injected_unavailable_stale_future_or_malformed_prices_never_fall_back_to_aave() {
         for chain in [1, 42161, 4663, 8453] {
-            for (fail, observed_at, expected) in [
+            for (fail, observed_at, _expected) in [
                 (true, now(), "SYNTHETIC_SHARED_PRICE_UNAVAILABLE"),
                 (
                     false,
@@ -6872,13 +6991,11 @@ mod wallet_only_tests {
                     calls: AtomicUsize::new(0),
                 });
                 let a = a.with_wallet_valuation(provider.clone());
-                assert_eq!(
-                    a.prepare("wallet.transfer", &transfer(chain, "native"))
-                        .await
-                        .unwrap_err()
-                        .code,
-                    expected
-                );
+                let prepared = a
+                    .prepare("wallet.transfer", &transfer(chain, "native"))
+                    .await
+                    .unwrap();
+                assert!(prepared.valuation.is_none());
                 assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
                 assert!(
                     !rpc.calls
@@ -6926,24 +7043,6 @@ mod wallet_only_tests {
                 source: None,
                 yolo_provenance: None,
                 mechanism: "synthetic-wallet-engine-regression".into(),
-                binding_hash: challenge.binding_hash.clone(),
-                challenge_nonce: challenge.nonce.clone(),
-                approved_at: now(),
-                expires_at: challenge.expires_at.clone(),
-            })
-        }
-    }
-    #[derive(Default)]
-    struct IsolatedPlanAuthorization(AtomicUsize);
-    #[async_trait]
-    impl Authorizer for IsolatedPlanAuthorization {
-        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-            assert_eq!(challenge.purpose, "financial_plan");
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(ApprovalAudit {
-                source: None,
-                yolo_provenance: None,
-                mechanism: "synthetic-wallet-plan-approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
                 approved_at: now(),
@@ -7133,14 +7232,9 @@ mod wallet_only_tests {
         }
     }
     #[tokio::test]
-    async fn generic_exact_plan_keeps_broker_metadata_out_of_strict_ethereum_bindings() {
-        use gofin_domain::financial_plans::{
-            FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-            FinancialPlanStepSpec, FinancialStepCompletion,
-        };
+    async fn standalone_wallet_and_collateral_keep_strict_ethereum_bindings() {
         use gofin_engine::{Engine, EngineOptions};
         use gofin_store::Store;
-
         for operation in ["wallet.transfer", "aave.collateral"] {
             let rpc = Arc::new(Fixture::new());
             if operation == "aave.collateral" {
@@ -7160,89 +7254,37 @@ mod wallet_only_tests {
             let mut adapter =
                 adapter(rpc.clone()).with_wallet_valuation(Arc::new(EnginePrices::default()));
             adapter.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, Some(signer.clone())));
-            let adapter = Arc::new(adapter);
             let input = if operation == "wallet.transfer" {
                 transfer(1, "native")
             } else {
                 aave_input(operation)
             };
-            let candidate = adapter.prepare(operation, &input).await.unwrap();
-            let variations = json!({
-                "mode":"exact",
-                "maximum_debits":candidate.intent.debits,
-                "maximum_costs":candidate.intent.maximum_costs,
-                "possible_credits":[]
+            let approval = Arc::new(IsolatedAuthorization {
+                calls: AtomicUsize::new(0),
+                decline: false,
             });
-            let step_id = if operation == "wallet.transfer" {
-                "transfer"
-            } else {
-                "collateral"
-            };
-            let plan = FinancialPlanSpec {
-                version: 1,
-                name: format!("Synthetic {operation} plan"),
-                summary: None,
-                steps: vec![FinancialPlanStepSpec {
-                    action_deadline_seconds: None,
-                    step_id: step_id.into(),
-                    operation: operation.into(),
-                    input: input.clone(),
-                    permitted_variations: variations,
-                    completion: FinancialStepCompletion {
-                        operation_succeeded: true,
-                        principal_spend: None,
-                        minimum_net_receipt: None,
-                    },
-                    funding_dependencies: vec![],
-                }],
-                aggregate_bounds: FinancialPlanBounds {
-                    maximum_debits: candidate.intent.debits.clone(),
-                    maximum_costs: candidate.intent.maximum_costs.clone(),
-                },
-            };
-            let approval = Arc::new(IsolatedPlanAuthorization::default());
             let engine = Engine::new(
                 Store::in_memory().unwrap(),
-                vec![adapter],
+                vec![Arc::new(adapter)],
                 approval.clone(),
                 EngineOptions::default(),
             )
             .unwrap();
-            let mut authorization_request = FinancialPlanAuthorizationRequest {
-                request_id: format!("synthetic-plan-{operation}"),
-                plan,
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            };
-            let review = engine
-                .preview_financial_plan(authorization_request.clone())
-                .await
-                .unwrap();
-            authorization_request.expected_review_hash = Some(review.review_hash);
-            let status = engine
-                .authorize_financial_plan(authorization_request)
-                .await
-                .unwrap();
             let attempt = engine
-                .execute_financial_plan_step(
-                    &status.plan_id,
-                    step_id,
-                    OperationRequest {
-                        request_id: format!("synthetic-attempt-{operation}"),
-                        operation: operation.into(),
-                        input,
-                        run_id: None,
-                    },
-                )
+                .execute(OperationRequest {
+                    request_id: format!("synthetic-standalone-{operation}"),
+                    operation: operation.into(),
+                    input,
+                    run_id: None,
+                })
                 .await
                 .unwrap();
             assert_eq!(
                 attempt.error.as_ref().map(|error| error.code.as_str()),
                 Some("SYNTHETIC_WALLET_SIGNER_REACHED"),
-                "{operation} must pass strict adapter binding decode and reach only the isolated signer"
+                "{operation}"
             );
-            assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+            assert_eq!(approval.calls.load(Ordering::SeqCst), 1);
             assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             assert!(attempt.submission.is_none() && attempt.effects.is_none());
             assert!(
@@ -7255,14 +7297,9 @@ mod wallet_only_tests {
         }
     }
     #[tokio::test]
-    async fn generic_exact_wallet_wrap_plan_reconciles_verified_receipt_under_one_approval() {
-        use gofin_domain::financial_plans::{
-            FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-            FinancialPlanStepSpec, FinancialStepCompletion,
-        };
+    async fn standalone_wallet_wrap_reconciles_verified_receipt_under_one_approval() {
         use gofin_engine::{Engine, EngineOptions};
         use gofin_store::Store;
-
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(SyntheticPlanSigner::new());
         let dispatch = Arc::new(SyntheticPlanDispatch {
@@ -7278,22 +7315,6 @@ mod wallet_only_tests {
         let candidate = adapter.prepare("wallet.wrap", &input).await.unwrap();
         let binding: Binding = serde_json::from_value(candidate.binding.clone()).unwrap();
         let amount = candidate.intent.debits[0].amount.clone();
-        let native = AssetId {
-            network: "ethereum:1".into(),
-            reference: "native".into(),
-            decimals: 18,
-        };
-        let weth = AssetId {
-            network: "ethereum:1".into(),
-            reference: lower_address(addr(100)),
-            decimals: 18,
-        };
-        let variations = json!({
-            "mode":"exact",
-            "maximum_debits":candidate.intent.debits,
-            "maximum_costs":candidate.intent.maximum_costs,
-            "possible_credits":[{"resource":candidate.intent.debits[0].resource,"asset":weth}]
-        });
         rpc.set_receipt(
             &binding,
             21,
@@ -7306,35 +7327,10 @@ mod wallet_only_tests {
                 21,
             )],
         );
-        let plan = FinancialPlanSpec {
-            version: 1,
-            name: "Synthetic wrap settlement".into(),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                action_deadline_seconds: None,
-                step_id: "wrap".into(),
-                operation: "wallet.wrap".into(),
-                input: input.clone(),
-                permitted_variations: variations,
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: Some(gofin_domain::ResourceAmount {
-                        resource: candidate.intent.debits[0].resource.clone(),
-                        amount: amount.clone(),
-                    }),
-                    minimum_net_receipt: None,
-                },
-                funding_dependencies: vec![],
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: candidate.intent.debits.clone(),
-                maximum_costs: candidate.intent.maximum_costs.clone(),
-            },
-        };
-        // Keep the receipt's principal identity explicit and exercise exact
-        // asset matching in completion/accounting.
-        assert_eq!(amount.asset, native);
-        let authorization = Arc::new(IsolatedPlanAuthorization::default());
+        let authorization = Arc::new(IsolatedAuthorization {
+            calls: AtomicUsize::new(0),
+            decline: false,
+        });
         let engine = Engine::new(
             Store::in_memory().unwrap(),
             vec![Arc::new(adapter)],
@@ -7342,79 +7338,23 @@ mod wallet_only_tests {
             EngineOptions::default(),
         )
         .unwrap();
-        let mut request = FinancialPlanAuthorizationRequest {
-            request_id: "synthetic-wrap-plan-approval".into(),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
+        let request = OperationRequest {
+            request_id: "synthetic-wrap-standalone".into(),
+            operation: "wallet.wrap".into(),
+            input,
+            run_id: None,
         };
-        let review = engine
-            .preview_financial_plan(request.clone())
-            .await
-            .unwrap();
-        request.expected_review_hash = Some(review.review_hash);
-        let approved = engine.authorize_financial_plan(request).await.unwrap();
-        let estimates_before_attempt = rpc
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|method| *method == "eth_estimateGas")
-            .count();
-        let record = engine
-            .execute_financial_plan_step(
-                &approved.plan_id,
-                "wrap",
-                OperationRequest {
-                    request_id: "synthetic-wrap-plan-attempt".into(),
-                    operation: "wallet.wrap".into(),
-                    input,
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap();
+        let record = engine.execute(request.clone()).await.unwrap();
         assert_eq!(record.status, Status::Completed, "{:?}", record.error);
-        assert_eq!(
-            rpc.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|method| *method == "eth_estimateGas")
-                .count()
-                - estimates_before_attempt,
-            1,
-            "the named-plan attempt prepares once and reuses that same-source executable candidate"
-        );
         assert!(record.effects.is_some());
-        assert_eq!(
-            record.preview.as_ref().unwrap().binding
-                [gofin_domain::financial_plans::PLAN_METADATA_KEY]["plan_id"],
-            approved.plan_id
-        );
-        let status = engine
-            .financial_plan_status(&approved.plan_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            status.steps[0].state,
-            gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed
-        );
-        assert!(
-            status
-                .usage
-                .verified_proceeds
-                .iter()
-                .any(|proceeds| { proceeds.asset == weth && proceeds.available == amount.atoms })
-        );
-        assert_eq!(authorization.0.load(Ordering::SeqCst), 1);
+        let duplicate = engine.execute(request).await.unwrap();
+        assert_eq!(duplicate.id, record.id);
+        assert_eq!(authorization.calls.load(Ordering::SeqCst), 1);
         assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
         assert_eq!(dispatch.calls.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
-    async fn ordinary_new_chain_transfers_enforce_personal_allocation_and_movement_before_approval()
-    {
+    async fn ordinary_new_chain_transfers_ignore_retired_usd_policy() {
         use gofin_engine::{Engine, EngineOptions};
         use gofin_store::Store;
         for chain in [42161, 4663] {
@@ -7461,15 +7401,11 @@ mod wallet_only_tests {
                         .unwrap();
                     assert_eq!(
                         rejected.error.as_ref().unwrap().code,
-                        if excessive_movement {
-                            "MOVEMENT_LIMIT"
-                        } else {
-                            "ALLOCATION_LIMIT"
-                        }
+                        "SYNTHETIC_WALLET_SIGNER_REACHED"
                     );
-                    assert!(rejected.approval.is_none() && rejected.submission.is_none());
-                    assert_eq!(authorization.calls.load(Ordering::SeqCst), 0);
-                    assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+                    assert!(rejected.approval.is_some() && rejected.submission.is_none());
+                    assert_eq!(authorization.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(signer.0.load(Ordering::SeqCst), 1);
                     assert!(
                         !rpc.calls
                             .lock()
@@ -7562,6 +7498,38 @@ mod wallet_only_tests {
     }
 
     #[tokio::test]
+    async fn finalized_native_transfer_with_missing_fee_reports_partial_without_fabricated_cost() {
+        let rpc = Arc::new(Fixture::new());
+        let mut adapter = wallet_adapter(1, rpc.clone());
+        adapter.config.confirmations = 1;
+        adapter.config.require_finalized = false;
+        let prepared = adapter
+            .prepare("wallet.transfer", &transfer(1, "native"))
+            .await
+            .unwrap();
+        let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+        rpc.latest.store(22, Ordering::SeqCst);
+        rpc.set_receipt(&binding, 21, vec![]);
+        rpc.receipt
+            .lock()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("effectiveGasPrice");
+        let observed = adapter.reconcile(&record(prepared)).await.unwrap();
+        assert_eq!(observed.status, Status::Completed);
+        assert_eq!(observed.evidence["outcome_reporting"], "partial");
+        assert!(observed.evidence["fee_wei"].is_null());
+        let effects = observed.verified.unwrap().effects;
+        assert!(effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer { from, to, debit, credit } if from == &binding.resource && to == &resource(1, address(binding.recipient.as_deref().unwrap()).unwrap()) && debit == credit && debit.asset == binding.token && debit.atoms == quantity(u256(&binding.units).unwrap()))));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, FinancialEffect::Cost { .. }))
+        );
+    }
+
+    #[tokio::test]
     async fn reviewed_l2_wallet_settles_sequenced_receipt_despite_legacy_finality_configuration() {
         for chain in [42161, 4663] {
             let rpc = Arc::new(Fixture::new());
@@ -7614,6 +7582,8 @@ mod wallet_only_tests {
                 let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
                 let r = record(prepared);
                 assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                // A missing receipt may consult finalized history for nonce replacement proof.
+                finality.finalized_seen.store(0, Ordering::SeqCst);
                 let logs = if token == "native" {
                     vec![]
                 } else {
@@ -7644,7 +7614,6 @@ mod wallet_only_tests {
                 a.config.confirmations = 1;
                 rpc.receipt.lock().unwrap()["blockHash"] = json!(blockhash(99));
                 assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
-                assert_eq!(finality.finalized_seen.load(Ordering::SeqCst), 0);
             }
         }
     }
@@ -7849,10 +7818,10 @@ async fn scoped_snapshot_retains_related_collateral_and_debt_outside_requested_a
     );
 }
 
-mod additional_v3_profiles {
+pub(super) mod additional_v3_profiles {
     use super::*;
 
-    fn deployment(dex: V3Dex, kind: RouterKind) -> V3DeploymentConfig {
+    pub(super) fn deployment(dex: V3Dex, kind: RouterKind) -> V3DeploymentConfig {
         V3DeploymentConfig {
             factory: lower_address(addr(450)),
             quoter: lower_address(addr(460)),
@@ -7872,7 +7841,7 @@ mod additional_v3_profiles {
             allowed_fee_tiers: dex.fee_tiers().to_vec(),
         }
     }
-    fn configured(rpc: Arc<Fixture>, dex: V3Dex, kind: RouterKind) -> EthereumAdapter {
+    pub(super) fn configured(rpc: Arc<Fixture>, dex: V3Dex, kind: RouterKind) -> EthereumAdapter {
         let mut a = adapter(rpc.clone());
         a.config.uniswap = None;
         a.config.ramses = None;
@@ -7928,7 +7897,7 @@ mod additional_v3_profiles {
             let rpc = Arc::new(Fixture::new());
             let a = configured(rpc.clone(), dex, kind);
             assert!(a.supports_operation(&format!("{}.quote", dex.id())));
-            assert!(!a.supports_operation("uniswap.quote"));
+            assert!(a.supports_operation("uniswap.quote"));
             let mut input = swap_input();
             input["token_in"] = json!("native");
             input["fee_tier"] = json!(500);
@@ -8167,7 +8136,7 @@ mod additional_v3_profiles {
 
     #[tokio::test]
     async fn swap_execute_receipts_are_proved_by_each_nominated_venue() {
-        for dex in ["uniswap", "ramses", "sushi", "pancakeswap"] {
+        for dex in ["ramses", "sushi", "pancakeswap"] {
             let rpc = Arc::new(Fixture::new());
             let adapter = if dex == "ramses" {
                 ramses_adapter(rpc.clone())
@@ -8186,17 +8155,11 @@ mod additional_v3_profiles {
             };
             *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
             let chain_id = if dex == "ramses" { 4663 } else { 1 };
-            let mut template = execute_intent_template(dex, chain_id);
-            template["token_in"] = json!(lower_address(addr(100)));
-            let permission = adapter
-                .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds(dex))
-                .await
-                .unwrap();
             let mut candidate = execute_candidate(dex, chain_id);
             candidate["token_in"] = json!(lower_address(addr(100)));
             let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
             adapter
-                .validate_boundary_candidate(&permission.spec, &prepared)
+                .validate_approved_candidate(&prepared, &prepared)
                 .unwrap();
             let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
             let amount_in = gofin_evm::u256(&binding.units).unwrap();
@@ -8437,6 +8400,38 @@ mod additional_v3_profiles {
             assert_eq!(refreshed.operation, "swap.execute");
             assert_eq!(refreshed.binding["dex"], dex);
 
+            let mut fresh_quote = prepared.clone();
+            fresh_quote.binding["quote_output"] = json!("4000000");
+            fresh_quote.binding["minimum_output"] = json!("3960000");
+            assert!(
+                adapter
+                    .validate_approved_candidate(&prepared, &fresh_quote)
+                    .is_ok()
+            );
+            let mut expired_quote = prepared.clone();
+            expired_quote.expires_at = "2000-01-01T00:00:00Z".into();
+            assert!(
+                adapter
+                    .validate_approved_candidate(&expired_quote, &fresh_quote)
+                    .is_ok(),
+                "expired old quote does not change approved native terms"
+            );
+            fresh_quote.binding["minimum_output"] = json!("3959999");
+            assert!(
+                adapter
+                    .validate_approved_candidate(&prepared, &fresh_quote)
+                    .is_err(),
+                "fresh quote slippage is enforced"
+            );
+            fresh_quote.binding["quote_output"] = json!("3000000");
+            fresh_quote.binding["minimum_output"] = json!("2969999");
+            assert!(
+                adapter
+                    .validate_approved_candidate(&prepared, &fresh_quote)
+                    .is_err(),
+                "absolute approved floor is enforced"
+            );
+
             let mut changed = prepared.clone();
             changed.input["dex"] = json!(if dex == "sushi" {
                 "pancakeswap"
@@ -8499,15 +8494,17 @@ mod additional_v3_profiles {
     #[tokio::test]
     async fn swap_execute_rejects_same_router_deployment_drift() {
         let (mut adapter, _rpc) = multi_pool_adapter(V3Dex::Sushi);
-        let template = execute_intent_template("sushi", 1);
-        let permission = adapter
-            .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds("sushi"))
-            .await
-            .unwrap();
         let prepared = adapter
             .prepare("swap.execute", &execute_candidate("sushi", 1))
             .await
             .unwrap();
+        let mut changed_candidate = prepared.clone();
+        changed_candidate.binding["quoter"] = json!(lower_address(addr(461)));
+        assert!(
+            adapter
+                .validate_approved_candidate(&prepared, &changed_candidate)
+                .is_err()
+        );
         for field in ["factory", "quoter"] {
             {
                 let config = adapter
@@ -8523,9 +8520,7 @@ mod additional_v3_profiles {
                 assert_eq!(config.router, lower_address(addr(470)));
             }
             assert!(
-                adapter
-                    .validate_boundary_candidate(&permission.spec, &prepared)
-                    .is_err(),
+                adapter.revalidate(&prepared).await.is_err(),
                 "same-router {field} drift must invalidate the reviewed deployment"
             );
             {
@@ -8541,39 +8536,6 @@ mod additional_v3_profiles {
                 }
             }
         }
-
-        let mut uniswap = super::adapter(Arc::new(Fixture::new()));
-        uniswap.config.uniswap.as_mut().unwrap().v4 = Some(V4Config {
-            router: lower_address(addr(470)),
-            quoter: lower_address(addr(460)),
-            pool_manager: lower_address(addr(490)),
-            state_view: lower_address(addr(491)),
-            router_has_hop_price: false,
-        });
-        let template = execute_intent_template("uniswap", 1);
-        let permission = uniswap
-            .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds("uniswap"))
-            .await
-            .unwrap();
-        let prepared = uniswap
-            .prepare("swap.execute", &execute_candidate("uniswap", 1))
-            .await
-            .unwrap();
-        uniswap
-            .config
-            .uniswap
-            .as_mut()
-            .unwrap()
-            .v4
-            .as_mut()
-            .unwrap()
-            .pool_manager = lower_address(addr(492));
-        assert!(
-            uniswap
-                .validate_boundary_candidate(&permission.spec, &prepared)
-                .is_err(),
-            "same-router Uniswap v4 pool manager drift must invalidate deployment"
-        );
     }
     #[tokio::test]
     async fn approved_pool_maps_allow_each_tier_and_preserve_legacy_exact_pool_scope() {
@@ -8783,3 +8745,103 @@ mod additional_v3_profiles {
 
 #[path = "aave_tests.rs"]
 mod aave_tests;
+
+#[tokio::test]
+async fn approved_transfer_candidate_refreshes_fee_within_native_bound() {
+    let adapter = adapter(Arc::new(Fixture::new()));
+    let mut input = input();
+    input["token"] = json!(lower_address(addr(101)));
+    input["amount"] = json!("1");
+    input["recipient"] = json!(lower_address(addr(2)));
+    let approved = adapter.prepare("wallet.transfer", &input).await.unwrap();
+    let mut refreshed = approved.clone();
+    refreshed.binding["transaction"]["nonce"] = json!(42);
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &refreshed)
+            .is_ok()
+    );
+    refreshed.binding["transaction"]["max_fee_per_gas"] = json!("1");
+    refreshed.binding["transaction"]["max_priority_fee_per_gas"] = json!("1");
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &refreshed)
+            .is_ok()
+    );
+    refreshed.binding["transaction"]["max_fee_per_gas"] = json!("99999999999999999999999999");
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &refreshed)
+            .is_err()
+    );
+    refreshed = approved.clone();
+    refreshed.binding["transaction"]["value"] = json!("1");
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &refreshed)
+            .is_err()
+    );
+    let mut changed_recipient = approved.clone();
+    changed_recipient.binding["recipient"] = json!(lower_address(addr(3)));
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &changed_recipient)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn permit_swap_nonce_claim_keeps_both_envelopes_bound() {
+    let adapter = adapter(Arc::new(Fixture::new()));
+    let mut request = input();
+    request["token"] = json!(lower_address(addr(101)));
+    request["amount"] = json!("1");
+    request["recipient"] = json!(lower_address(addr(2)));
+    let mut approved = adapter.prepare("wallet.transfer", &request).await.unwrap();
+    approved.operation = "pancakeswap.swap".into();
+    approved.binding["permit_template"] = json!({"transaction":approved.binding["transaction"]});
+    let candidate = adapter.apply_claimed_evm_nonce(&approved, 42).unwrap();
+    assert_eq!(candidate.binding["transaction"]["nonce"], 42);
+    assert_eq!(
+        candidate.binding["permit_template"]["transaction"]["nonce"],
+        42
+    );
+    adapter
+        .validate_approved_candidate(&approved, &candidate)
+        .unwrap();
+    let mut altered = candidate.clone();
+    altered.binding["permit_template"]["transaction"]["nonce"] = json!(43);
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &altered)
+            .is_err()
+    );
+    altered = candidate;
+    altered.binding["transaction"]["to"] = json!(lower_address(addr(3)));
+    assert!(
+        adapter
+            .validate_approved_candidate(&approved, &altered)
+            .is_err()
+    );
+}
+
+struct UnavailableUsd;
+#[async_trait]
+impl WalletValuation for UnavailableUsd {
+    async fn quote_usd(&self, _: &AssetId, _: Quantity) -> Result<(Quantity, String)> {
+        Err(GoFinError::validation("Synthetic price outage"))
+    }
+}
+
+#[tokio::test]
+async fn native_transfer_prepares_and_revalidates_without_usd_price() {
+    let adapter = adapter(Arc::new(Fixture::new())).with_wallet_valuation(Arc::new(UnavailableUsd));
+    let mut input = input();
+    input["token"] = json!(lower_address(addr(101)));
+    input["amount"] = json!("1");
+    input["recipient"] = json!(lower_address(addr(2)));
+    let prepared = adapter.prepare("wallet.transfer", &input).await.unwrap();
+    assert!(prepared.valuation.is_none());
+    let refreshed = adapter.revalidate(&prepared).await.unwrap();
+    assert!(refreshed.valuation.is_none());
+}

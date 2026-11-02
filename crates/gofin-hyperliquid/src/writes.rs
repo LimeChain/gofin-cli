@@ -2184,66 +2184,70 @@ impl HyperliquidProfile {
         combine_derivative_expectations(&mut intent)?;
         intent.locks.sort();
         intent.locks.dedup();
-        let price = self.quote_usdc().await?;
-        let mut prices = vec![price.clone()];
-        for scope in &binding.orders {
-            let base = asset(&scope.market.base_asset.reference);
-            if !prices.iter().any(|p| p.asset == base) {
-                prices.push(AssetPrice {
-                    asset: base,
-                    usd_micros_per_unit: Self::value_usdc(&q(&scope.max_price)?, &price)?,
-                    unit_atoms: q("1")?,
-                    observed_at: price.observed_at.clone(),
-                    source: format!(
-                        "{}; {}",
-                        if scope.price_semantics == OrderPriceSemantics::LegacyBand {
-                            "Hyperliquid exact order price ceiling"
-                        } else {
-                            "Hyperliquid approved order accounting valuation"
-                        },
-                        price.source
-                    ),
-                });
-            }
-        }
-        let mut maximum_cost = Quantity::zero();
-        for bound in &intent.maximum_costs {
-            let quote = prices
-                .iter()
-                .find(|p| p.asset == bound.amount.asset)
-                .ok_or_else(|| {
-                    GoFinError::new(
-                        "PRICE_DATA_INVALID",
-                        "valuation",
-                        "A declared cost asset lacks exact USD valuation.",
-                        "Use a supported exact asset price before authorizing this operation.",
-                    )
-                })?;
-            maximum_cost = maximum_cost.checked_add(
-                &bound
-                    .amount
-                    .atoms
-                    .mul_div_ceil(&quote.usd_micros_per_unit, &quote.unit_atoms)?,
-            )?;
-        }
-        let declared = Self::value_usdc(&fee, &price)?;
         if binding
             .orders
             .iter()
             .any(|order| order.price_semantics == OrderPriceSemantics::DirectionalLimitV1)
         {
-            warnings.push("Native perpetual orders permit favorable prices. Notional, fee and loss limits are independently checked after execution; an overrun remains unresolved under the original order identity.".into());
+            warnings.push("Native perpetual orders permit favorable prices. Notional, fee and loss limits are checked after execution; a breach is reported against the original order.".into());
         }
-        let valuation = Valuation {
-            movement_usd_micros: Self::value_usdc(&movement, &price)?,
-            maximum_fee_usd_micros: maximum_cost.max(declared),
-            additional_allocation_usd_micros: Quantity::zero(),
-            observed_at: price.observed_at.clone(),
-            source: price.source.clone(),
-            prices,
-        };
+        let valuation = async {
+            let price = self.quote_usdc().await?;
+            let mut prices = vec![price.clone()];
+            for scope in &binding.orders {
+                let base = asset(&scope.market.base_asset.reference);
+                if !prices.iter().any(|p| p.asset == base) {
+                    prices.push(AssetPrice {
+                        asset: base,
+                        usd_micros_per_unit: Self::value_usdc(&q(&scope.max_price)?, &price)?,
+                        unit_atoms: q("1")?,
+                        observed_at: price.observed_at.clone(),
+                        source: format!(
+                            "{}; {}",
+                            if scope.price_semantics == OrderPriceSemantics::LegacyBand {
+                                "Hyperliquid exact order price ceiling"
+                            } else {
+                                "Hyperliquid approved order accounting valuation"
+                            },
+                            price.source
+                        ),
+                    });
+                }
+            }
+            let mut maximum_cost = Quantity::zero();
+            for bound in &intent.maximum_costs {
+                let quote = prices
+                    .iter()
+                    .find(|p| p.asset == bound.amount.asset)
+                    .ok_or_else(|| {
+                        GoFinError::new(
+                            "PRICE_DATA_INVALID",
+                            "valuation",
+                            "A declared cost asset lacks exact USD valuation.",
+                            "Use a supported exact asset price before authorizing this operation.",
+                        )
+                    })?;
+                maximum_cost = maximum_cost.checked_add(
+                    &bound
+                        .amount
+                        .atoms
+                        .mul_div_ceil(&quote.usd_micros_per_unit, &quote.unit_atoms)?,
+                )?;
+            }
+            let declared = Self::value_usdc(&fee, &price)?;
+            Ok::<Valuation, GoFinError>(Valuation {
+                movement_usd_micros: Self::value_usdc(&movement, &price)?,
+                maximum_fee_usd_micros: maximum_cost.max(declared),
+                additional_allocation_usd_micros: Quantity::zero(),
+                observed_at: price.observed_at.clone(),
+                source: price.source.clone(),
+                prices,
+            })
+        }
+        .await
+        .ok();
         if matches!(binding.action, Action::ScheduledCancel { .. }) {
-            warnings.push("Scheduled cancellation applies to every open order in this execution account, including orders created by another client. Existing GoFin reservations remain until each original order is reconciled.".into());
+            warnings.push("Scheduled cancellation applies to every open order in this execution account, including orders created by another client. Observe each original order separately.".into());
         }
         warnings.push("Venue acceptance is not financial settlement; reconcile the original identity after uncertainty.".into());
         let account = &binding.account;
@@ -2252,23 +2256,7 @@ impl HyperliquidProfile {
             input: raw.clone(),
             binding: serde_json::to_value(&binding)
                 .map_err(|_| native_error("Action binding serialization failed."))?,
-            summary: format!(
-                "{} using {}; {} movement {} USD; {} costs {} USD",
-                action_summary(&binding),
-                account.name,
-                if matches!(binding.action, Action::TwapOrder { .. }) {
-                    "estimated"
-                } else {
-                    "maximum"
-                },
-                valuation.movement_usd_micros.to_decimal(6),
-                if matches!(binding.action, Action::TwapOrder { .. }) {
-                    "estimated"
-                } else {
-                    "maximum"
-                },
-                valuation.maximum_fee_usd_micros.to_decimal(6)
-            ),
+            summary: format!("{} using {}", action_summary(&binding), account.name),
             checks: vec![Check {
                 name: "Exact account and native action".into(),
                 status: CheckStatus::Passed,
@@ -2279,7 +2267,7 @@ impl HyperliquidProfile {
             warnings,
             observed_at: now(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             operation_version: 1,
             action_deadline: None,

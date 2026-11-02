@@ -118,44 +118,6 @@ pub(super) fn validate_projected_origins(
     check_terminal(&lots, &state, &selected, proofs, prices, reserve_usd_micros)
 }
 
-/// Seed a revised suffix from exact journal provenance. The current aggregate
-/// state is only a consistency check; it never creates an origin lot.
-pub(super) fn replay_seeded_suffix(
-    allocations: &[RunAllocation],
-    seed: &[ProvenanceLot],
-    current: &ProjectedState,
-    suffix: &[ReturnRouteProof],
-    prices: &[AssetPrice],
-    total_reserve_usd_micros: &BigUint,
-    start_index: usize,
-) -> Result<()> {
-    let selected = selected_origins_without_baseline(allocations)?;
-    let mut lots = seed
-        .iter()
-        .map(|lot| {
-            let amount = super::parse_uint(&lot.atoms)?;
-            Ok(IntervalLot {
-                origin: lot.origin.clone(),
-                location: lot.location.clone(),
-                asset: lot.asset.clone(),
-                minimum: amount.clone(),
-                maximum: amount,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    validate_seed_projection(&lots, current)?;
-    let mut state = current.clone();
-    replay_steps(&mut lots, &mut state, suffix, prices, start_index)?;
-    check_terminal(
-        &lots,
-        &state,
-        &selected,
-        suffix,
-        prices,
-        total_reserve_usd_micros,
-    )
-}
-
 fn selected_origins(
     baseline: &StateSnapshot,
     allocations: &[RunAllocation],

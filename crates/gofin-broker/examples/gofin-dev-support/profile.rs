@@ -40,34 +40,13 @@ pub struct CredentialReferences {
     pub coinbaseinternational: Option<String>,
 }
 
-/// Optional per-development-environment ceilings. These can only tighten the
-/// beta defaults and are persisted with the environment, independently of its
-/// disposable credentials.
+/// Retired legacy profile settings, retained for inspection and migration.
+/// Runtime composition rejects them rather than implying that they constrain writes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyLimits {
     pub max_movement_usd_micros: Quantity,
     pub max_allocation_usd_micros: Quantity,
-}
-
-impl PolicyLimits {
-    fn validate(&self) -> Result<(), String> {
-        let maximum = gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
-        for (name, value) in [
-            ("max_movement_usd_micros", &self.max_movement_usd_micros),
-            ("max_allocation_usd_micros", &self.max_allocation_usd_micros),
-        ] {
-            let parsed = value.as_str().parse::<u64>().map_err(|_| {
-                format!("development {name} must be a finite positive USD-micros quantity")
-            })?;
-            if parsed == 0 || parsed > maximum {
-                return Err(format!(
-                    "development {name} must be between 1 and {maximum} USD micros"
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -233,9 +212,6 @@ impl EnvironmentConfig {
         // all older credential references, policy, RPC scope and identities.
         if config.version == 1 {
             config.version = 2;
-        }
-        if let Some(limits) = &config.policy_limits {
-            limits.validate()?;
         }
         Ok(config)
     }
@@ -1516,40 +1492,10 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             }
         }
     }
-    let mut policy = config.policy.clone().unwrap_or_else(BrokerPolicy::beta);
-    if let Some(limits) = &config.policy_limits {
-        limits.validate()?;
-        let movement = limits
-            .max_movement_usd_micros
-            .as_str()
-            .parse::<u64>()
-            .map_err(|_| "development movement ceiling is invalid")?;
-        let allocation = limits
-            .max_allocation_usd_micros
-            .as_str()
-            .parse::<u64>()
-            .map_err(|_| "development allocation ceiling is invalid")?;
-        let current_movement = policy
-            .max_movement_usd_micros
-            .parse::<u64>()
-            .map_err(|_| "development movement policy is invalid")?;
-        let current_allocation = policy
-            .max_run_allocation_usd_micros
-            .parse::<u64>()
-            .map_err(|_| "development allocation policy is invalid")?;
-        policy.max_movement_usd_micros = if current_movement == 0 {
-            movement
-        } else {
-            current_movement.min(movement)
-        }
-        .to_string();
-        policy.max_run_allocation_usd_micros = if current_allocation == 0 {
-            allocation
-        } else {
-            current_allocation.min(allocation)
-        }
-        .to_string();
+    if config.policy_limits.is_some() {
+        return Err("POLICY_RETIRED: policy_limits no longer restrict financial actions. Remove the retired field and use native per-action bounds.".into());
     }
+    let policy = config.policy.clone().unwrap_or_else(BrokerPolicy::beta);
     connections.extend(config.generated_connections.clone());
     let runtime_config = BrokerConfigV2 {
         version: 2,
@@ -2064,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profile_defaults_to_beta_limits_and_keeps_connections() {
+    fn legacy_profile_keeps_connections_without_new_usd_limits() {
         let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
         legacy.as_object_mut().unwrap().remove("policy_limits");
         legacy["credentials"]["binance"] =
@@ -2074,14 +2020,8 @@ mod tests {
         assert!(parsed.policy_limits.is_none());
 
         let config = broker_config(&parsed).unwrap();
-        assert_eq!(
-            config.policy.max_movement_usd_micros,
-            gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
-        );
-        assert_eq!(
-            config.policy.max_run_allocation_usd_micros,
-            gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
-        );
+        assert_eq!(config.policy.max_movement_usd_micros, "0");
+        assert_eq!(config.policy.max_run_allocation_usd_micros, "0");
         assert!(matches!(
             config.connections.as_slice(),
             [ConnectionConfig::Binance { credential_ref, .. }]
@@ -2090,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_limits_persist_and_tighten_only_the_development_broker_policy() {
+    fn legacy_policy_limits_are_preserved_but_rejected_as_runtime_controls() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let mut profile = EnvironmentConfig::empty("env");
@@ -2102,10 +2042,11 @@ mod tests {
         let restored = EnvironmentConfig::read(&config_path, "env").unwrap();
         assert_eq!(restored.policy_limits, profile.policy_limits);
         assert_eq!(restored.credentials.binance, profile.credentials.binance);
-        let broker = broker_config(&restored).unwrap();
-        assert_eq!(broker.policy.max_movement_usd_micros, "10000000");
-        assert_eq!(broker.policy.max_run_allocation_usd_micros, "100000000");
-        assert_eq!(broker.connections.len(), 1);
+        assert!(
+            broker_config(&restored)
+                .unwrap_err()
+                .contains("POLICY_RETIRED")
+        );
     }
 
     #[test]
@@ -2116,8 +2057,17 @@ mod tests {
             let mut profile = EnvironmentConfig::empty("env");
             profile.policy_limits = Some(candidate);
             profile.write_atomic(&config_path).unwrap();
-            assert!(EnvironmentConfig::read(&config_path, "env").is_err());
-            assert!(broker_config(&profile).is_err());
+            assert_eq!(
+                EnvironmentConfig::read(&config_path, "env")
+                    .unwrap()
+                    .policy_limits,
+                profile.policy_limits
+            );
+            assert!(
+                broker_config(&profile)
+                    .unwrap_err()
+                    .contains("POLICY_RETIRED")
+            );
         }
     }
 
@@ -2184,27 +2134,23 @@ mod tests {
     }
 
     #[test]
-    fn development_policy_limits_tighten_custom_policy_and_rpc_override_is_preserved() {
+    fn retired_limits_reject_runtime_start_without_changing_rpc_or_credentials() {
         let mut profile = EnvironmentConfig::empty("env");
         profile.policy = Some(custom_development_policy());
         profile.policy_limits = Some(limits("50000000", "100000000"));
         profile
             .rpc_urls
             .insert(1, vec!["https://eth.drpc.org".into()]);
+        let original = serde_json::to_value(&profile).unwrap();
+        assert!(
+            broker_config(&profile)
+                .unwrap_err()
+                .contains("POLICY_RETIRED")
+        );
+        assert_eq!(serde_json::to_value(&profile).unwrap(), original);
+        profile.policy_limits = None;
         let runtime = broker_config(&profile).unwrap();
-        assert_eq!(runtime.policy.max_movement_usd_micros, "50000000");
-        assert_eq!(runtime.policy.max_run_allocation_usd_micros, "100000000");
         assert_eq!(runtime.networks[0].rpc_urls, profile.rpc_urls[&1]);
-
-        profile.policy = Some(BrokerPolicy {
-            max_movement_usd_micros: "0".into(),
-            max_run_allocation_usd_micros: "0".into(),
-            ..custom_development_policy()
-        });
-        profile.policy_limits = Some(limits("10000000", "20000000"));
-        let runtime = broker_config(&profile).unwrap();
-        assert_eq!(runtime.policy.max_movement_usd_micros, "10000000");
-        assert_eq!(runtime.policy.max_run_allocation_usd_micros, "20000000");
     }
 
     #[test]
@@ -2868,7 +2814,9 @@ mod tests {
         let credential_dir = dir.path().join("credentials");
         let dotenv_path = dir.path().join("keys.env");
         let mut profile = EnvironmentConfig::empty("env");
-        profile.policy_limits = Some(limits("10000000", "100000000"));
+        profile
+            .rpc_urls
+            .insert(1, vec!["https://eth.drpc.org".into()]);
         profile.write_atomic(&config_path).unwrap();
         let key = "0000000000000000000000000000000000000000000000000000000000000001";
         fs::write(&dotenv_path, format!("GOFIN_DEV_EVM_PRIVATE_KEY={key}\n")).unwrap();
@@ -2884,7 +2832,7 @@ mod tests {
         .await
         .unwrap();
         let imported = EnvironmentConfig::read(&config_path, "env").unwrap();
-        assert_eq!(imported.policy_limits, profile.policy_limits);
+        assert_eq!(imported.rpc_urls, profile.rpc_urls);
         assert!(imported.credentials.evm_primary.is_some());
         let old_config = fs::read(&config_path).unwrap();
         let old_credential_files = fs::read_dir(&credential_dir).unwrap().count();

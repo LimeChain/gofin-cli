@@ -253,7 +253,7 @@ impl JlpAdapter {
         if input_program != token_program || output_program != token_program {
             return Err(unreviewed());
         }
-        let (mut valuation, fee_bound) = crate::adapter::valuation(
+        let valuation = crate::adapter::valuation(
             self.prices.clone(),
             input_asset.clone(),
             input_atoms,
@@ -262,12 +262,23 @@ impl JlpAdapter {
             fee_cap,
             wallet.address(),
         )
-        .await?;
+        .await
+        .ok()
+        .map(|(mut value, _)| {
+            value.additional_allocation_usd_micros = gofin_domain::Quantity::zero();
+            value
+        });
         let resource = ResourceId(format!("solana:mainnet-beta:{}", wallet.address()));
-        let maximum_costs = vec![fee_bound];
-        // Rent-bearing accounts remain owned refundable value; the funding
-        // cap is reserved separately from spend and network fee.
-        valuation.additional_allocation_usd_micros = gofin_domain::Quantity::zero();
+        let maximum_costs = vec![CostBound {
+            location: AccountingLocation::Cash {
+                resource: resource.clone(),
+            },
+            amount: Amount {
+                asset: asset("native", 9),
+                atoms: gofin_domain::Quantity::from_u64(fee_cap),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        }];
         let mut expected = vec![EffectConstraint::Conversion {
             resource: resource.clone(),
             input: input_asset.clone(),
@@ -394,7 +405,7 @@ impl JlpAdapter {
             format_sol_lamports(fee_cap),
             format_sol_lamports(rent_cap),
         );
-        Ok(PreparedOperation { operation: operation.into(), input: input.clone(), binding, summary, checks:vec![check("Pinned JLP mint and Perps program"),check("IDL instruction arguments and token accounts"),check("Network fee bound"),check("Account funding cap"),check("Simulation"),check("Blockhash expiry")], warnings:vec!["Settlement is reported only after finalized chain evidence proves exact token balance changes and costs.".into()], observed_at:Utc::now().to_rfc3339(), expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(), valuation:Some(valuation), intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource] }, action_deadline:None, operation_version:1 })
+        Ok(PreparedOperation { operation: operation.into(), input: input.clone(), binding, summary, checks:vec![check("Pinned JLP mint and Perps program"),check("IDL instruction arguments and token accounts"),check("Network fee bound"),check("Account funding cap"),check("Simulation"),check("Blockhash expiry")], warnings:vec!["Settlement is reported only after finalized chain evidence proves exact token balance changes and costs.".into()], observed_at:Utc::now().to_rfc3339(), expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(), valuation, intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource] }, action_deadline:None, operation_version:1 })
     }
 
     async fn custody_by_symbol(&self, symbol: &str) -> Result<Value> {
@@ -819,11 +830,18 @@ impl Adapter for JlpAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
-            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
-                verified: None,
-            }),
+            ReceiptOutcome::ExpiredWithoutInclusion {
+                signature,
+                message_sha256,
+                reason,
+                proof,
+            } => gofin_solana::transaction::expired_without_inclusion_reconciliation(
+                submission,
+                &signature,
+                &message_sha256,
+                &reason,
+                &proof,
+            ),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),

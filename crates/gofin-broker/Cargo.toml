@@ -65,6 +65,7 @@ path = "examples/gofin-dev-broker.rs"
 test = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 gofin-ethereum = { workspace = true, features = ["test-support"] }
 gofin-exchange = { workspace = true, features = ["test-support"] }
 jsonschema.workspace = true

@@ -243,7 +243,7 @@ pub(crate) fn compact_client_id(material: &str) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..9])
     )
 }
-fn client_id(account: &KrakenAccount, request_id: &str, index: usize) -> String {
+pub(crate) fn client_id(account: &KrakenAccount, request_id: &str, index: usize) -> String {
     compact_client_id(&format!(
         "gofin-kraken-order-v1:{}:{request_id}:{index}",
         account.physical_identity
@@ -980,7 +980,8 @@ impl KrakenProfile {
         }
         let full_valuation = self
             .financial_valuation(&full.debits, &full.maximum_costs)
-            .await?;
+            .await
+            .ok();
         let mut revised_binding = b.clone();
         revised_binding["orders"] = json!([revised]);
         revised_binding["parameters"] = replacement;
@@ -992,7 +993,7 @@ impl KrakenProfile {
         let scope = gofin_domain::amendments::AmendmentScope {
             intent: full,
             binding: revised_binding,
-            valuation: Some(full_valuation),
+            valuation: full_valuation,
         };
         intent.expected.push(EffectConstraint::SubmissionAmendment {
             operation_id: operation_id.into(),
@@ -1001,7 +1002,8 @@ impl KrakenProfile {
         });
         let valuation = self
             .financial_valuation(&intent.debits, &intent.maximum_costs)
-            .await?;
+            .await
+            .ok();
         let mut prepared = PreparedOperation {
             operation: KrakenEndpoint::KrakenPrivatePostAmendOrder
                 .operation()
@@ -1016,7 +1018,7 @@ impl KrakenProfile {
             warnings: vec![],
             observed_at: gofin_domain::now(),
             expires_at: (Utc::now() + Duration::seconds(90)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent,
             action_deadline: None,
             operation_version: 1,
@@ -1025,13 +1027,6 @@ impl KrakenProfile {
             prepared.summary = format!(
                 "Amend original Kraken order {id} below or to its filled quantity; Kraken cancels its remaining quantity. Existing fills retain their original accounting."
             );
-        }
-        if prepared
-            .valuation
-            .as_ref()
-            .is_some_and(|v| !v.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut prepared);
         }
         Ok(prepared)
     }
@@ -1982,14 +1977,15 @@ impl KrakenProfile {
         }
         let valuation = self
             .financial_valuation(&gross_principal, &intent.maximum_costs)
-            .await?;
-        let mut prepared=PreparedOperation{operation:endpoint.operation().into(),input:input.clone(),binding:json!({"endpoint":endpoint.method(),"product":self.product,"account":account.name,"physicalIdentity":account.physical_identity,"parameters":parameters,"requestId":controls.request_id,"orders":orders,"controls":controls,"conditionalClose":conditionals,"rootOrderCount":root_count,"conversionSequences":sequences}),summary:format!("Place {} exact Kraken spot order(s) on {}. Reserve full principal and declared fees until matching terminal trade evidence.",root_count,account.name),checks:vec![],warnings:vec!["Standing orders remain live at Kraken until filled, canceled or expired; revoking GoFin authorization does not cancel them.".into(),"Kraken does not offer a hard trading-fee ceiling. GoFin checks current venue rates and reserves your exact fee caps; an unexpected excess retains receipts and unresolved reservations for recovery.".into()],observed_at:gofin_domain::now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,action_deadline: None, operation_version:1};
+            .await
+            .ok();
+        let mut prepared=PreparedOperation{operation:endpoint.operation().into(),input:input.clone(),binding:json!({"endpoint":endpoint.method(),"product":self.product,"account":account.name,"physicalIdentity":account.physical_identity,"parameters":parameters,"requestId":controls.request_id,"orders":orders,"controls":controls,"conditionalClose":conditionals,"rootOrderCount":root_count,"conversionSequences":sequences}),summary:format!("Place {} exact Kraken spot order(s) on {} with the declared principal and fee bounds.",root_count,account.name),checks:vec![],warnings:vec!["Standing orders remain live at Kraken until filled, canceled or expired; revoking GoFin authorization does not cancel them.".into(),"Kraken does not offer a hard trading-fee ceiling. GoFin checks current venue rates against your declared fee bounds and reports any verified excess.".into()],observed_at:gofin_domain::now(),expires_at:(Utc::now()+Duration::seconds(90)).to_rfc3339(),valuation,intent,action_deadline: None, operation_version:1};
         if !conditionals.is_empty() {
             prepared.summary.push_str(" Generated close orders are included in this approval and retain the entry's settlement owner.");
             if orders.iter().take(root_count).any(|o| !o.buy) {
                 prepared.warnings.push("Generated cash buys are bounded by the entry sell native price floor. Requested market or trigger-market closes become standing limit or trigger-limit closes at that exact ceiling; they may remain open or receive no fill. Only correlated entry credit funds their principal.".into());
             }
-            prepared.warnings.push("Conditional close orders persist at Kraken and may activate after an entry fill. Child principal uses independently proved entry credit. Exact fee caps in both traded assets are reserved separately from existing custody; no unrelated holdings can finance child principal. All generated child identities and terminal trade receipts are required before completion.".into());
+            prepared.warnings.push("Conditional close orders persist at Kraken and may activate after an entry fill. Child principal uses independently proved entry credit. Declared fee bounds cover both traded assets; no unrelated holdings can finance child principal. All generated child identities and terminal trade receipts are required before completion.".into());
         }
         let collared = if endpoint == KrakenEndpoint::KrakenPrivatePostAddOrder {
             input["ordertype"] == "market" && prepared.binding["parameters"]["ordertype"] == "limit"
@@ -2027,7 +2023,7 @@ impl KrakenProfile {
         if triggered {
             prepared.warnings.push("The requested triggered base-volume buy becomes the corresponding native trigger-limit order with an absolute rounded-down price2 collar from maximumSpend. Trigger/trailing parameters remain exact; after activation it may remain open, fill partially or receive no fill.".into());
         }
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
     async fn prepare_order_control(
@@ -3048,22 +3044,34 @@ impl KrakenProfile {
                         36,
                     )?
             {
-                return crate::unresolved_consumption::cost_overrun(
+                return crate::unresolved_consumption::proven_cost_overrun(
                     submission,
+                    if !all_terminal || binding["conditionalChildrenPending"] == true {
+                        Status::Pending
+                    } else if any_fill && receipt_satisfied {
+                        Status::Completed
+                    } else {
+                        Status::Failed
+                    },
                     &effects,
                     json!({"code":"KRAKEN_FEE_BOUND_EXCEEDED","asset":code,"actualFeeAtoms":total,"orders":evidence,"proofEvents":proof_events}),
                 );
             }
         }
+        let live_order = evidence
+            .iter()
+            .any(|entry| entry["order"]["status"] == "open");
         if binding["conditionalChildrenPending"] == true {
             all_terminal = false;
         }
         if !all_terminal && !any_fill {
-            return Ok(unresolved(
+            let mut result = unresolved(
                 Status::Pending,
                 "The native orders remain open with no verified fills; principal and fee reservations remain held.",
                 json!({"orders":evidence}),
-            ));
+            );
+            result.evidence["outcome_live_order"] = json!(live_order);
+            return Ok(result);
         }
         if all_terminal && !any_fill {
             effects.clear();
@@ -3078,7 +3086,7 @@ impl KrakenProfile {
                 Status::Failed
             },
             effects,
-            json!({"orders":evidence,"proofEvents":proof_events,"coverage":"Exact order identities and all referenced custody ledger trade legs; no balance-difference settlement."}),
+            json!({"orders":evidence,"outcome_live_order":live_order,"proofEvents":proof_events,"coverage":"Exact order identities and all referenced custody ledger trade legs; no balance-difference settlement."}),
         )
     }
 }

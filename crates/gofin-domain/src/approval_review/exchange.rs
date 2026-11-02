@@ -209,11 +209,31 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
     {
         details.push(format!("Address: {address}"));
     }
+    if service == "hyperliquid"
+        && matches!(
+            review.action,
+            ApprovalAction::PlaceOrder | ApprovalAction::BatchOrders
+        )
+        && binding
+            .get("orders")
+            .and_then(Value::as_array)
+            .is_none_or(|orders| orders.is_empty())
+    {
+        return Err(GoFinError::validation("Order review lacks frozen orders."));
+    }
     if let Some(orders) = binding
         .get("orders")
         .and_then(Value::as_array)
         .filter(|orders| service == "hyperliquid" && !orders.is_empty())
     {
+        // The accounting debit can be zero for derivatives and is not the
+        // order quantity. Keep the account, but render native size from the
+        // frozen order instead of implying a cash spend.
+        if let Some(input) = review.input.as_mut() {
+            input.amount = None;
+            input.asset = None;
+        }
+        review.output = None;
         let mut descriptions = Vec::with_capacity(orders.len());
         for order in orders {
             let input = order.get("input").unwrap_or(&Value::Null);
@@ -222,6 +242,13 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                 .and_then(Value::as_str)
                 .or_else(|| text(input, &["symbol"]))
                 .ok_or_else(|| GoFinError::validation("An order in this review has no market."))?;
+            let base = order
+                .pointer("/market/base_asset/symbol")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    GoFinError::validation("An order in this review has no base asset.")
+                })?;
             let side = text(input, &["side"])
                 .ok_or_else(|| GoFinError::validation("An order in this review has no side."))?;
             let size = text(input, &["size"])
@@ -256,9 +283,9 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             let mut order_details = if orders.len() == 1
                 && text(order, &["price_semantics"]) == Some("directional_limit_v1")
             {
-                format!("{side} {size} {kind} {price_description}")
+                format!("{side} {size} {base} {kind} {price_description}")
             } else {
-                format!("{side} {size} {market} {kind} {price_description}")
+                format!("{side} {size} {base} {market} {kind} {price_description}")
             };
             for (label, key) in [
                 ("TIF", "time_in_force"),
@@ -266,11 +293,15 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                 ("trigger kind", "trigger_kind"),
                 ("group", "grouping"),
                 ("max notional", "max_notional_usdc"),
-                ("max fee", "max_fee_usdc"),
                 ("max loss", "max_realized_loss_usdc"),
             ] {
                 if let Some(value) = text(input, &[key]) {
-                    order_details.push_str(&format!(" {label} {value}"));
+                    let unit = if matches!(key, "max_notional_usdc" | "max_realized_loss_usdc") {
+                        " USDC"
+                    } else {
+                        ""
+                    };
+                    order_details.push_str(&format!(" {label} {value}{unit}"));
                 }
             }
             if input.get("trigger_is_market").and_then(Value::as_bool) == Some(true) {
@@ -286,7 +317,7 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                     .ok_or_else(|| {
                         GoFinError::validation("A builder fee requires a rate in the review.")
                     })?;
-                order_details.push_str(&format!(" builder {address} {rate}/10bps"));
+                let _ = (address, rate);
             }
             if input.get("reduce_only").and_then(Value::as_bool) == Some(true) {
                 order_details.push_str(" reduce-only");
@@ -667,6 +698,32 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         });
         if let Some(value) = value {
             details.push(format!("{label}: {value}"));
+            if label == "Limit" {
+                review.terms.push(super::ApprovalTerm {
+                    label: "Limit price".into(),
+                    value: value.into(),
+                    enforcement: super::ApprovalTermEnforcement::Enforced,
+                });
+            }
+        }
+    }
+    if service == "hyperliquid"
+        && let Some(orders) = binding.get("orders").and_then(Value::as_array)
+    {
+        for (index, order) in orders.iter().enumerate() {
+            let input = &order["input"];
+            for (field, label) in [
+                ("max_notional_usdc", "Maximum notional"),
+                ("max_realized_loss_usdc", "Maximum realized loss"),
+            ] {
+                if let Some(value) = input[field].as_str().filter(|v| !v.is_empty()) {
+                    review.terms.push(super::ApprovalTerm {
+                        label: format!("{label} {}", index + 1),
+                        value: format!("{value} USDC"),
+                        enforcement: super::ApprovalTermEnforcement::AfterExecution,
+                    });
+                }
+            }
         }
     }
     if let Some(existing) = review.other_details.take() {
@@ -785,14 +842,14 @@ mod tests {
     fn hyperliquid_frozen_order_scope_shows_every_order_bound() {
         let p = prepared(
             "hyperliquid.orders.batch",
-            json!({"account":{"name":"desk"}, "action":{"type":"order"}, "orders":[{"input":{"account":"desk","symbol":"BTC/USDC","side":"buy","order_type":"limit","size":"0.01","time_in_force":"gtc","max_notional_usdc":"1000","max_fee_usdc":"1","reduce_only":true},"market":{"symbol":"BTC/USDC"},"min_price":"80000","max_price":"90000"}]}),
+            json!({"account":{"name":"desk"}, "action":{"type":"order"}, "orders":[{"input":{"account":"desk","symbol":"BTC/USDC","side":"buy","order_type":"limit","size":"0.01","time_in_force":"gtc","max_notional_usdc":"1000","max_fee_usdc":"1","reduce_only":true},"market":{"symbol":"BTC/USDC","base_asset":{"symbol":"BTC"}},"min_price":"80000","max_price":"90000"}]}),
         );
         let review = crate::approval_review::approval_review(&p).unwrap();
         assert_eq!(review.market.as_deref(), Some("BTC/USDC"));
         assert_eq!(review.input.unwrap().account.unwrap().name, "desk");
         let details = review.other_details.unwrap();
-        assert!(details.contains("buy 0.01 BTC/USDC limit 80000–90000"));
-        assert!(details.contains("max fee 1"));
+        assert!(details.contains("buy 0.01 BTC BTC/USDC limit 80000–90000"));
+        assert!(!details.contains("max fee"));
         assert!(details.contains("reduce-only"));
     }
     #[test]
@@ -802,25 +859,46 @@ mod tests {
                 "hyperliquid.orders.place",
                 json!({"account":{"name":"desk"},"action":{"type":"order"},"orders":[{
                     "input":{"account":"desk","symbol":"SOL/USDC:USDC","side":side,"order_type":"limit","size":"0.95","max_notional_usdc":"95","max_fee_usdc":"1","max_realized_loss_usdc":"2","reduce_only":true},
-                    "market":{"symbol":"SOL/USDC:USDC"},"min_price":"90.95","max_price":"90.95","price_semantics":"directional_limit_v1"
+                    "market":{"symbol":"SOL/USDC:USDC","base_asset":{"symbol":"SOL"}},"min_price":"90.95","max_price":"90.95","price_semantics":"directional_limit_v1"
                 }]}),
             );
             let details = crate::approval_review::approval_review(&p)
                 .unwrap()
                 .other_details
                 .unwrap();
-            for fragment in [
-                expected,
-                "or better",
-                "max notional 95",
-                "max fee 1",
-                "max loss 2",
-            ] {
+            for fragment in [expected, "or better", "max notional 95", "max loss 2"] {
                 assert!(details.contains(fragment), "{details}");
             }
             p.binding["orders"][0]["price_semantics"] = json!("unrecognized");
             assert!(crate::approval_review::approval_review(&p).is_err());
         }
+    }
+    #[test]
+    fn hyperliquid_order_review_uses_frozen_native_size_not_cash_debit() {
+        let mut p = prepared(
+            "hyperliquid.orders.place",
+            json!({
+                "account":{"name":"evm-dev"}, "orders":[{
+                    "input":{"side":"buy","size":"0.28","order_type":"market","time_in_force":"ioc","max_notional_usdc":"30"},
+                    "market":{"symbol":"SOL/USDC:USDC","base_asset":{"symbol":"SOL"}},
+                    "min_price":"0","max_price":"103.85","price_semantics":"directional_limit_v1"
+                }]
+            }),
+        );
+        p.intent.debits[0].amount.atoms = Quantity::new("0").unwrap();
+        let review = crate::approval_review::approval_review(&p).unwrap();
+        let input = review.input.unwrap();
+        assert!(input.amount.is_none() && input.asset.is_none());
+        assert_eq!(input.account.unwrap().name, "evm-dev");
+        let details = review.other_details.unwrap();
+        assert_eq!(
+            details,
+            "buy 0.28 SOL market ≤103.85 (or better) TIF ioc max notional 30 USDC"
+        );
+        p.binding["orders"][0]["market"]["base_asset"] = Value::Null;
+        assert!(crate::approval_review::approval_review(&p).is_err());
+        p.binding["orders"] = json!([]);
+        assert!(crate::approval_review::approval_review(&p).is_err());
     }
     #[test]
     fn hyperliquid_cancellation_displays_every_frozen_market_and_order() {
@@ -961,10 +1039,14 @@ mod tests {
             treatment: CostTreatment::VenueCalculatedAdditionalDebit,
         });
         let review = crate::approval_review::approval_review(&p).unwrap();
+        assert!(review.terms.iter().any(|term| term.label == "Venue fee"
+            && term.enforcement
+                == crate::approval_review::ApprovalTermEnforcement::AfterExecution
+            && term.value.contains("Not capped")));
         assert_eq!(review.output.unwrap().account.unwrap().name, "vault");
         let details = review.other_details.unwrap();
         assert!(details.contains("Address: 0x123"));
-        assert!(details.contains("Venue fee not capped; reserve: 1 USDC"));
+        assert!(!details.to_lowercase().contains("fee"));
         assert!(!details.contains("Maximum cost"));
     }
     #[test]
@@ -1007,6 +1089,8 @@ mod tests {
             description: None,
             step_count: None,
             valid_for_seconds: None,
+            terms: Vec::new(),
+            advisories: Vec::new(),
         };
         enrich(&p, &mut review).unwrap();
         assert_eq!(review.input.unwrap().account.unwrap().name, "desk");

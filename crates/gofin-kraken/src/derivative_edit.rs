@@ -102,7 +102,7 @@ impl KrakenProfile {
         prepared.binding["parameters"] = wire;
         prepared.binding["derivativeEditParameters"] = native;
         prepared.binding["derivativeBatchEditTag"] = tag;
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
     pub(crate) async fn prepare_derivative_edit(
@@ -295,7 +295,7 @@ impl KrakenProfile {
             .maximum_fee_usd_micros
             .clone()
             .max(prior_value.maximum_fee_usd_micros.clone());
-        gofin_domain::value_bounds::bind(&mut full);
+
         let mut delta = FinancialIntent {
             locks: full.intent.locks.clone(),
             ..Default::default()
@@ -340,7 +340,7 @@ impl KrakenProfile {
             .maximum_fee_usd_micros
             .clone()
             .max(old_fee.checked_add(&incremental_fee)?);
-        gofin_domain::value_bounds::bind(&mut full);
+
         let scope = AmendmentScope {
             intent: full.intent.clone(),
             binding: full.binding.clone(),
@@ -394,7 +394,7 @@ impl KrakenProfile {
             "Edit original derivative order {venue_id} on {}. Past fills keep their owner; approve the full revised exposure and only increased loss/fee reserves.",
             account.name
         );
-        gofin_domain::value_bounds::bind(&mut full);
+
         Ok(full)
     }
     pub(crate) async fn reconcile_derivative_edit(

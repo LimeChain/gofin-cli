@@ -40,7 +40,6 @@ help:
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
 	  'make test-aave-mcp-read-cli Aave MCP catalog and position reads through the public CLI; synthetic fixture, no RPC or credentials' \
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
-	  'make test-full-plan-rehearsal Public CLI Kraken/Aave/bridge/Hyperliquid single-plan and recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires pinned patched Surfpool' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
@@ -88,10 +87,10 @@ catalog:
 	  mv "$$gofin_catalog_tmp" crates/gofin-cli/data/financial-catalog.json
 
 test-ui:
+	@python3 scripts/test-e2e-outcome-evidence.py
 	@python3 scripts/run-e2e.py --group core
 	@python3 scripts/run-security-tests.py --group cli-authority --group misleading-financial-output
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
-	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 	@$(MAKE) test-native-approval
 
 test-native-approval:
@@ -102,7 +101,13 @@ test-native-approval:
 	  xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests && \
 	  GOFIN_NATIVE_FINANCIAL_FIXTURES="$(CURDIR)/native/.build/financial-presentation-fixtures.json" GOFIN_NATIVE_RESOLUTION_FIXTURE="$(CURDIR)/native/.build/operation-resolution-fixture.json" native/.build/approval-presentation-tests && \
 	  cargo test --locked -p gofin-broker --example gofin-dev-broker actual_jupiter_approval_binding_renders_in_native_review && \
-	  cargo test --locked -p gofin-broker --lib native_spot_order_previews_preserve_material_terms_through_approval; \
+	  cargo test --locked -p gofin-broker --lib native_spot_order_previews_preserve_material_terms_through_approval && \
+	  cargo test --locked -p gofin-broker --test cctp_lifecycle compound_cctp_native_review_covers_all_stages_once -- --exact && \
+	  cargo test --locked -p gofin-broker --test cctp_lifecycle expired_action_reauthorizes_remaining_mint_without_replaying_source -- --exact && \
+	  cargo test --locked -p gofin-broker --test cctp_lifecycle failed_compound_mint_requires_fresh_approval_and_preserves_burn -- --exact && \
+	  cargo test --locked -p gofin-broker --test base_canonical_lifecycle failed_compound_base_finalize_reauthorizes_only_remaining_stage -- --exact && \
+	  cargo test --locked -p gofin-broker --test cctp_lifecycle expired_unapproved_cctp_revises_deadline_on_original_action_once -- --exact && \
+	  cargo test --locked -p gofin-ethereum --lib wallet_approval_native_review_identifies_the_granting_wallet; \
 	else \
 	  printf '%s\n' 'Native Touch ID presentation tests: not run (requires macOS).'; \
 	fi
@@ -173,20 +178,14 @@ test-meteora-validator:
 test-meteora-cli-validator:
 	@python3 scripts/test-meteora-cli-validator.py --family both
 
-.PHONY: test-full-plan-rehearsal
-test-full-plan-rehearsal:
-	@GOFIN_DEV_BUILD_ID=synthetic-kraken-build cargo build --locked -p gofin-cli --example gofin-dev
-	@cp target/debug/examples/gofin-dev target/debug/examples/gofin-full-plan-rehearsal
-	@GOFIN_KRAKEN_PLAN_CLI="$(CURDIR)/target/debug/examples/gofin-full-plan-rehearsal" cargo test --locked -p gofin-broker --test full_plan_workflow
-
 test-papertrade-rehearsal:
 	@cargo test --locked -p gofin-exchange --features hyperliquid ccxt::hyperliquid_tests::papertrade_ -- --nocapture
 	@GOFIN_DEV_BUILD_ID=synthetic-papertrade-workflow-build cargo build --locked -p gofin-cli --example gofin-dev
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --test papertrade_workflow -- --include-ignored
 	@cargo test --locked -p gofin-broker --lib broker_runtime_signs_submits_and_canonically_verifies_session_registration -- --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
-	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_withdrawal_named_plan_uses_real_runtime_and_canonical_credit_proof -- --exact --ignored --nocapture
-	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::hyperevm_withdrawal_named_plan_settles_core_stage_without_dispatching_onward_leg -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_withdrawal_native_action_uses_real_runtime_and_canonical_credit_proof -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::hyperevm_withdrawal_native_actions_preserve_core_and_onward_stage_proofs -- --exact --ignored --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=success cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=lost_noop cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_lost_response_reconciles_original_nonce_and_persists_hash_without_resend -- --exact

@@ -210,63 +210,101 @@ impl EthereumAdapter {
         } else {
             Quantity::zero()
         };
-        let mut assets = vec![token.asset(self), output.asset(self)];
-        if !assets.contains(&self.native_asset()) {
-            assets.push(self.native_asset());
-        }
-        let amounts = assets
-            .into_iter()
-            .map(|asset| {
-                Ok(Amount {
-                    atoms: quantity(pow10(asset.decimals)?),
-                    asset,
+        let valuation_and_impact: Result<(Valuation, u32)> = async {
+            let mut assets = vec![token.asset(self), output.asset(self)];
+            if !assets.contains(&self.native_asset()) {
+                assets.push(self.native_asset());
+            }
+            let amounts = assets
+                .into_iter()
+                .map(|asset| {
+                    Ok(Amount {
+                        atoms: quantity(pow10(asset.decimals)?),
+                        asset,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let prices: Vec<_> = self
-            .quote_verified_assets_usd_observed(&amounts)
-            .await?
-            .into_iter()
-            .zip(amounts)
-            .map(|((usd, source, observed_at), amount)| AssetPrice {
-                asset: amount.asset,
-                unit_atoms: amount.atoms,
-                usd_micros_per_unit: usd,
-                source,
-                observed_at,
-            })
-            .collect();
-        let usd = |asset: &AssetId, units: &Quantity| -> Result<Quantity> {
-            let p = prices
+                .collect::<Result<Vec<_>>>()?;
+            let prices: Vec<_> = self
+                .quote_verified_assets_usd_observed(&amounts)
+                .await?
+                .into_iter()
+                .zip(amounts)
+                .map(|((usd, source, observed_at), amount)| AssetPrice {
+                    asset: amount.asset,
+                    unit_atoms: amount.atoms,
+                    usd_micros_per_unit: usd,
+                    source,
+                    observed_at,
+                })
+                .collect();
+            let usd = |asset: &AssetId, units: &Quantity| -> Result<Quantity> {
+                let p = prices
+                    .iter()
+                    .find(|p| p.asset == *asset)
+                    .ok_or_else(|| GoFinError::validation("Missing exact swap price."))?;
+                units.mul_div_ceil(&p.usd_micros_per_unit, &p.unit_atoms)
+            };
+            let movement = usd(&token.asset(self), &units)?;
+            let output_value = usd(&output.asset(self), &Quantity::new(&quote.amount_out)?)?;
+            let impact = if movement > output_value {
+                movement
+                    .checked_sub(&output_value)?
+                    .mul_div_ceil(&Quantity::from_u64(10_000), &movement)?
+                    .to_string()
+                    .parse::<u32>()
+                    .map_err(|_| GoFinError::validation("Swap price impact overflows."))?
+            } else {
+                0
+            };
+            let fee = usd(&self.native_asset(), &actual_fee)?;
+            let price_time = prices
                 .iter()
-                .find(|p| p.asset == *asset)
-                .ok_or_else(|| GoFinError::validation("Missing swap valuation."))?;
-            units.mul_div_ceil(&p.usd_micros_per_unit, &p.unit_atoms)
-        };
-        let movement = usd(&token.asset(self), &units)?;
-        let output_value = usd(&output.asset(self), &Quantity::new(&quote.amount_out)?)?;
-        let price_impact_bps = match quote.price_impact_bps {
-            Some(bps) => bps,
-            None if movement > output_value => movement
-                .checked_sub(&output_value)?
-                .mul_div_ceil(&Quantity::from_u64(10_000), &movement)?
-                .to_string()
-                .parse::<u32>()
-                .map_err(|_| GoFinError::validation("Swap price impact overflows."))?,
-            None => 0,
+                .map(|p| p.observed_at.clone())
+                .min()
+                .ok_or_else(|| GoFinError::validation("Missing swap prices."))?;
+            let source = prices
+                .iter()
+                .find(|p| p.asset == token.asset(self))
+                .ok_or_else(|| GoFinError::validation("Missing input price."))?
+                .source
+                .clone();
+            Ok((
+                Valuation {
+                    movement_usd_micros: movement,
+                    maximum_fee_usd_micros: fee,
+                    additional_allocation_usd_micros: Quantity::zero(),
+                    observed_at: price_time,
+                    source,
+                    prices,
+                },
+                impact,
+            ))
+        }
+        .await;
+        let price_impact_bps = match (quote.price_impact_bps, &valuation_and_impact) {
+            (Some(impact), _) => impact,
+            (None, Ok((_, impact))) => *impact,
+            (None, Err(_)) if r.max_price_impact_bps.is_none() => 10_000,
+            (None, Err(_)) => {
+                return Err(GoFinError::new(
+                    "SWAP_PRICE_IMPACT_UNAVAILABLE",
+                    "preview",
+                    "The requested price-impact bound cannot be checked because the quote and price source lack usable evidence.",
+                    "Retry when an independent price is available; nothing was submitted.",
+                ));
+            }
         };
         require(
             price_impact_bps <= r.max_price_impact_bps.unwrap_or(10_000),
             "PRICE_IMPACT_LIMIT",
             "Quoted output value exceeds the approved price-impact bound.",
         )?;
-        let fee_usd = usd(&self.native_asset(), &actual_fee)?;
+        let mut warnings = vec!["Uniswap and the GoFin proxy construct the execution payload. An accepted submission is not settlement; reconcile uncertain outcomes without replay.".into()];
+        if quote.price_impact_bps.is_none() && valuation_and_impact.is_err() {
+            warnings.push("Price impact is unavailable; the 100% value is a conservative bound, not an observed estimate.".into());
+        }
+        let valuation = valuation_and_impact.ok().map(|(valuation, _)| valuation);
         let observed = self.clock.now().to_rfc3339();
-        let price_time = prices
-            .iter()
-            .map(|p| p.observed_at.clone())
-            .min()
-            .ok_or_else(|| GoFinError::validation("Missing prices."))?;
         let resource = resource(self.config.chain_id, owner);
         let b = UniswapBinding {
             provider: PROVIDER.into(),
@@ -306,7 +344,7 @@ impl EthereumAdapter {
             .ok_or_else(|| GoFinError::validation("Invalid quote expiry."))?
             .min(self.clock.now() + chrono::Duration::seconds(60))
             .to_rfc3339();
-        let prepared=PreparedOperation {operation:operation.into(),input:input.clone(),binding:serde_json::to_value(&b).map_err(|_|GoFinError::validation("Invalid binding."))?,summary:format!("Swap {} {} for at least {} {} via {}",units.to_decimal(token.decimals),token.symbol,b.minimum_output.to_decimal(output.decimals),output.symbol,b.quote.routing),checks:vec![Check{name:"Uniswap quote financial bounds".into(),status:CheckStatus::Passed,detail:"Exact wallet, chain, assets, input, net minimum output, price impact, slippage and fee metadata match the approved scope. Provider execution payload semantics are trusted.".into()}],warnings:vec!["Uniswap and the GoFin proxy construct the execution payload. An accepted submission is not settlement; reconcile uncertain outcomes without replay.".into()],observed_at:observed,expires_at:expires,valuation:Some(Valuation {movement_usd_micros:movement,maximum_fee_usd_micros:fee_usd,additional_allocation_usd_micros:Quantity::zero(),observed_at:price_time,source:prices.iter().find(|p|p.asset==b.token).expect("input price").source.clone(),prices}),intent:FinancialIntent {debits:vec![ResourceAmount{resource:resource.clone(),amount:Amount{asset:b.token.clone(),atoms:units.clone()}}],maximum_costs:vec![CostBound{location:AccountingLocation::Cash{resource:resource.clone()},amount:Amount{asset:self.native_asset(),atoms:actual_fee},treatment:CostTreatment::AdditionalDebit}],expected:vec![EffectConstraint::Conversion{resource:resource.clone(),input:b.token.clone(),maximum_input:units,output:b.output.clone(),minimum_output:b.minimum_output.clone()}],locks:vec![resource]},operation_version:2,action_deadline:None};
+        let prepared=PreparedOperation {operation:operation.into(),input:input.clone(),binding:serde_json::to_value(&b).map_err(|_|GoFinError::validation("Invalid binding."))?,summary:format!("Swap {} {} for at least {} {} via {}",units.to_decimal(token.decimals),token.symbol,b.minimum_output.to_decimal(output.decimals),output.symbol,b.quote.routing),checks:vec![Check{name:"Uniswap quote financial bounds".into(),status:CheckStatus::Passed,detail:"Exact wallet, chain, assets, input, net minimum output, price impact, slippage and fee metadata match the approved scope. Provider execution payload semantics are trusted.".into()}],warnings,observed_at:observed,expires_at:expires,valuation,intent:FinancialIntent {debits:vec![ResourceAmount{resource:resource.clone(),amount:Amount{asset:b.token.clone(),atoms:units.clone()}}],maximum_costs:vec![CostBound{location:AccountingLocation::Cash{resource:resource.clone()},amount:Amount{asset:self.native_asset(),atoms:actual_fee},treatment:CostTreatment::AdditionalDebit}],expected:vec![EffectConstraint::Conversion{resource:resource.clone(),input:b.token.clone(),maximum_input:units,output:b.output.clone(),minimum_output:b.minimum_output.clone()}],locks:vec![resource]},operation_version:2,action_deadline:None};
         Ok(prepared)
     }
 
@@ -390,57 +428,8 @@ impl EthereumAdapter {
             self.runtime.revalidate_provider_transaction(tx).await?;
         }
         let mut fresh = prepared.clone();
-        let old = prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| GoFinError::validation("Missing approved swap valuation."))?;
-        let amounts = old
-            .prices
-            .iter()
-            .map(|p| Amount {
-                asset: p.asset.clone(),
-                atoms: p.unit_atoms.clone(),
-            })
-            .collect::<Vec<_>>();
-        let prices = self
-            .quote_verified_assets_usd_observed(&amounts)
-            .await?
-            .into_iter()
-            .zip(amounts)
-            .map(|((usd, source, observed_at), a)| AssetPrice {
-                asset: a.asset,
-                unit_atoms: a.atoms,
-                usd_micros_per_unit: usd,
-                source,
-                observed_at,
-            })
-            .collect::<Vec<_>>();
-        let price = |asset: &AssetId| {
-            prices
-                .iter()
-                .find(|p| p.asset == *asset)
-                .ok_or_else(|| GoFinError::validation("Missing swap price identity."))
-        };
-        let input_price = price(&b.token)?;
-        let fee_price = price(&self.native_asset())?;
-        fresh.valuation = Some(Valuation {
-            movement_usd_micros: b
-                .units
-                .mul_div_ceil(&input_price.usd_micros_per_unit, &input_price.unit_atoms)?,
-            maximum_fee_usd_micros: b
-                .maximum_fee
-                .mul_div_ceil(&fee_price.usd_micros_per_unit, &fee_price.unit_atoms)?,
-            additional_allocation_usd_micros: Quantity::zero(),
-            observed_at: prices
-                .iter()
-                .map(|p| p.observed_at.clone())
-                .min()
-                .ok_or_else(|| GoFinError::validation("Missing swap prices."))?,
-            source: input_price.source.clone(),
-            prices,
-        });
+        // Optional USD presentation is not part of the approved payload.
         fresh.observed_at = self.clock.now().to_rfc3339();
-        carry_attempt_valuation(prepared, &mut fresh, self.clock.now())?;
         Ok(fresh)
     }
 

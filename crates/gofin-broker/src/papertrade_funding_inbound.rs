@@ -927,7 +927,10 @@ pub(crate) fn verify_evm_source_burn(
             .map_err(|_| invalid("Frozen CCTP calldata is malformed."))?
         || gofin_evm::rpc_u256(value)? != gofin_evm::u256(&frozen.value)?
         || !tx_chain_matches
-        || receipt.fee > fee_cap
+        || receipt
+            .fee
+            .ok_or_else(|| GoFinError::validation("Receipt fee is unavailable."))?
+            > fee_cap
     {
         return Err(invalid(
             "CCTP source transaction differs from its frozen envelope or fee bound.",
@@ -956,7 +959,10 @@ pub(crate) fn verify_evm_source_burn(
         source_chain_id,
         source_owner: format!("{:#x}", gofin_evm::address(owner)?),
         amount_atoms,
-        native_fee_atoms: receipt.fee.to_string(),
+        native_fee_atoms: receipt
+            .fee
+            .ok_or_else(|| GoFinError::validation("Receipt fee is unavailable."))?
+            .to_string(),
         cctp_source: source,
     })
 }
@@ -1256,7 +1262,7 @@ mod tests {
             block_number: 77,
             confirmations: 12,
             success: true,
-            fee: U256::from(100),
+            fee: Some(U256::from(100)),
             receipt: json!({"logs":logs_value}),
         };
         let transaction = json!({

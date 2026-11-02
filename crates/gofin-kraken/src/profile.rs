@@ -1,7 +1,7 @@
 use crate::{KrakenEndpoint, KrakenResponse, contracts};
 use async_trait::async_trait;
 use gofin_domain::product_names::MetadataValueExt;
-use gofin_domain::{ConnectionMetadata, Definition, GoFinError, Result};
+use gofin_domain::{ConnectionMetadata, Definition, GoFinError, PreparedOperation, Result};
 use gofin_exchange::{
     ExchangeProfile,
     ccxt::CredentialProvider,
@@ -42,6 +42,9 @@ impl KrakenProduct {
 }
 #[async_trait]
 pub trait KrakenTransport: Send + Sync {
+    fn supports_independent_submission(&self) -> bool {
+        false
+    }
     async fn request(
         &self,
         endpoint: KrakenEndpoint,
@@ -64,6 +67,9 @@ impl KrakenCcxtTransport {
 }
 #[async_trait]
 impl KrakenTransport for KrakenCcxtTransport {
+    fn supports_independent_submission(&self) -> bool {
+        true
+    }
     async fn request(
         &self,
         endpoint: KrakenEndpoint,
@@ -569,6 +575,47 @@ fn validate_rejection(evidence: &Value, endpoint: KrakenEndpoint, digest: &str) 
 
 #[async_trait]
 impl ExchangeProfile for KrakenProfile {
+    fn pre_admission_reuse_window(
+        &self,
+        prepared: &gofin_domain::PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        // Funding-v1 preparation already resolves the exact account, route,
+        // recipient, fee and available cash. Avoid doing that full traversal
+        // twice after approval; the engine still repeats it under the resource
+        // lock immediately before admission. This is not a longer preview TTL.
+        (self.product == KrakenProduct::Spot
+            && prepared.operation
+                == KrakenEndpoint::KrakenFundingPostFundingV1Withdrawals.operation()
+            && prepared.binding["funding"]["api_version"] == "funding-v1")
+            .then_some(std::time::Duration::from_secs(90))
+    }
+    fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
+        self.product == KrakenProduct::Spot && prepared.operation == "kraken.add-order"
+    }
+    fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
+        if self.product != KrakenProduct::Spot
+            || prepared.operation != "kraken.add-order"
+            || !self.transport.supports_independent_submission()
+        {
+            return false;
+        }
+        let Some(request_id) = prepared.input.get("requestId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(account) = prepared
+            .input
+            .get("account")
+            .and_then(Value::as_str)
+            .and_then(|name| self.account(name).ok())
+        else {
+            return false;
+        };
+        let expected = crate::trading::client_id(account, request_id, 0);
+        prepared.binding["parameters"]["cl_ord_id"].as_str() == Some(expected.as_str())
+            && prepared.binding["orders"].as_array().is_some_and(|orders| {
+                orders.len() == 1 && orders[0]["clientId"].as_str() == Some(expected.as_str())
+            })
+    }
     type Request = KrakenDispatch;
     fn definitions(&self) -> Vec<Definition> {
         contracts::definitions(self.product.client())
@@ -1308,7 +1355,6 @@ impl ExchangeProfile for KrakenProfile {
                 .binding
                 .product_value(gofin_domain::value_bounds::KEY)?
                 .clone();
-            gofin_domain::value_bounds::validate(&current)?;
         }
         gofin_domain::product_names::preserve_legacy_client_ids(
             &prepared.binding,
@@ -1321,22 +1367,9 @@ impl ExchangeProfile for KrakenProfile {
         approved: &gofin_domain::PreparedOperation,
         refreshed: &gofin_domain::PreparedOperation,
     ) -> bool {
-        if gofin_domain::product_names::validate(&approved.binding).is_err()
-            || gofin_domain::product_names::validate(&refreshed.binding).is_err()
-        {
-            return false;
-        }
-        if approved
-            .binding
-            .product_get(gofin_domain::value_bounds::KEY)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            gofin_domain::value_bounds::validate(refreshed).is_ok()
-        } else {
-            approved.valuation == refreshed.valuation
-        }
+        // Names and native order identity remain exact; USD reporting is optional.
+        gofin_domain::product_names::validate(&approved.binding).is_ok()
+            && gofin_domain::product_names::validate(&refreshed.binding).is_ok()
     }
     async fn plan_submission(
         &self,
@@ -1491,6 +1524,14 @@ impl ExchangeProfile for KrakenProfile {
         })?;
         self.reconcile_funding_reference(record, submission, reference)
             .await
+    }
+    async fn observe_transfer_side(
+        &self,
+        record: &gofin_domain::OperationRecord,
+        submission: &gofin_domain::Submission,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation> {
+        self.observe_funding_side(record, submission, side).await
     }
     async fn reconcile_submission(
         &self,

@@ -1922,10 +1922,11 @@ impl HyperliquidProfile {
                     observed_end_ms,
                 );
                 let Some(row) = row else {
-                    return Ok(Some(unknown(
-                        "The native ledger does not uniquely identify the exact signed withdrawal nonce.",
-                        json!({"ledger":rows,"native_tx":native_tx}),
-                    )));
+                    return Ok(Some(Reconciliation {
+                        status: Status::Pending,
+                        evidence: json!({"reason":"The exact accepted withdrawal is awaiting its correlated native ledger record.","outcome_transfer":"source_pending","ledger":rows,"native_tx":native_tx}),
+                        verified: None,
+                    }));
                 };
                 let ledger_hash = row["hash"]
                     .as_str()
@@ -2026,7 +2027,7 @@ impl HyperliquidProfile {
                         treatment: CostTreatment::IncludedInDebit,
                     },
                 ];
-                let evidence = json!({"nonce_ms":time_ms,"ledger_nonce":ledger_nonce,"explorer_action_hash":native_hash,"native_ledger":row,"ledger_hash":ledger_hash,"arbitrum_receipt":receipt,"gross_debit":amount,"ledger_net":ledger_net,"net_credit":receipt.net_amount,"actual_fee":fee});
+                let evidence = json!({"nonce_ms":time_ms,"ledger_nonce":ledger_nonce,"explorer_action_hash":native_hash,"native_ledger":row,"ledger_hash":ledger_hash,"arbitrum_receipt":receipt,"gross_debit":amount,"ledger_net":ledger_net,"net_credit":receipt.net_amount,"actual_fee":fee,"outcome_transfer":"available","outcome_reporting":"complete"});
                 Ok(Some(Reconciliation {
                     status: Status::Completed,
                     evidence: evidence.clone(),

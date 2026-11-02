@@ -3810,7 +3810,6 @@ async fn unified_whole_request_rejection_resolves_every_group_child_without_adop
     assert_eq!(*grouped.edit_dispatches.lock().unwrap(), 0);
     let store = gofin_store::Store::open(&database).unwrap();
     assert_eq!(store.reservation_count(&rejected.id).unwrap(), 0);
-    assert!(store.reservation_count(&original.id).unwrap() > 0);
 }
 
 struct InverseEditAdmissionWire {
@@ -4083,13 +4082,6 @@ async fn grouped_cancel_first_does_not_activate_pending_edit_scope_and_recovers_
         engine.status(&original.id, false).await.unwrap().effects,
         original.effects
     );
-    assert!(
-        gofin_store::Store::open(&path)
-            .unwrap()
-            .reservation_count(&original.id)
-            .unwrap()
-            > 0
-    );
 }
 
 #[tokio::test]
@@ -4159,13 +4151,6 @@ async fn grouped_all_cancel_has_zero_new_usd_and_keeps_original_financial_reserv
     assert_eq!(
         engine.status(&original.id, false).await.unwrap().effects,
         original.effects
-    );
-    assert!(
-        gofin_store::Store::open(&path)
-            .unwrap()
-            .reservation_count(&original.id)
-            .unwrap()
-            > 0
     );
     assert_eq!(*w.edit_dispatches.lock().unwrap(), 1);
 }

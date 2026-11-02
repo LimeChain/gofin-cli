@@ -5,7 +5,10 @@
     "environment": "mock",
     "description": "Binance USD-M main account: transfer collateral, set leverage and margin, open and close long and short, return collateral",
     "requires": [],
-    "env": {},
+    "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/binance-usdm-main.json"
+    },
+    "evidence": "{artifacts}/binance-usdm-main.json",
     "prepare": [],
     "run": [
       [
@@ -21,7 +24,10 @@
     "environment": "mock",
     "description": "Binance USD-M standalone subaccount: transfer collateral, set leverage and margin, open and close long and short, return collateral",
     "requires": [],
-    "env": {},
+    "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/binance-usdm-subaccount.json"
+    },
+    "evidence": "{artifacts}/binance-usdm-subaccount.json",
     "prepare": [],
     "run": [
       [
@@ -40,9 +46,11 @@
       "cargo"
     ],
     "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/coinbase-exchange-orders.json",
       "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
       "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-exchange-cli"
     },
+    "evidence": "{artifacts}/coinbase-exchange-orders.json",
     "prepare": [
       [
         "cargo",
@@ -87,9 +95,11 @@
       "cargo"
     ],
     "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/coinbase-international-orders.json",
       "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
       "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-international-cli"
     },
+    "evidence": "{artifacts}/coinbase-international-orders.json",
     "prepare": [
       [
         "cargo",
@@ -134,9 +144,11 @@
       "cargo"
     ],
     "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/coinbase-advanced.json",
       "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
       "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-advanced-cli"
     },
+    "evidence": "{artifacts}/coinbase-advanced.json",
     "prepare": [
       [
         "cargo",
@@ -181,9 +193,11 @@
       "cargo"
     ],
     "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/kraken-spot.json",
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-spot-cli"
     },
+    "evidence": "{artifacts}/kraken-spot.json",
     "prepare": [
       [
         "cargo",
@@ -219,6 +233,52 @@
     ]
   },
   {
+    "id": "kraken-funding-v1",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Kraken Funding-v1 USDC withdrawal with included fee, independently verified ERC20 receipt, and exact proceeds returned to usable venue credit",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-funding-v1-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-funding-v1-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--lib",
+          "kraken_deposit::tests::positive_spot::funding_v1_roundtrip::funding_v1_usdc_included_fee_roundtrip_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
     "id": "kraken-perpetual",
     "group": "exchange",
     "environment": "mock",
@@ -227,9 +287,11 @@
       "cargo"
     ],
     "env": {
+      "GOFIN_EXECUTION_EVIDENCE": "{artifacts}/kraken-perpetual.json",
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-perpetual-cli"
     },
+    "evidence": "{artifacts}/kraken-perpetual.json",
     "prepare": [
       [
         "cargo",
@@ -275,7 +337,8 @@
     ],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
-      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-spot-cli"
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-spot-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/hyperliquid-spot.json"
     },
     "prepare": [
       [
@@ -310,7 +373,8 @@
         ],
         "expected_tests": 1
       }
-    ]
+    ],
+    "evidence": "{artifacts}/hyperliquid-spot.json"
   },
   {
     "id": "hyperliquid-perpetual",
@@ -322,7 +386,8 @@
     ],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
-      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-perpetual-cli"
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-perpetual-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/hyperliquid-perpetual.json"
     },
     "prepare": [
       [
@@ -357,6 +422,7 @@
         ],
         "expected_tests": 1
       }
-    ]
+    ],
+    "evidence": "{artifacts}/hyperliquid-perpetual.json"
   }
 ]

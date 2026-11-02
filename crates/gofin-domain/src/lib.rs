@@ -14,6 +14,7 @@ pub mod financial_plans;
 pub mod grouped_amendments;
 pub mod money;
 pub mod operation_recovery;
+pub mod outcome;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
@@ -1604,7 +1605,9 @@ pub enum AuthorizationSource {
     TouchId,
     /// Fresh sudo provenance and protected review for configuration only.
     Sudo,
+    /// Historical audit value; cannot authorize new financial work.
     BoundedGrant,
+    /// Historical audit value; cannot authorize new financial work.
     NamedPlan,
     Yolo,
     Development,
@@ -1673,6 +1676,13 @@ pub struct Reconciliation {
     /// event, and respect the original cumulative caps. Completion minima apply
     /// only at terminal settlement; unresolved reservations remain owned.
     pub verified: Option<VerifiedEffects>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TransferSideObservation {
+    pub metadata: Value,
+    pub reconciliation: Option<Reconciliation>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1818,6 +1828,126 @@ pub trait Adapter: Send + Sync {
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value>;
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation>;
+    /// Independently check a freshly prepared candidate against the approved
+    /// native intent. The conservative default requires the same immutable
+    /// binding and intent; adapters may opt into narrower economic comparisons
+    /// only after validating every identity and enforced bound themselves.
+    fn validate_approved_candidate(
+        &self,
+        approved: &PreparedOperation,
+        candidate: &PreparedOperation,
+    ) -> Result<()> {
+        if approved.operation == candidate.operation
+            && approved.operation_version == candidate.operation_version
+            && approved.input == candidate.input
+            && native_authorization_binding(approved) == native_authorization_binding(candidate)
+            && approved.action_deadline == candidate.action_deadline
+        {
+            Ok(())
+        } else {
+            Err(GoFinError::new(
+                "CANDIDATE_OUTSIDE_APPROVAL",
+                "authorization",
+                "The fresh candidate differs from the approved action.",
+                "Nothing was submitted; obtain approval for the changed terms.",
+            ))
+        }
+    }
+    /// Trusted EVM nonce scope and provider pending nonce for an immutable
+    /// candidate. Unsupported operations return None and must not be assumed
+    /// to have nonce protection by callers.
+    async fn evm_nonce_scope(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Result<Option<(String, u64)>> {
+        Ok(None)
+    }
+    /// Replace only the technical nonce of an adapter-produced EVM candidate.
+    /// The broker must claim it durably, validate native terms, and revalidate
+    /// the exact resulting payload before dispatch.
+    fn apply_claimed_evm_nonce(
+        &self,
+        _prepared: &PreparedOperation,
+        _nonce: u64,
+    ) -> Result<PreparedOperation> {
+        Err(GoFinError::validation(
+            "This adapter does not support a claimed EVM nonce.",
+        ))
+    }
+    /// A distinct, durably bound submission identity permits releasing the
+    /// resource ordering guard after admission, before the provider responds.
+    fn supports_independent_submission(&self, _prepared: &PreparedOperation) -> bool {
+        false
+    }
+    /// Reprepare only when this adapter validates every approved native term
+    /// against a freshly constructed candidate before dispatch.
+    fn supports_approved_reprepare(&self, _prepared: &PreparedOperation) -> bool {
+        false
+    }
+    /// True only for a parent whose candidates are submitted as separate stages.
+    /// The parent itself must never be dispatched.
+    fn is_compound_action(&self, _prepared: &PreparedOperation) -> bool {
+        false
+    }
+    /// Prepare at most one ready stage during an explicit active invocation.
+    /// This is observation and candidate construction only; dispatch remains
+    /// the engine's job after durable claim and authority validation. A stage
+    /// ID is stable for the lifetime of the logical action. Completed stages
+    /// must never be returned again. None means no stage is currently ready.
+    async fn prepare_next_stage(
+        &self,
+        _action: &OperationRecord,
+        _completed: &[OperationRecord],
+        _context: &PreparationContext,
+    ) -> Result<Option<(String, PreparedOperation)>> {
+        Err(GoFinError::new(
+            "COMPOUND_ACTION_UNSUPPORTED",
+            "preparation",
+            "This adapter does not implement durable compound continuation.",
+            "No stage was submitted.",
+        ))
+    }
+    /// Validate a concrete stage against its approved parent before admission.
+    /// The engine also checks cumulative fees and the durable stage claim.
+    fn validate_stage_candidate(
+        &self,
+        _parent: &PreparedOperation,
+        _stage_id: &str,
+        _candidate: &PreparedOperation,
+    ) -> Result<()> {
+        Err(GoFinError::validation(
+            "This adapter cannot validate compound stages.",
+        ))
+    }
+    /// Advisory polling usefulness horizon, not a provider guarantee or evidence of nonexecution.
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+    /// Prepare a new review for only the unresolved remainder of a persisted action.
+    async fn prepare_remaining_action(
+        &self,
+        _original: &OperationRecord,
+        _revised_input: &Value,
+        _completed: &[OperationRecord],
+        _context: &PreparationContext,
+    ) -> Result<PreparedOperation> {
+        Err(GoFinError::validation(
+            "This adapter cannot reauthorize a remaining action.",
+        ))
+    }
+    /// Observe one side of the original transfer without dispatching or preparing a write.
+    async fn observe_transfer_side(
+        &self,
+        _record: &OperationRecord,
+        _side: &str,
+    ) -> Result<TransferSideObservation> {
+        Err(GoFinError::new(
+            "TRANSFER_OBSERVATION_UNSUPPORTED",
+            "observation",
+            "This adapter does not support side-specific transfer observation.",
+            "Inspect the original operation status.",
+        ))
+    }
     /// Validate an adapter-produced recovery child against the exact durable
     /// parent. The default denies recovery links; ordinary requests cannot
     /// create this authority by supplying metadata in their input.
@@ -2009,6 +2139,16 @@ pub trait Adapter: Send + Sync {
     /// must perform exact final nonce/authority checks through their submit path.
     /// None preserves the adapter's ordinary final revalidation contract.
     fn preparation_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
+    /// Reuse initial evidence only before standalone admission, where the engine
+    /// will still run full revalidation under the submission resource lock.
+    /// The window starts before preparation and never extends evidence or
+    /// approval deadlines. Boundary and plan attempts cannot use this opt-in.
+    fn pre_admission_reuse_window(
         &self,
         _prepared: &PreparedOperation,
     ) -> Option<std::time::Duration> {
@@ -2595,6 +2735,27 @@ pub fn authorization_binding(prepared: &PreparedOperation) -> Value {
             "additional_allocation_usd_micros":v.additional_allocation_usd_micros,
             "prices":v.prices.iter().map(|p|serde_json::json!({"asset":p.asset,"usd_micros_per_unit":p.usd_micros_per_unit,"unit_atoms":p.unit_atoms,"source":p.source})).collect::<Vec<_>>()
         })))
+    })
+}
+
+/// Native-unit binding for new approvals. Version 1 remains available above
+/// for verification of historical audits; version 2 excludes personal USD
+/// accounting while retaining the exact adapter execution and native intent.
+pub fn native_authorization_binding(prepared: &PreparedOperation) -> Value {
+    if product_names::validate(&prepared.binding).is_err() {
+        return prepared.binding.clone();
+    }
+    let mut execution = prepared.binding.clone();
+    if let Some(object) = execution.as_object_mut() {
+        object.remove(value_bounds::KEY);
+        object.remove("_fin_usd_ceiling_v1");
+    }
+    serde_json::json!({
+        "version": 2,
+        "operation": prepared.operation,
+        "operation_version": prepared.operation_version,
+        "execution": execution,
+        "financial_intent": prepared.intent,
     })
 }
 

@@ -831,6 +831,7 @@ pub enum TransportError {
     InvalidResponse,
     Timeout,
     Rejected,
+    OrderNotFound,
     HttpFailure {
         status: u16,
         binance_code: Option<i64>,
@@ -855,6 +856,7 @@ impl fmt::Display for TransportError {
             Self::InvalidResponse => "Binance returned an invalid response",
             Self::Timeout => "Binance request timed out",
             Self::Rejected => "Binance rejected the request",
+            Self::OrderNotFound => "Binance did not find the selected order",
             Self::HttpFailure { kind, .. } => match kind {
                 HttpFailureKind::RateLimited => "Binance rate limited the request",
                 HttpFailureKind::PermissionDenied => "Binance request permission denied",
@@ -1488,6 +1490,9 @@ impl BinanceCcxtTransport {
 
 pub fn ccxt_transport_error(error: gofin_exchange::ccxt::CcxtError) -> TransportError {
     use gofin_exchange::ccxt::CcxtErrorKind as Kind;
+    if error.kind == Kind::OrderNotFound {
+        return TransportError::OrderNotFound;
+    }
     let kind = match error.kind {
         Kind::RateLimited => HttpFailureKind::RateLimited,
         Kind::Authentication | Kind::PermissionDenied => HttpFailureKind::PermissionDenied,

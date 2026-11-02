@@ -130,6 +130,11 @@ impl HyperliquidTransport for HyperliquidCcxtTransport {
 
 fn map_ccxt_read(cause: CcxtError) -> GoFinError {
     let read_failure = match cause.kind {
+        CcxtErrorKind::OrderNotFound => Some((
+            "VENUE_ORDER_NOT_FOUND",
+            "Hyperliquid reports that the selected order was not found.",
+            "Check the original order identity; absence alone does not authorize replay.",
+        )),
         CcxtErrorKind::Timeout => Some((
             "VENUE_READ_TIMEOUT",
             "Hyperliquid did not answer the typed read before its timeout.",
@@ -276,6 +281,9 @@ mod tests {
         let read = map_ccxt_read(CcxtError::new(CcxtErrorKind::Timeout));
         assert_eq!(read.code, "VENUE_READ_TIMEOUT");
         assert_eq!(read.stage, "read");
+        let missing = map_ccxt_read(CcxtError::new(CcxtErrorKind::OrderNotFound));
+        assert_eq!(missing.code, "VENUE_ORDER_NOT_FOUND");
+        assert_eq!(missing.stage, "read");
         let rejected = map_ccxt_read(CcxtError::new(CcxtErrorKind::Rejected));
         assert_eq!(rejected.code, "VENUE_READ_REJECTED");
         assert_eq!(rejected.stage, "read");

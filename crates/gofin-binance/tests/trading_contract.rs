@@ -23,14 +23,8 @@ use std::{
 const SCALE: i128 = 1_000_000_000_000_000_000;
 const SPOT: &str = "binance:uid:1001:SPOT";
 const ACCOUNT: &str = "synthetic-main";
-#[path = "trading_contract/boundary_lifecycle.rs"]
-mod boundary_lifecycle_tests;
-#[path = "trading_contract/boundaries.rs"]
-mod boundary_tests;
 #[path = "trading_contract/native_spot.rs"]
 mod native_spot_tests;
-#[path = "trading_contract/plan_permissions.rs"]
-mod plan_permission_tests;
 fn units(value: &str) -> i128 {
     let negative = value.starts_with('-');
     let value = value.strip_prefix('-').unwrap_or(value);
@@ -112,6 +106,7 @@ struct Venue {
     filters_changed: AtomicBool,
     discount: AtomicBool,
     futures_burn: AtomicBool,
+    unrelated_futures_wallet_credit: AtomicBool,
     mark_price: Mutex<String>,
     maximum_price: Mutex<String>,
     hedge: AtomicBool,
@@ -152,6 +147,7 @@ impl Venue {
             filters_changed: AtomicBool::new(false),
             discount: AtomicBool::new(false),
             futures_burn: AtomicBool::new(false),
+            unrelated_futures_wallet_credit: AtomicBool::new(false),
             mark_price: Mutex::new("2000".into()),
             maximum_price: Mutex::new("2500".into()),
             hedge: AtomicBool::new(false),
@@ -331,6 +327,9 @@ impl Venue {
                 if futures {
                     state.position += if buy { quantity } else { -quantity };
                     state.collateral += pnl;
+                    if self.unrelated_futures_wallet_credit.load(Ordering::SeqCst) {
+                        state.collateral += units("3");
+                    }
                     if fill.fee_asset == "BNB" {
                         state.futures_bnb -= fee;
                     } else {
@@ -689,9 +688,44 @@ async fn spot_full_partial_and_unfilled_orders_settle_exact_fees() {
         if fee == "0" {
             assert_eq!(verified.evidence["noFill"], true);
         } else {
-            assert_eq!(verified.evidence["balanceChangesVerified"], true);
+            assert_eq!(verified.evidence["balanceChangesVerified"], false);
         }
     }
+}
+
+#[tokio::test]
+async fn no_fill_converges_despite_unrelated_balance_change() {
+    let mut fill = Fill::none();
+    fill.pending = true;
+    let venue = Venue::new(vec![fill]);
+    let auth = approve(ApprovalMode::Accept);
+    let engine = make_engine(
+        venue.clone(),
+        prices(),
+        auth.clone(),
+        Store::in_memory().unwrap(),
+    );
+    let initial = engine
+        .execute(request(
+            input("synthetic-no-fill-concurrent", "BUY", false),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(initial.status, Status::Pending);
+    {
+        let mut state = venue.state.lock().unwrap();
+        *state.spot.get_mut("USDT").unwrap() += units("5");
+        state.orders.values_mut().next().unwrap().row["status"] = json!("EXPIRED");
+    }
+    let result = engine.status(&initial.id, true).await.unwrap();
+    assert_eq!(result.status, Status::Failed, "{result:?}");
+    let view = engine.operation_view(&result).unwrap();
+    assert_eq!(view["outcome"]["replay_safe"], true);
+    assert_eq!(view["outcome"]["retry_approval"], "required");
+    assert_eq!(result.effects.unwrap().evidence["noFill"], true);
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -727,6 +761,8 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
         auth.clone(),
         Store::open(&path).unwrap(),
     );
+    // An independent account movement must not block correlated fill evidence.
+    *venue.state.lock().unwrap().spot.get_mut("USDT").unwrap() += units("5");
     venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
     let recovered = restarted.status(&initial.id, true).await.unwrap();
     assert_eq!(recovered.status, Status::Completed, "{recovered:?}");
@@ -762,9 +798,13 @@ async fn authorization_denial_and_expiry_never_send_orders() {
 }
 
 #[tokio::test]
-async fn filters_and_valuation_changes_after_approval_reject_without_post() {
+async fn changed_filters_reject_but_advisory_valuation_does_not() {
     for change_price in [false, true] {
-        let venue = Venue::new(vec![]);
+        let venue = Venue::new(if change_price {
+            vec![Fill::full("ETH", "0.00002")]
+        } else {
+            vec![]
+        });
         let prices = prices();
         let copied_venue = venue.clone();
         let copied_prices = prices.clone();
@@ -792,9 +832,14 @@ async fn filters_and_valuation_changes_after_approval_reject_without_post() {
             ))
             .await
             .unwrap();
-        assert_no_post(&record, &venue);
         assert!(record.approval.is_some());
-        assert_eq!(record.error.as_ref().unwrap().code, "PREVIEW_CHANGED");
+        if change_price {
+            assert_eq!(record.status, Status::Completed);
+            assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+        } else {
+            assert_no_post(&record, &venue);
+            assert_eq!(record.error.as_ref().unwrap().code, "PREVIEW_CHANGED");
+        }
     }
 }
 
@@ -910,14 +955,9 @@ async fn retired_run_id_refuses_new_write_before_approval() {
     );
     let mut operation = request(input("synthetic-retired-run-order", "BUY", false), false);
     operation.run_id = Some("synthetic-retired-run".into());
-    let rejected = engine.execute(operation.clone()).await.unwrap();
-    assert_eq!(rejected.status, Status::Rejected);
-    assert_eq!(rejected.error.as_ref().unwrap().code, "RUN_RETIRED");
-    assert!(rejected.preview.is_none());
-    assert!(rejected.submission.is_none());
-    let duplicate = engine.execute(operation).await.unwrap();
-    assert_eq!(duplicate.id, rejected.id);
-    assert_eq!(engine.operations().unwrap().len(), 1);
+    let error = engine.execute(operation).await.unwrap_err();
+    assert_eq!(error.code, "EXECUTION_INTERFACE_RETIRED");
+    assert!(engine.operations().unwrap().is_empty());
     assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
 }
@@ -953,8 +993,8 @@ async fn missing_fill_proof_retains_original_unknown_identity_without_another_wr
 }
 
 #[tokio::test]
-async fn ordinary_policy_blocks_allocation_over_100_usd_before_approval() {
-    let venue = Venue::new(vec![]);
+async fn ordinary_native_order_ignores_retired_allocation_limit() {
+    let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
     venue.state.lock().unwrap().collateral = units("200");
     let auth = approve(ApprovalMode::Accept);
     let engine = Engine::new(
@@ -973,9 +1013,9 @@ async fn ordinary_policy_blocks_allocation_over_100_usd_before_approval() {
     open["quantity"] = json!("0.051");
     open["maximum_fees"] = json!({"USDT":"0.2"});
     let record = engine.execute(request(open, true)).await.unwrap();
-    assert_no_post(&record, &venue);
-    assert_eq!(record.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(record.status, Status::Completed, "{record:?}");
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -999,6 +1039,10 @@ async fn explicit_cancellation_owns_no_fills_and_original_reconciles_partial_tra
         let original_request = request(input("synthetic-open-remainder", "BUY", futures), futures);
         let original = engine.execute(original_request.clone()).await.unwrap();
         assert_eq!(original.status, Status::Pending, "{original:?}");
+        assert_eq!(
+            original.last_reconciliation_evidence.as_ref().unwrap()["outcome_live_order"],
+            true
+        );
         assert!(original.effects.is_none());
         let identity = original.submission.clone().unwrap();
         let cancel_request = OperationRequest {
@@ -1055,7 +1099,7 @@ async fn fund_between_legs(venue: &Venue, income: &str) {
 }
 
 #[tokio::test]
-async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cursor() {
+async fn historical_funding_between_actions_is_not_attributed_to_new_close() {
     for income in ["-0.05", "0.05"] {
         let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
         let auth = approve(ApprovalMode::Accept);
@@ -1080,15 +1124,8 @@ async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cur
         let closed = engine.execute(closing).await.unwrap();
         assert_eq!(closed.status, Status::Completed, "{closed:?}");
         let effects = &closed.effects.as_ref().unwrap().effects;
-        let funding_atoms =
-            gofin_domain::Quantity::from_decimal(income.trim_start_matches('-'), 36).unwrap();
-        let expected_delta = if income.starts_with('-') {
-            gofin_domain::SignedQuantity::negative(&funding_atoms)
-        } else {
-            gofin_domain::SignedQuantity::positive(&funding_atoms)
-        };
-        assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta, .. } if *delta == expected_delta)));
-        assert_eq!(effects.iter().filter(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { category, treatment: gofin_domain::CostTreatment::IncludedInDebit, amount, .. } if category == "funding_loss" && amount.atoms == funding_atoms)).count(), usize::from(income.starts_with('-')));
+        assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta, .. } if *delta == gofin_domain::SignedQuantity::new("0").unwrap())));
+        assert!(!effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { category, .. } if category == "funding_loss")));
         assert_eq!(venue.state.lock().unwrap().position, 0);
         assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
@@ -1100,7 +1137,7 @@ async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cur
 }
 
 #[tokio::test]
-async fn funding_above_frozen_loss_cap_remains_unknown_without_budget_increase_or_replay() {
+async fn historical_funding_above_new_action_cap_is_not_attributed_or_replayed() {
     let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
     let auth = approve(ApprovalMode::Accept);
     let engine = Engine::new(
@@ -1122,19 +1159,22 @@ async fn funding_above_frozen_loss_cap_remains_unknown_without_budget_increase_o
     fund_between_legs(&venue, "-0.2").await;
     let closing = request(close, true);
     let outcome = engine.execute(closing.clone()).await.unwrap();
-    assert_ne!(outcome.status, Status::Completed, "{outcome:?}");
-    assert!(outcome.error.is_some() || outcome.last_reconciliation_evidence.is_some());
+    assert_eq!(outcome.status, Status::Completed, "{outcome:?}");
+    assert_ne!(
+        engine.operation_view(&outcome).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
+    );
     let before = venue.posts.load(Ordering::SeqCst);
     let duplicate = engine.execute(closing).await.unwrap();
     assert_eq!(duplicate.id, outcome.id);
     assert_eq!(venue.posts.load(Ordering::SeqCst), before);
-    assert!(outcome.effects.is_none());
+    assert!(outcome.effects.is_some());
     assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn low_limit_futures_sell_uses_finite_venue_ceiling_for_margin_and_policy() {
-    let venue = Venue::new(vec![]);
+async fn low_limit_futures_sell_retains_finite_venue_ceiling_without_usd_gate() {
+    let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
     venue.state.lock().unwrap().collateral = units("200");
     *venue.maximum_price.lock().unwrap() = "6000".into();
     let auth = approve(ApprovalMode::Accept);
@@ -1148,25 +1188,46 @@ async fn low_limit_futures_sell_uses_finite_venue_ceiling_for_margin_and_policy(
     open["limit_price"] = json!("500");
     open["maximum_fees"] = json!({"USDT":"0.15"});
     let record = engine.execute(request(open, true)).await.unwrap();
-    assert_no_post(&record, &venue);
-    assert_eq!(
-        record.error.as_ref().unwrap().code,
-        "MOVEMENT_LIMIT",
-        "{record:?}"
-    );
+    assert_eq!(record.status, Status::Completed, "{record:?}");
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         record
             .preview
-            .as_ref()
             .unwrap()
             .valuation
-            .as_ref()
             .unwrap()
             .movement_usd_micros
             .to_string(),
         "120000000"
     );
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn correlated_futures_fill_is_independent_of_unrelated_wallet_credit() {
+    let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
+    venue
+        .unrelated_futures_wallet_credit
+        .store(true, Ordering::SeqCst);
+    let engine = make_engine(
+        venue.clone(),
+        prices(),
+        approve(ApprovalMode::Accept),
+        Store::in_memory().unwrap(),
+    );
+    let record = engine
+        .execute(request(
+            input("synthetic-unrelated-credit", "BUY", true),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.status, Status::Completed, "{record:?}");
+    assert!(record.effects.is_some());
+    assert_eq!(
+        record.last_reconciliation_evidence.as_ref().unwrap()["balanceChangesVerified"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -1302,11 +1363,11 @@ async fn concurrent_same_logical_order_requests_share_one_submission_and_one_app
         tokio::join!(engine.execute(operation.clone()), engine.execute(operation));
     let first = first.unwrap();
     let second = second.unwrap();
-    assert_eq!(first.status, Status::Completed, "{first:?}");
-    assert_eq!(second.status, Status::Completed, "{second:?}");
     assert_eq!(first.id, second.id);
-    assert_eq!(first.submission, second.submission);
-    assert_eq!(first.effects, second.effects);
+    let observed = engine.status(&second.id, true).await.unwrap();
+    assert_eq!(observed.status, Status::Completed);
+    assert!(observed.submission.is_some());
+    assert!(observed.effects.is_some());
     assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
     assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
 }
@@ -1468,10 +1529,20 @@ async fn ordinary_partial_or_expired_ioc_close_retains_exposure_and_exact_identi
         assert_eq!(opened.status, Status::Completed, "{opened:?}");
         let closing = request(close, true);
         let settled = engine.execute(closing.clone()).await.unwrap();
-        assert_eq!(settled.status, Status::Completed, "{settled:?}");
+        assert_eq!(
+            settled.status,
+            if partial {
+                Status::Completed
+            } else {
+                Status::Failed
+            },
+            "{settled:?}"
+        );
         let remaining = if partial { "0.01" } else { "0.02" };
         assert_eq!(decimal(venue.state.lock().unwrap().position), remaining);
-        assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.to_decimal(36)==remaining)));
+        if partial {
+            assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,gofin_domain::FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.to_decimal(36)==remaining)));
+        }
         assert!(Store::open(&path).unwrap().get_run(id).unwrap().is_none());
         let duplicate = engine.execute(closing).await.unwrap();
         assert_eq!(duplicate.id, settled.id);
@@ -1668,6 +1739,139 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
         } else {
             assert_no_post(&result, &venue);
         }
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn external_futures_position_can_be_reduced_without_historical_anchor() {
+    for (position, side) in [("0.02", "SELL"), ("-0.02", "BUY")] {
+        let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
+        venue.state.lock().unwrap().position = units(position);
+        let auth = approve(ApprovalMode::Accept);
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let mut close = input("synthetic-external-position", side, true);
+        close["reduce_only"] = json!(true);
+        let closed = engine.execute(request(close, true)).await.unwrap();
+        assert_eq!(closed.status, Status::Completed, "{closed:?}");
+        let binding = &closed.preview.as_ref().unwrap().binding;
+        assert_eq!(
+            binding[gofin_domain::BASELINE_ANCHORS_KEY][0]["principal"]["atoms"],
+            gofin_domain::Quantity::from_decimal("0.02", 36)
+                .unwrap()
+                .to_string()
+        );
+        assert!(binding.get("priorAnchor").is_none());
+        assert_eq!(venue.state.lock().unwrap().position, 0);
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn changed_position_after_approval_never_dispatches_reduce_only_order() {
+    for changed in ["0.01", "-0.02", "0"] {
+        let venue = Venue::new(vec![]);
+        venue.state.lock().unwrap().position = units("0.02");
+        let copied = venue.clone();
+        let auth = Arc::new(Approval {
+            calls: AtomicUsize::new(0),
+            mode: ApprovalMode::Accept,
+            mutate: Some(Arc::new(move || {
+                copied.state.lock().unwrap().position = units(changed)
+            })),
+        });
+        let engine = make_engine(venue.clone(), prices(), auth, Store::in_memory().unwrap());
+        let mut close = input("synthetic-changed-position", "SELL", true);
+        close["reduce_only"] = json!(true);
+        let result = engine.execute(request(close, true)).await.unwrap();
+        assert_ne!(result.status, Status::Completed, "{result:?}");
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn legacy_futures_refresh_preserves_approved_binding_hash() {
+    use gofin_domain::Adapter;
+    let venue = Venue::new(vec![]);
+    venue.state.lock().unwrap().position = units("0.02");
+    let adapter = adapter(venue, prices());
+    let mut close = input("synthetic-legacy-refresh", "SELL", true);
+    close["reduce_only"] = json!(true);
+    let mut prepared = adapter
+        .prepare("binance.futures.order-place", &close)
+        .await
+        .unwrap();
+    prepared
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove(gofin_domain::BASELINE_ANCHORS_KEY);
+    let refreshed = adapter.revalidate(&prepared).await.unwrap();
+    assert!(
+        refreshed
+            .binding
+            .get(gofin_domain::BASELINE_ANCHORS_KEY)
+            .is_none()
+    );
+    assert_eq!(
+        gofin_domain::binding_hash(&gofin_domain::authorization_binding(&prepared)).unwrap(),
+        gofin_domain::binding_hash(&gofin_domain::authorization_binding(&refreshed)).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn funding_during_action_respects_approved_bounds_without_replay() {
+    for (income, discrepancy) in [
+        ("-0.05", false),
+        ("0.05", false),
+        ("-0.2", true),
+        ("0.2", true),
+    ] {
+        let mut fill = Fill::full("USDT", "0.04");
+        fill.pending = true;
+        let venue = Venue::new(vec![fill]);
+        let auth = approve(ApprovalMode::Accept);
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let mut order = input("synthetic-action-funding", "BUY", true);
+        order["maximum_funding_loss"] = json!("0.1");
+        order["maximum_funding_profit"] = json!("0.1");
+        let request = request(order, true);
+        let original = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(original.status, Status::Pending, "{original:?}");
+        let original_submission = original.submission.clone();
+        fund_between_legs(&venue, income).await;
+        for order in venue.state.lock().unwrap().orders.values_mut() {
+            order.row["status"] = json!("FILLED");
+        }
+        let settled = engine.status(&original.id, true).await.unwrap();
+        assert_eq!(settled.status, Status::Completed, "{income}: {settled:?}");
+        assert_eq!(settled.submission, original_submission);
+        let funding =
+            gofin_domain::Quantity::from_decimal(income.trim_start_matches('-'), 36).unwrap();
+        let delta = if income.starts_with('-') {
+            gofin_domain::SignedQuantity::negative(&funding)
+        } else {
+            gofin_domain::SignedQuantity::positive(&funding)
+        };
+        assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Settlement { category: gofin_domain::SettlementCategory::Funding, delta: actual, .. } if *actual == delta)));
+        assert_eq!(
+            engine.operation_view(&settled).unwrap()["outcome"]["attention"]["kind"]
+                == "discrepancy",
+            discrepancy,
+            "{income}"
+        );
+        assert_eq!(engine.execute(request).await.unwrap().id, original.id);
+        assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
     }
 }

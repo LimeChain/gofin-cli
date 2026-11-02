@@ -651,7 +651,10 @@ async fn reverted_receipt_requires_original_fields_canonical_block_and_confirmat
         .unwrap()
         .unwrap();
     assert!(!receipt.success);
-    assert_eq!(receipt.fee, U256::from(21000) * U256::from(10_000_000));
+    assert_eq!(
+        receipt.fee,
+        Some(U256::from(21000) * U256::from(10_000_000))
+    );
     let mut wrong = frozen();
     wrong.nonce += 1;
     assert_eq!(

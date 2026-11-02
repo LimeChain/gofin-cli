@@ -11,7 +11,9 @@
       "cargo",
       "make"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-jlp-outcome.json"
+    },
     "prepare": [
       [
         "cargo",
@@ -26,7 +28,8 @@
         "--summary",
         "{artifacts}/jupiter-jlp-summary.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/jupiter-jlp-outcome.json"
   },
   {
     "id": "jupiter-perpetuals",
@@ -36,7 +39,9 @@
     "requires": [
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-perpetuals-outcome.json"
+    },
     "prepare": [
       [
         "cargo",
@@ -51,6 +56,57 @@
         "--summary",
         "{artifacts}/jupiter-perps-summary.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/jupiter-perpetuals-outcome.json"
+  },
+  {
+    "id": "jupiter-quote-expiry-cli",
+    "group": "solana",
+    "environment": "mock",
+    "description": "Public CLI refreshes an expired Jupiter quote under one native approval; a refreshed quote below the approved floor dispatches nothing. Controlled provider transport, no live writes.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-jupiter-refresh-build",
+      "GOFIN_JUPITER_REFRESH_CLI": "{artifacts}/jupiter-refresh-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-quote-expiry-cli-outcome.json"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/jupiter-refresh-cli"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--example",
+        "gofin-dev-broker",
+        "expired_jupiter_quote",
+        "--",
+        "--nocapture"
+      ],
+      [
+        "{python}",
+        "{repo}/scripts/e2e/jupiter-expiry-evidence.py"
+      ]
+    ],
+    "expected_tests": 2,
+    "evidence": "{artifacts}/jupiter-quote-expiry-cli-outcome.json"
   }
 ]

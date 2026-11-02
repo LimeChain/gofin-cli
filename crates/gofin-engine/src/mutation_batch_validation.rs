@@ -28,11 +28,6 @@ fn add(target: &mut BTreeMap<String, BigUint>, values: BTreeMap<String, BigUint>
         *target.entry(key).or_default() += value;
     }
 }
-fn total(value: &gofin_domain::Valuation) -> BigUint {
-    value.movement_usd_micros.integer()
-        + value.maximum_fee_usd_micros.integer()
-        + value.additional_allocation_usd_micros.integer()
-}
 fn restrict_tags(
     prepared: &PreparedOperation,
     tags: &BTreeSet<String>,
@@ -96,7 +91,6 @@ impl Engine {
         let mut debit_requirements = BTreeMap::new();
         let mut cost_requirements = BTreeMap::new();
         let mut locks = BTreeSet::new();
-        let mut required_usd = BigUint::zero();
         for group in &groups {
             if !owners.insert(group.operation_id.clone()) {
                 return Err(invalid("A composed request repeats an original owner."));
@@ -123,38 +117,17 @@ impl Engine {
                 &aggregate_cost_bounds(&old.maximum_costs)?,
                 &aggregate_cost_bounds(&new.maximum_costs)?,
             );
-            let incremental=group.incremental_valuation.as_ref().ok_or_else(||invalid("Each composed group requires its own freshly priced positive incremental valuation."))?;
             let mut isolated = restrict_tags(prepared, &local)?;
             isolated.intent = grouped_amendments::incremental_intent(old, new, &debits, &costs)?;
             isolated.intent.expected = vec![EffectConstraint::GroupedSubmissionAmendments {
                 group: Box::new((*group).clone()),
             }];
-            isolated.valuation = Some(incremental.clone());
+            isolated.valuation = group.incremental_valuation.clone();
             self.validate_grouped_amendments(&isolated, None, false, attempt_id)
                 .map_err(|mut error| {
                     error.message = format!("Grouped partition: {}", error.message);
                     error
                 })?;
-            let old_usd = total(
-                group
-                    .original_scope
-                    .valuation
-                    .as_ref()
-                    .ok_or_else(|| invalid("Original group valuation is missing."))?,
-            );
-            let new_usd = total(
-                group
-                    .approved_envelope
-                    .valuation
-                    .as_ref()
-                    .ok_or_else(|| invalid("Revised group valuation is missing."))?,
-            );
-            let scalar = if new_usd > old_usd {
-                new_usd - old_usd
-            } else {
-                BigUint::zero()
-            };
-            required_usd += std::cmp::max(total(incremental), scalar);
             add(&mut debit_requirements, debits);
             add(&mut cost_requirements, costs);
             locks.extend(old.locks.iter().cloned());
@@ -215,45 +188,6 @@ impl Engine {
                             &aggregate_cost_bounds(&revision.intent.maximum_costs)?,
                         ),
                     );
-                    let incremental=child.incremental_valuation.as_ref().ok_or_else(||invalid("Each composed independent amendment requires a fresh positive incremental valuation."))?;
-                    let mut priced = isolated.clone();
-                    priced.valuation = Some(incremental.clone());
-                    // Its price rows describe this one positive authority delta,
-                    // not the complete parent/new-write asset set. The root
-                    // ceiling and each full revision are validated separately.
-                    if incremental.prices.is_empty() {
-                        // Older synthetic/unpriced scopes had no typed ceiling.
-                        // Do not copy a different partition's price identities.
-                        if let Some(binding) = priced.binding.as_object_mut() {
-                            gofin_domain::product_names::remove(
-                                binding,
-                                gofin_domain::value_bounds::KEY,
-                            );
-                        }
-                    } else {
-                        gofin_domain::value_bounds::bind(&mut priced);
-                    }
-                    let old_value = linked
-                        .context
-                        .effective_scope()
-                        .and_then(|scope| scope.valuation.as_ref())
-                        .or(original.valuation.as_ref())
-                        .ok_or_else(|| invalid("Original child valuation is missing."))?;
-                    let new_value = revision
-                        .valuation
-                        .as_ref()
-                        .ok_or_else(|| invalid("Revised child valuation is missing."))?;
-                    let old_usd = total(old_value);
-                    let new_usd = total(new_value);
-                    required_usd += std::cmp::max(
-                        total(incremental),
-                        if new_usd > old_usd {
-                            new_usd - old_usd
-                        } else {
-                            BigUint::zero()
-                        },
-                    );
-                    validate_prepared(&priced, &prepared.operation, Utc::now())?;
                 }
             }
         }
@@ -280,9 +214,6 @@ impl Engine {
                     "The new financial partition differs from the parent batch constraints.",
                 ));
             }
-            let value = scope.valuation.as_ref().ok_or_else(|| {
-                invalid("New financial actions require their own full valuation.")
-            })?;
             let mut isolated = prepared.clone();
             isolated.intent = scope.intent.clone();
             isolated.binding = scope.binding;
@@ -294,11 +225,6 @@ impl Engine {
                 },
             )?;
             validate_cost_bound_contract(&isolated.intent)?;
-            validate_cost_prices(
-                &isolated,
-                &prepared_cost_assets(&isolated.intent),
-                Utc::now(),
-            )?;
             add(
                 &mut debit_requirements,
                 aggregate_resource_amounts(&isolated.intent.debits)?,
@@ -308,7 +234,6 @@ impl Engine {
                 aggregate_cost_bounds(&isolated.intent.maximum_costs)?,
             );
             locks.extend(isolated.intent.locks.iter().cloned());
-            required_usd += total(value);
         }
         let context = self
             .compound_preparation_context(&prepared.input)?
@@ -335,17 +260,6 @@ impl Engine {
         {
             return Err(invalid(
                 "The composed reservation must cover the sum of every positive original-owner increase.",
-            ));
-        }
-        if total(
-            prepared
-                .valuation
-                .as_ref()
-                .ok_or_else(|| invalid("Composed incremental valuation is missing."))?,
-        ) < required_usd
-        {
-            return Err(invalid(
-                "Composed USD allocation cannot reuse one owner's budget for a sibling.",
             ));
         }
         Ok(Some(binding_hash(&to_value(&(groups, compound))?)?))

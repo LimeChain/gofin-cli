@@ -10,7 +10,6 @@ pub(super) fn validate_recovery_append(
 ) -> Result<()> {
     let invalid = || StoreError::BridgeConflict;
     if old.grant_id.is_some()
-        || old.approved_bounds.is_none()
         || !matches!(
             old.state,
             T::InTransit | T::DestinationPending | T::NeedsAttention
@@ -252,6 +251,42 @@ mod tests {
         }
     }
     #[test]
+    fn compound_recovery_without_legacy_bounds_requires_linked_proved_stage() {
+        let mut store = Store::in_memory().unwrap();
+        let mut old = parent();
+        old.approved_bounds = None;
+        seed(&mut store, &old);
+        let next = recovery(&old);
+        assert!(store.append_cctp_recovery(&old, &next).is_err());
+        let action = json!({"preview":{"binding":{"compound_bridge":true,"transfer_id":old.id}}});
+        store
+            .create_request(
+                "action",
+                "action",
+                "action",
+                "bridge.execute",
+                None,
+                "pending",
+                &action,
+                "t",
+            )
+            .unwrap();
+        store.conn.execute_batch("INSERT INTO logical_actions VALUES ('action','2099-01-01T00:00:00Z'); INSERT INTO action_authorities(action_id,authority_id,authority_json,audit_json,expires_at) VALUES ('action','auth','{}','{}','2099-01-01T00:00:00Z'); INSERT INTO stage_attempts(token,action_id,stage_id,generation,authority_id,operation_id,state) VALUES ('token','action','mint',1,'auth','SYNTHETIC-mint-op','failed'); INSERT INTO submissions VALUES ('SYNTHETIC-mint-op','ethereum','tx','{}');").unwrap();
+        assert!(store.append_cctp_recovery(&old, &next).is_err());
+        let mut proof: gofin_domain::VerifiedEffects = serde_json::from_value(json!({"evidence_version":1,"submission":{"kind":"ethereum","reference":"tx","data":{}},"effects":[],"evidence":{},"observed_at":"2026-01-01T00:00:00Z","proof_digest":""})).unwrap();
+        proof.proof_digest = gofin_domain::verified_effect_digest(&proof).unwrap();
+        let record = json!({"status":"failed","effects":proof});
+        store
+            .conn
+            .execute(
+                "UPDATE operations SET record_json=?1 WHERE id='SYNTHETIC-mint-op'",
+                [record.to_string()],
+            )
+            .unwrap();
+        assert_eq!(store.append_cctp_recovery(&old, &next).unwrap(), next);
+    }
+
+    #[test]
     fn cctp_message_settlement_requires_immutable_burn_and_source_evidence() {
         let record = parent();
         let transit = record.transit.as_ref().unwrap();
@@ -469,10 +504,11 @@ mod tests {
                     .conn
                     .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
                     .unwrap();
+                store.conn.execute_batch("DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; ").unwrap();
                 store.conn.pragma_update(None, "user_version", 17).unwrap();
                 store
                     .conn
-                    .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=18;")
+                    .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=18;")
                     .unwrap();
             }
             let store = Store::open(&path).unwrap();
@@ -507,11 +543,12 @@ mod tests {
                 .conn
                 .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
                 .unwrap();
+            store.conn.execute_batch("DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; ").unwrap();
             store.conn.pragma_update(None, "user_version", 16).unwrap();
             // Model interruption before committing the version marker.
             store
                 .conn
-                .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=17;")
+                .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; DROP TABLE IF EXISTS preapproval_continuations; DROP TABLE IF EXISTS verified_position_anchors; DROP TABLE IF EXISTS reauthorization_claims; DROP TABLE IF EXISTS submission_admissions; DROP TABLE IF EXISTS evm_definitive_rejections; DROP TABLE IF EXISTS evm_submission_nonces; DROP TABLE IF EXISTS evm_nonce_claims; DROP TABLE IF EXISTS action_continuations; DROP TABLE IF EXISTS stage_attempts; DROP TABLE IF EXISTS action_authorities; DROP TABLE IF EXISTS logical_actions; DROP TABLE IF EXISTS outcome_dismissals; DROP TABLE IF EXISTS outcome_observations; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=17;")
                 .unwrap();
         }
         let reopened = Store::open(&path).unwrap();

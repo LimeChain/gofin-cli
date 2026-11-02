@@ -2042,7 +2042,7 @@ mod tests {
             block_number: 10,
             confirmations: 5,
             success: true,
-            fee: gofin_evm::alloy::primitives::U256::from(1),
+            fee: Some(gofin_evm::alloy::primitives::U256::from(1)),
             receipt: json!({"logs":[{
                 "address":emitter,
                 "topics":[topic,event_address_topic(OWNER).unwrap()],

@@ -24,18 +24,20 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 const CLIENT_IDENTITY: &str = "synthetic-uniswap";
 const KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+const KEY2: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 const NATIVE: &str = "0x0000000000000000000000000000000000000000";
 const INPUT: &str = "0x0000000000000000000000000000000000000065";
 const OUTPUT: &str = "0x0000000000000000000000000000000000000066";
 const REACTOR: &str = "0x00000000000000000000000000000000000001d6";
 const PERMIT2: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+const REVERT_TARGET: &str = "0x000000000000000000000000000000000000beef";
 include!("support/uniswap_cli.rs");
 sol! {
     function mint(address to,uint256 amount);
@@ -48,6 +50,13 @@ fn addr(v: &str) -> Address {
 fn owner() -> String {
     lower_address(
         LocalEnvelopeSigner::from_private_key(KEY)
+            .unwrap()
+            .address(),
+    )
+}
+fn other_owner() -> String {
+    lower_address(
+        LocalEnvelopeSigner::from_private_key(KEY2)
             .unwrap()
             .address(),
     )
@@ -70,10 +79,21 @@ struct Rpc {
     client: reqwest::Client,
     broadcasts: AtomicUsize,
     traces: AtomicUsize,
+    install_revert_before_broadcast: AtomicBool,
 }
 #[async_trait]
 impl EvmRpc for Rpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_sendRawTransaction"
+            && self
+                .install_revert_before_broadcast
+                .swap(false, Ordering::SeqCst)
+        {
+            let response:Value=self.client.post(&self.url).json(&json!({"jsonrpc":"2.0","id":1,"method":"anvil_setCode","params":[REVERT_TARGET,"0x60006000fd"]})).send().await.map_err(|e|fail(&e.to_string()))?.json().await.map_err(|e|fail(&e.to_string()))?;
+            if !response["error"].is_null() {
+                return Err(fail("could not install synthetic reverting code"));
+            }
+        }
         let v: Value = self
             .client
             .post(&self.url)
@@ -121,6 +141,7 @@ async fn node(chain: u64) -> (Node, Arc<Rpc>, String) {
         url: format!("http://127.0.0.1:{port}"),
         client: reqwest::Client::new(),
         broadcasts: AtomicUsize::new(0),
+        install_revert_before_broadcast: AtomicBool::new(false),
         traces: AtomicUsize::new(0),
     });
     for attempt in 0..100 {
@@ -197,11 +218,49 @@ impl WalletValuation for Prices {
     }
 }
 #[derive(Default)]
-struct Approval(AtomicUsize);
+struct Approval(AtomicUsize, Option<Arc<ExpiryApproval>>);
+struct QuoteClock(AtomicBool);
+impl gofin_domain::clock::Clock for QuoteClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        // A controlled old fee observation leaves one second of its normal
+        // five-minute validity. Engine authorization uses the real clock.
+        chrono::Utc::now()
+            - chrono::Duration::seconds(if self.0.load(Ordering::SeqCst) {
+                299
+            } else {
+                0
+            })
+    }
+}
+struct ExpiryApproval {
+    clock: Arc<QuoteClock>,
+    rpc: Arc<Rpc>,
+    breach: bool,
+}
+
 #[async_trait]
 impl Authorizer for Approval {
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
+        if let Some(expiry) = &self.1
+            && expiry.clock.0.load(Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            expiry.clock.0.store(false, Ordering::SeqCst);
+            let fee = if expiry.breach {
+                1_000_000_000_000u64
+            } else {
+                2_000_000_000u64
+            };
+            expiry
+                .rpc
+                .request(
+                    "anvil_setNextBlockBaseFeePerGas",
+                    json!([format!("{fee:#x}")]),
+                )
+                .await?;
+            expiry.rpc.request("anvil_mine", json!(["0x1"])).await?;
+        }
         Ok(ApprovalAudit {
             mechanism: "automatic isolated Anvil test approval".into(),
             source: None,
@@ -222,6 +281,8 @@ struct Provider {
     fill: Mutex<BTreeMap<String, String>>,
     orders: AtomicUsize,
     swaps: AtomicUsize,
+    quote_unavailable: bool,
+    adverse_fill: bool,
     store_path: std::path::PathBuf,
 }
 impl Provider {
@@ -291,8 +352,8 @@ impl Provider {
                         quote["input"]["token"].as_str().unwrap(),
                         quote["output"]["token"].as_str().unwrap(),
                         amount,
-                    ) * 995
-                        / 1000,
+                    ) * if self.adverse_fill { 98 } else { 995 }
+                        / if self.adverse_fill { 100 } else { 1000 },
                 ),
                 orderHash: if self.routing == "CLASSIC" {
                     B256::ZERO
@@ -315,6 +376,14 @@ impl UniswapApiTransport for Provider {
         match request {
             UniswapApiRequest::Post { path, body } => match path.as_str() {
                 "/quote" => {
+                    if self.quote_unavailable {
+                        return Err(GoFinError::new(
+                            "SYNTHETIC_QUOTE_UNAVAILABLE",
+                            "quote",
+                            "Protocol quote is unavailable.",
+                            "Retry the quote later.",
+                        ));
+                    }
                     assert_eq!(body["permitAmount"], "EXACT");
                     Ok(self.quote(&body))
                 }
@@ -400,22 +469,40 @@ fn runtime(
 ) -> Arc<gofin_broker::BrokerRuntime> {
     let signer = Arc::new(LocalEnvelopeSigner::from_private_key(KEY).unwrap());
     let mapped = Arc::new(
-        gofin_broker::MappedEnvelopeSigner::new(BTreeMap::from([(
-            owner(),
-            signer as Arc<dyn gofin_evm::EnvelopeSigner>,
-        )]))
+        gofin_broker::MappedEnvelopeSigner::new(BTreeMap::from([
+            (owner(), signer as Arc<dyn gofin_evm::EnvelopeSigner>),
+            (
+                other_owner(),
+                Arc::new(LocalEnvelopeSigner::from_private_key(KEY2).unwrap())
+                    as Arc<dyn gofin_evm::EnvelopeSigner>,
+            ),
+        ]))
         .unwrap(),
     );
     let adapter = EthereumAdapter::new(
         EthereumConfig::wallet_only(provider.chain, 1, vec![INPUT.into(), OUTPUT.into()]),
-        vec![WalletConnection {
-            name: "synthetic".into(),
-            address: owner(),
-            signing_enabled: true,
-        }],
+        vec![
+            WalletConnection {
+                name: "synthetic".into(),
+                address: owner(),
+                signing_enabled: true,
+            },
+            WalletConnection {
+                name: "synthetic-other".into(),
+                address: other_owner(),
+                signing_enabled: true,
+            },
+        ],
         Arc::new(EvmRuntime::new(rpc, provider.chain, Some(mapped))),
     )
     .unwrap()
+    .with_clock(
+        approval
+            .1
+            .as_ref()
+            .map(|expiry| expiry.clock.clone() as Arc<dyn gofin_domain::clock::Clock>)
+            .unwrap_or_else(|| Arc::new(gofin_domain::clock::SystemClock)),
+    )
     .with_wallet_valuation(Arc::new(Prices))
     .with_uniswap_api(UniswapApiClient::with_transport(provider));
     // Production routes every EVM operation through this chain-bound wrapper,
@@ -473,7 +560,7 @@ async fn balance(rpc: &Rpc, token: &str) -> U256 {
     let value=rpc.request("eth_call",json!([{"to":token,"data":hex_bytes(&balanceOfCall{owner:addr(&owner())}.abi_encode())},"latest"])).await.unwrap();
     U256::abi_decode(&gofin_evm::rpc_bytes(&value).unwrap()).unwrap()
 }
-async fn positive(routing: &'static str, native: bool) {
+async fn positive(routing: &'static str, native: bool) -> (usize, usize) {
     let cli = std::env::var("GOFIN_UNISWAP_CLI").expect("public CLI path required");
     assert!(Path::new(&cli).is_file());
     let chain = if routing == "DUTCH_V3" { 42161 } else { 1 };
@@ -490,6 +577,8 @@ async fn positive(routing: &'static str, native: bool) {
         fill: Mutex::new(BTreeMap::new()),
         orders: AtomicUsize::new(0),
         swaps: AtomicUsize::new(0),
+        quote_unavailable: false,
+        adverse_fill: false,
         store_path: path.clone(),
     });
     let approval = Arc::new(Approval::default());
@@ -589,6 +678,9 @@ async fn positive(routing: &'static str, native: bool) {
             result["last_reconciliation_evidence"], result["error"]
         );
 
+        assert_eq!(result["outcome"]["phase"], "done");
+        assert_eq!(result["outcome"]["result"], "executed");
+        assert_eq!(result["outcome"]["replay_safe"], false);
         let replay = client.call(execute_args, request, true).await;
         assert_eq!(replay["id"], result["id"]);
         assert_eq!(replay["status"], "completed");
@@ -652,16 +744,585 @@ async fn positive(routing: &'static str, native: bool) {
             "native settlement must use real Anvil callTracer evidence"
         );
     }
+    (
+        approval.0.load(Ordering::SeqCst),
+        rpc.broadcasts.load(Ordering::SeqCst) + provider.orders.load(Ordering::SeqCst),
+    )
+}
+fn write_venue_counts(scenario: &str, counts: (usize, usize)) {
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":scenario,"approval_count":counts.0,"external_submission_count":counts.1,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires public gofin-dev CLI and owned Anvil"]
 async fn public_cli_uniswap_api_amm_settles() {
-    positive("CLASSIC", false).await;
-    positive("CLASSIC", true).await;
+    let first = positive("CLASSIC", false).await;
+    let second = positive("CLASSIC", true).await;
+    write_venue_counts("uniswap-api-amm", (first.0 + second.0, first.1 + second.1));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires public gofin-dev CLI and owned Anvil"]
 async fn public_cli_uniswap_api_uniswapx_settles() {
-    positive("DUTCH_V2", false).await;
-    positive("DUTCH_V3", false).await;
+    let first = positive("DUTCH_V2", false).await;
+    let second = positive("DUTCH_V3", false).await;
+    write_venue_counts(
+        "uniswap-api-uniswapx",
+        (first.0 + second.0, first.1 + second.1),
+    );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires public gofin-dev CLI and owned Anvil"]
+async fn public_cli_protocol_quote_outage_fails_before_authorization() {
+    assert!(
+        std::env::var("GOFIN_UNISWAP_CLI").is_ok(),
+        "public CLI required"
+    );
+    let (_node, rpc, filler) = node(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store.sqlite");
+    let deadline = chrono::Utc::now().timestamp() as u64 + 300;
+    let provider = Arc::new(Provider {
+        rpc: rpc.clone(),
+        chain: 1,
+        routing: "CLASSIC",
+        deadline,
+        filler,
+        fill: Mutex::new(BTreeMap::new()),
+        orders: AtomicUsize::new(0),
+        swaps: AtomicUsize::new(0),
+        quote_unavailable: true,
+        adverse_fill: false,
+        store_path: path.clone(),
+    });
+    let approval = Arc::new(Approval::default());
+    let client = Client::new(
+        runtime(&path, rpc.clone(), provider.clone(), approval.clone()),
+        temp.path(),
+    )
+    .await;
+    let input = json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"quote-outage","token_in":"native","token_out":OUTPUT,"recipient":owner(),"amount":"0.001","min_output":"1","max_fee_eth":"0.001","slippage_bps":100,"deadline":deadline,"route_preference":"amm"});
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: "quote-outage".into(),
+            operation: "uniswap.swap".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let result = client
+        .call(
+            args(&[
+                "execute",
+                "uniswap.swap",
+                "--input",
+                &input.to_string(),
+                "--id",
+                "quote-outage",
+                "--json",
+            ]),
+            request,
+            true,
+        )
+        .await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(
+        result["error"]["code"], "SYNTHETIC_QUOTE_UNAVAILABLE",
+        "{result}"
+    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.orders.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.swaps.load(Ordering::SeqCst), 0);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 0);
+    assert!(result["submission"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires public gofin-dev CLI and owned Anvil"]
+async fn public_cli_adverse_uniswapx_fill_is_reported_as_executed_discrepancy() {
+    assert!(std::env::var("GOFIN_UNISWAP_CLI").is_ok());
+    let (_node, rpc, filler) = node(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store.sqlite");
+    let deadline = chrono::Utc::now().timestamp() as u64 + 300;
+    let provider = Arc::new(Provider {
+        rpc: rpc.clone(),
+        chain: 1,
+        routing: "DUTCH_V2",
+        deadline,
+        filler,
+        fill: Mutex::new(BTreeMap::new()),
+        orders: AtomicUsize::new(0),
+        swaps: AtomicUsize::new(0),
+        quote_unavailable: false,
+        adverse_fill: true,
+        store_path: path.clone(),
+    });
+    let approval = Arc::new(Approval::default());
+    let client = Client::new(
+        runtime(&path, rpc.clone(), provider.clone(), approval.clone()),
+        temp.path(),
+    )
+    .await;
+    let input = json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"positive-swap","token_in":INPUT,"token_out":OUTPUT,"recipient":owner(),"amount":"1","min_output":"0.99","max_fee_eth":"0.001","slippage_bps":100,"deadline":deadline,"route_preference":"uniswapx"});
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: "positive-swap".into(),
+            operation: "uniswap.swap".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let execute = args(&[
+        "execute",
+        "uniswap.swap",
+        "--input",
+        &input.to_string(),
+        "--id",
+        "positive-swap",
+        "--json",
+    ]);
+    let mut result = client.call(execute.clone(), request.clone(), true).await;
+    let id = result["id"].as_str().unwrap().to_owned();
+    for _ in 0..10 {
+        if result["status"] == "completed" {
+            break;
+        }
+        rpc.request("anvil_mine", json!(["0x40"])).await.unwrap();
+        result = client
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+                true,
+            )
+            .await;
+    }
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["outcome"]["result"], "executed");
+    assert_eq!(result["outcome"]["attention"]["kind"], "discrepancy");
+    assert_eq!(
+        result["outcome"]["attention"]["actual"]["output_atoms"],
+        "980000"
+    );
+    assert_eq!(
+        result["outcome"]["attention"]["approved"]["minimum_output_atoms"],
+        "990000"
+    );
+    let replay = client.call(execute, request, true).await;
+    assert_eq!(replay["id"], id);
+    assert_eq!(provider.orders.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    rpc.request(
+        "anvil_setBalance",
+        json!([other_owner(), "0x56bc75e2d63100000"]),
+    )
+    .await
+    .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
+    for (probe_id, wallet) in [
+        ("after-discrepancy-same", "synthetic"),
+        ("after-discrepancy-other", "synthetic-other"),
+    ] {
+        let input = json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x000000000000000000000000000000000000bEEF","max_fee_eth":"0.001"});
+        let request = BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: probe_id.into(),
+                operation: "wallet.transfer".into(),
+                input: input.clone(),
+                run_id: None,
+            },
+        };
+        let before = snapshot();
+        let probe = client
+            .call(
+                args(&[
+                    "execute",
+                    "wallet.transfer",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    probe_id,
+                    "--json",
+                ]),
+                request,
+                true,
+            )
+            .await;
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
+    }
+    assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a8","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires public gofin-dev CLI and owned Anvil"]
+async fn public_cli_anvil_revert_burns_gas_without_replay() {
+    let (_node, rpc, filler) = node(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store.sqlite");
+    let deadline = chrono::Utc::now().timestamp() as u64 + 300;
+    let provider = Arc::new(Provider {
+        rpc: rpc.clone(),
+        chain: 1,
+        routing: "CLASSIC",
+        deadline,
+        filler,
+        fill: Mutex::new(BTreeMap::new()),
+        orders: AtomicUsize::new(0),
+        swaps: AtomicUsize::new(0),
+        quote_unavailable: false,
+        adverse_fill: false,
+        store_path: path.clone(),
+    });
+    let approval = Arc::new(Approval::default());
+    let client = Client::new(
+        runtime(&path, rpc.clone(), provider, approval.clone()),
+        temp.path(),
+    )
+    .await;
+    // Preparation sees an ordinary recipient; code changes just before the
+    // admitted signed transaction reaches Anvil, causing a real EVM revert.
+    rpc.install_revert_before_broadcast
+        .store(true, Ordering::SeqCst);
+    let input = json!({"request_id":"revert-transfer","wallet":"synthetic","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":REVERT_TARGET,"max_fee_eth":"0.001"});
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: "revert-transfer".into(),
+            operation: "wallet.transfer".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let execute = args(&[
+        "execute",
+        "wallet.transfer",
+        "--input",
+        &input.to_string(),
+        "--id",
+        "revert-transfer",
+        "--json",
+    ]);
+    let mut result = client.call(execute.clone(), request.clone(), true).await;
+    let id = result["id"].as_str().unwrap().to_owned();
+    for _ in 0..10 {
+        if result["status"] == "failed" {
+            break;
+        }
+        rpc.request("anvil_mine", json!(["0x40"])).await.unwrap();
+        result = client
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+                true,
+            )
+            .await;
+    }
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["outcome"]["result"], "failed");
+    assert_eq!(result["outcome"]["replay_safe"], true);
+    assert_eq!(result["outcome"]["retry_approval"], "required");
+    assert_eq!(result["outcome"]["next_action"]["code"], "reauthorize");
+    assert!(result["effects"]["effects"].as_array().unwrap().iter().any(|e|e["kind"]=="cost" && e["amount"]["atoms"].as_str().is_some_and(|v|v!="0")));
+    let replay = client.call(execute, request, true).await;
+    assert_eq!(replay["id"], id);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    rpc.request(
+        "anvil_setBalance",
+        json!([other_owner(), "0x56bc75e2d63100000"]),
+    )
+    .await
+    .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
+    for (probe_id, wallet) in [
+        ("after-revert-same", "synthetic"),
+        ("after-revert-other", "synthetic-other"),
+    ] {
+        let input = json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x000000000000000000000000000000000000aAaA","max_fee_eth":"0.001"});
+        let request = BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: probe_id.into(),
+                operation: "wallet.transfer".into(),
+                input: input.clone(),
+                run_id: None,
+            },
+        };
+        let before = snapshot();
+        let probe = client
+            .call(
+                args(&[
+                    "execute",
+                    "wallet.transfer",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    probe_id,
+                    "--json",
+                ]),
+                request,
+                true,
+            )
+            .await;
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
+    }
+    assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a10","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires public gofin-dev CLI and owned Anvil"]
+async fn public_cli_anvil_finalized_nonce_replacement_proves_nonexecution() {
+    let (_node, rpc, filler) = node(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store.sqlite");
+    let deadline = chrono::Utc::now().timestamp() as u64 + 300;
+    let provider = Arc::new(Provider {
+        rpc: rpc.clone(),
+        chain: 1,
+        routing: "CLASSIC",
+        deadline,
+        filler,
+        fill: Mutex::new(BTreeMap::new()),
+        orders: AtomicUsize::new(0),
+        swaps: AtomicUsize::new(0),
+        quote_unavailable: false,
+        adverse_fill: false,
+        store_path: path.clone(),
+    });
+    let approval = Arc::new(Approval::default());
+    let client = Client::new(
+        runtime(&path, rpc.clone(), provider, approval.clone()),
+        temp.path(),
+    )
+    .await;
+    rpc.request("evm_setAutomine", json!([false]))
+        .await
+        .unwrap();
+    let input = json!({"request_id":"replaced-transfer","wallet":"synthetic","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x000000000000000000000000000000000000bEEF","max_fee_eth":"0.001"});
+    let request = BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: "replaced-transfer".into(),
+            operation: "wallet.transfer".into(),
+            input: input.clone(),
+            run_id: None,
+        },
+    };
+    let execute = args(&[
+        "execute",
+        "wallet.transfer",
+        "--input",
+        &input.to_string(),
+        "--id",
+        "replaced-transfer",
+        "--json",
+    ]);
+    let pending = client.call(execute.clone(), request.clone(), true).await;
+    let id = pending["id"].as_str().unwrap().to_owned();
+    let original = pending["submission"]["reference"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(pending["outcome"]["phase"], "in_progress");
+    assert_eq!(pending["outcome"]["replay_safe"], false);
+    rpc.request("anvil_dropTransaction", json!([original]))
+        .await
+        .unwrap();
+    let unused = client
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id: id.clone() },
+            true,
+        )
+        .await;
+    assert_eq!(unused["outcome"]["replay_safe"], false);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 1);
+    let constrained_input = json!({"request_id":"nonce-restricted","wallet":"synthetic","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x000000000000000000000000000000000000aaaa","max_fee_eth":"0.001"});
+    let constrained = client
+        .call(
+            args(&[
+                "execute",
+                "wallet.transfer",
+                "--input",
+                &constrained_input.to_string(),
+                "--id",
+                "nonce-restricted",
+                "--json",
+            ]),
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "nonce-restricted".into(),
+                    operation: "wallet.transfer".into(),
+                    input: constrained_input,
+                    run_id: None,
+                },
+            },
+            true,
+        )
+        .await;
+    assert!(constrained["submission"].is_null(), "{constrained}");
+    assert_eq!(
+        constrained["external_constraint"]["kind"], "provider_pending_nonce",
+        "{constrained}"
+    );
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 1);
+    rpc.request("anvil_impersonateAccount", json!([owner()]))
+        .await
+        .unwrap();
+    let replacement = rpc
+        .request(
+            "eth_sendTransaction",
+            json!([{"from":owner(),"to":owner(),"value":"0x0","gas":"0x5208","nonce":"0x0"}]),
+        )
+        .await
+        .unwrap();
+    assert_ne!(replacement, original);
+    rpc.request("evm_mine", json!([])).await.unwrap();
+    rpc.request("anvil_mine", json!(["0x40"])).await.unwrap();
+    let mut observed = client
+        .call(
+            args(&["status", &id, "--json"]),
+            BrokerRequest::Status { id: id.clone() },
+            true,
+        )
+        .await;
+    for _ in 0..3 {
+        if observed["status"] == "failed" {
+            break;
+        }
+        rpc.request("anvil_mine", json!(["0x40"])).await.unwrap();
+        observed = client
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+                true,
+            )
+            .await;
+    }
+    assert_eq!(observed["status"], "failed", "{observed}");
+    assert_eq!(observed["outcome"]["replay_safe"], true);
+    assert_eq!(observed["outcome"]["retry_approval"], "required");
+    assert_eq!(observed["outcome"]["next_action"]["code"], "reauthorize");
+    assert_eq!(
+        observed["last_reconciliation_evidence"]["state"],
+        "finalized_nonce_replaced"
+    );
+    assert_eq!(
+        observed["last_reconciliation_evidence"]["replacement_hash"],
+        replacement
+    );
+    let replay = client.call(execute, request, true).await;
+    assert_eq!(replay["id"], id);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 2);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 1);
+    rpc.request("evm_setAutomine", json!([true])).await.unwrap();
+    rpc.request(
+        "anvil_setBalance",
+        json!([other_owner(), "0x56bc75e2d63100000"]),
+    )
+    .await
+    .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
+    for (probe_id, wallet) in [
+        ("replacement-same", "synthetic"),
+        ("replacement-other", "synthetic-other"),
+    ] {
+        let input = json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x000000000000000000000000000000000000aaaa","max_fee_eth":"0.001"});
+        let req = BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: probe_id.into(),
+                operation: "wallet.transfer".into(),
+                input: input.clone(),
+                run_id: None,
+            },
+        };
+        let before = snapshot();
+        let probe = client
+            .call(
+                args(&[
+                    "execute",
+                    "wallet.transfer",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    probe_id,
+                    "--json",
+                ]),
+                req,
+                true,
+            )
+            .await;
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
+    }
+    assert_eq!(approval.0.load(Ordering::SeqCst), 4);
+    assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a12","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":3,"probe_submission_count":2,"external_replacement_count":1,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
+}
+
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
+include!("support/anvil_quote_expiry.rs");
+
+include!("support/anvil_outcomes.rs");

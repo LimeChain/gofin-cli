@@ -8,11 +8,6 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub(super) struct PriceApi(AtomicUsize);
-impl PriceApi {
-    pub(super) fn count(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
-    }
-}
 #[async_trait]
 impl JupiterApi for PriceApi {
     async fn request(

@@ -70,25 +70,6 @@ fn economic_shape(intent: &FinancialIntent) -> Result<Value> {
     clean(&mut value);
     Ok(value)
 }
-fn positive_difference(
-    before: &BTreeMap<String, BigUint>,
-    after: &BTreeMap<String, BigUint>,
-) -> BTreeMap<String, BigUint> {
-    after
-        .iter()
-        .filter_map(|(key, amount)| {
-            let prior = before.get(key).cloned().unwrap_or_default();
-            (amount > &prior).then(|| (key.clone(), amount - prior))
-        })
-        .collect()
-}
-fn without_zeros(mut rows: BTreeMap<String, BigUint>) -> BTreeMap<String, BigUint> {
-    rows.retain(|_, n| !n.is_zero());
-    rows
-}
-fn same_assets(before: &BTreeMap<String, BigUint>, after: &BTreeMap<String, BigUint>) -> bool {
-    before.keys().eq(after.keys())
-}
 fn merge_expected_bounds(target: &mut Value, revision: &Value) -> Result<()> {
     if target.get("kind") == Some(&json!("conversion_sequence"))
         || revision.get("kind") == Some(&json!("conversion_sequence"))
@@ -342,11 +323,6 @@ impl Engine {
                 "Authority revisions require fresh exact approval outside historical runs or financial-plan grants.",
             ));
         }
-        if self.has_pending_amendment_except(id, attempt_id)? {
-            return Err(invalid(
-                "Another unresolved amendment already owns this order mutation boundary.",
-            ));
-        }
         let original = self.load_record(id)?;
         let old = original
             .preview
@@ -394,29 +370,22 @@ impl Engine {
             .effective_scope()
             .map(|s| &s.intent)
             .unwrap_or(&old.intent);
-        if economic_shape(previous)? != economic_shape(&scope.intent)? {
+        if economic_shape(previous)? != economic_shape(&scope.intent)?
+            || aggregate_resource_amounts(&previous.debits)?
+                .keys()
+                .collect::<Vec<_>>()
+                != aggregate_resource_amounts(&scope.intent.debits)?
+                    .keys()
+                    .collect::<Vec<_>>()
+            || aggregate_cost_bounds(&previous.maximum_costs)?
+                .keys()
+                .collect::<Vec<_>>()
+                != aggregate_cost_bounds(&scope.intent.maximum_costs)?
+                    .keys()
+                    .collect::<Vec<_>>()
+        {
             return Err(invalid(
                 "An amendment cannot introduce different assets, positions or economic effect types.",
-            ));
-        }
-        let before = aggregate_resource_amounts(&previous.debits)?;
-        let after = aggregate_resource_amounts(&scope.intent.debits)?;
-        if !same_assets(&before, &after)
-            || without_zeros(aggregate_resource_amounts(&prepared.intent.debits)?)
-                != positive_difference(&before, &after)
-        {
-            return Err(invalid(
-                "The amendment reserves exactly the positive principal increase over the previous approved cumulative scope.",
-            ));
-        }
-        let before = aggregate_cost_bounds(&previous.maximum_costs)?;
-        let after = aggregate_cost_bounds(&scope.intent.maximum_costs)?;
-        if !same_assets(&before, &after)
-            || without_zeros(aggregate_cost_bounds(&prepared.intent.maximum_costs)?)
-                != positive_difference(&before, &after)
-        {
-            return Err(invalid(
-                "The amendment reserves exactly the positive cost increase, preserving asset and cost treatment.",
             ));
         }
         let prior_binding = context
@@ -441,59 +410,8 @@ impl Engine {
         }
         validate_prepared(&full, &prepared.operation, Utc::now())?;
         validate_cost_bound_contract(&full.intent)?;
-        validate_cost_prices(&full, &prepared_cost_assets(&full.intent), Utc::now())?;
-        let valuation = full.valuation.as_ref().ok_or_else(|| {
-            invalid("A cumulative revision requires its own full attributable valuation.")
-        })?;
-        let previous_valuation = context
-            .effective_scope()
-            .and_then(|scope| scope.valuation.as_ref())
-            .or(old.valuation.as_ref())
-            .ok_or_else(|| invalid("The previous cumulative scope valuation is missing."))?;
-        let total = |value: &gofin_domain::Valuation| {
-            value.movement_usd_micros.integer()
-                + value.maximum_fee_usd_micros.integer()
-                + value.additional_allocation_usd_micros.integer()
-        };
-        let previous_usd = total(previous_valuation);
-        let revised_usd = total(valuation);
-        let own = prepared
-            .valuation
-            .as_ref()
-            .ok_or_else(|| invalid("The amendment's incremental valuation is missing."))?;
-        if revised_usd > previous_usd && total(own) < revised_usd - previous_usd {
-            return Err(invalid(
-                "The amendment's rolling allocation reserve does not cover the full revised USD exposure increase.",
-            ));
-        }
-        if gofin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?.is_some_and(
-            |limit| {
-                valuation.movement_usd_micros.integer() + valuation.maximum_fee_usd_micros.integer()
-                    > BigUint::from(limit)
-            },
-        ) {
-            return Err(GoFinError::new(
-                "MOVEMENT_LIMIT",
-                "budget",
-                "The full amended movement exceeds the personal per-movement ceiling.",
-                "Reduce the cumulative order scope or change protected policy through the human configuration path.",
-            ));
-        }
-        if let Some(verified) = &original.effects {
-            validate_effects_with_scope(
-                &original,
-                verified,
-                &Status::Pending,
-                true,
-                Some(&scope.intent),
-            )?;
-        }
         Ok(Some(id.into()))
     }
-    pub(super) fn has_pending_amendment(&self, id: &str) -> Result<bool> {
-        self.has_pending_amendment_except(id, None)
-    }
-
     pub(super) fn commit_amendment(
         &self,
         record: &OperationRecord,
@@ -588,43 +506,6 @@ impl Engine {
                 Some(&scope.intent),
             )?;
         }
-        let mut accounting = context.clone();
-        accounting.revisions.push(ApprovedAmendment {
-            amendment_operation_id: record.id.clone(),
-            amendment_submission: record
-                .submission
-                .clone()
-                .ok_or_else(|| invalid("Amendment submission missing."))?,
-            scope: scope.clone(),
-            successor: mutations[0].2.clone(),
-            proof_digest: proof.proof_digest.clone(),
-        });
-        let accounting = accounting_intent(&accounting)?
-            .ok_or_else(|| invalid("Accounting envelope missing."))?;
-        let mut rows = cash_reservation_amounts(&accounting.debits, &accounting.maximum_costs)?
-            .iter()
-            .map(|amount| {
-                Ok(ReservationRow {
-                    resource: resource_asset_key(amount)?,
-                    units: amount.amount.atoms.to_string(),
-                    fee_units: "0".into(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut amounts = BTreeMap::<String, BigUint>::new();
-        for row in rows.drain(..) {
-            *amounts.entry(row.resource).or_default() += parse_uint(&row.units)?;
-        }
-        rows.extend(amounts.into_iter().map(|(resource, n)| ReservationRow {
-            resource,
-            units: n.to_string(),
-            fee_units: "0".into(),
-        }));
-        rows.extend(scope.intent.locks.iter().map(|resource| ReservationRow {
-            resource: format!("lock:{}", resource.0),
-            units: "0".into(),
-            fee_units: "0".into(),
-        }));
         let revision = ApprovedAmendment {
             amendment_operation_id: record.id.clone(),
             amendment_submission: record
@@ -638,12 +519,11 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .commit_amendment_settlement(
+            .record_amendment_revision(
                 settlement,
                 original_id,
                 &to_value(&original)?,
                 &revision,
-                &rows,
                 &record.updated_at,
             )
             .map_err(map_store)?;

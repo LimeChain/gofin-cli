@@ -736,6 +736,15 @@ impl EthereumAdapter {
         {
             Some(r) => r,
             None => {
+                if let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    self.runtime
+                        .finalized_nonce_replacement(submission, &b.transaction),
+                )
+                .await
+                {
+                    return Ok(proof);
+                }
                 return Ok(Reconciliation {
                     status: Status::Pending,
                     evidence: json!({"original_hash":submission.reference,"canonical_confirmed":false}),
@@ -793,15 +802,24 @@ impl EthereumAdapter {
                 });
             }
         }
-        let mut effects = vec![FinancialEffect::Cost {
-            location: AccountingLocation::Cash {
-                resource: b.resource.clone(),
-            },
-            amount: amount(&self.native_asset(), receipt.fee),
-            category: "ethereum_gas".into(),
-            treatment: CostTreatment::AdditionalDebit,
-        }];
-        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":self.config.finality_label()});
+        let mut effects = Vec::new();
+        if let Some(fee) = receipt.fee {
+            effects.push(FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: b.resource.clone(),
+                },
+                amount: amount(&self.native_asset(), fee),
+                category: "ethereum_gas".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            });
+        }
+        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":receipt.fee.map(quantity),"finality":self.config.finality_label()});
+        if receipt.fee.is_none() {
+            details["outcome_reporting"] = json!("partial");
+        }
+        if !receipt.success {
+            details["outcome_replay_safe"] = json!(true);
+        }
         if receipt.success {
             self.success_effects(&record.operation, &b, &receipt, &mut effects, &mut details)
                 .await?;
@@ -1315,11 +1333,10 @@ impl EthereumAdapter {
                     )?;
                     amount_out
                 };
-                require(
-                    credited >= u256(b.minimum_output.as_ref().expect("minimum"))?,
-                    "SWAP_PROOF_MISMATCH",
-                    "Pool cash legs are below the approved minimum output.",
-                )?;
+                let approved_minimum = b.minimum_output.as_ref().expect("minimum");
+                if credited < u256(approved_minimum)? {
+                    details["outcome_attention"] = json!({"kind":"discrepancy", "actual":{"asset":output,"atoms":quantity(credited)}, "approved":{"asset":output,"minimum_atoms":approved_minimum}});
+                }
                 if native_input || native_output {
                     self.verify_native_swap_balance(
                         owner,
@@ -2301,7 +2318,20 @@ impl EthereumAdapter {
             .balance(owner, Some(receipt.block_number))
             .await?;
         require(
-            add(before, native_output)? == add(add(after, receipt.fee)?, native_input)?,
+            add(before, native_output)?
+                == add(
+                    add(
+                        after,
+                        receipt.fee.ok_or_else(|| {
+                            error(
+                                "RECEIPT_FEE_UNAVAILABLE",
+                                "reconciliation",
+                                "Native swap attribution needs the actual receipt fee.",
+                            )
+                        })?,
+                    )?,
+                    native_input,
+                )?,
             "NATIVE_SWAP_POSTSTATE_MISMATCH",
             "Inclusion-block native balance change does not match the verified swap leg, exact native input and receipt gas.",
         )?;

@@ -877,6 +877,8 @@ mod tests {
                 description: None,
                 step_count: None,
                 valid_for_seconds: None,
+                terms: vec![],
+                advisories: vec![],
             }),
             purpose: "financial_write".into(),
             operation_id: "synthetic-write".into(),

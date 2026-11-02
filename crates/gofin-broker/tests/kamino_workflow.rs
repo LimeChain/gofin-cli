@@ -8,12 +8,15 @@
 #[path = "support/native_approval.rs"]
 mod native_approval;
 
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
+
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
     compose_runtime_with_clock,
 };
-use gofin_domain::{financial_plans::*, *};
+use gofin_domain::*;
 use gofin_kamino::protocol::VaultFamily;
 use gofin_protocol::BrokerRequest;
 use gofin_store::Store;
@@ -107,107 +110,37 @@ fn deposit(family: VaultFamily, n: &str) -> Value {
 fn withdrawal(family: VaultFamily) -> Value {
     json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","family":family,"vault":vault(family),"share_mint":share(family),"shares_atoms":"5","maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0})
 }
-fn swap_bounds() -> Value {
-    json!({"maximum_input_atoms":"100","minimum_output_per_input_numerator":"1","minimum_output_per_input_denominator":"1","maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0,"maximum_quote_lifetime_seconds":120})
+// Public outcome fields are additive; inspect the original typed record separately.
+fn typed_record(mut value: Value) -> serde_json::Result<OperationRecord> {
+    let fields = [
+        "id",
+        "request_id",
+        "fingerprint",
+        "fingerprint_version",
+        "operation",
+        "input",
+        "status",
+        "created_at",
+        "updated_at",
+        "preview",
+        "approval",
+        "authorization_source",
+        "submission",
+        "dispatch_evidence",
+        "position_baseline",
+        "effects",
+        "last_reconciliation_evidence",
+        "error",
+        "run_id",
+    ];
+    value
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| fields.contains(&key.as_str()));
+    serde_json::from_value(value)
 }
-fn dependency(id: &str, resource: &ResourceId, mint: &str) -> FinancialPlanFundingDependency {
-    FinancialPlanFundingDependency {
-        producing_step_id: id.into(),
-        resource: resource.clone(),
-        asset: asset(mint),
-        funding_scope: None,
-        maximum_fraction_bps: None,
-    }
-}
-fn step(
-    id: &str,
-    operation: &str,
-    input: Value,
-    bounds: Value,
-    deps: Vec<FinancialPlanFundingDependency>,
-) -> FinancialPlanStepSpec {
-    FinancialPlanStepSpec {
-        step_id: id.into(),
-        operation: operation.into(),
-        input,
-        permitted_variations: bounds,
-        funding_dependencies: deps,
-        action_deadline_seconds: None,
-        completion: FinancialStepCompletion {
-            operation_succeeded: true,
-            principal_spend: None,
-            minimum_net_receipt: None,
-        },
-    }
-}
-fn plan(chain: &Chain, family: VaultFamily) -> FinancialPlanSpec {
-    let r = chain.resource();
-    let mut deposit_caps = vec![json!({"mint":UNDERLYING,"atoms":"125"})];
-    if family == VaultFamily::Liquidity {
-        deposit_caps.push(json!({"mint":INPUT,"atoms":"10"}));
-    }
-    let mut exit_bounds = swap_bounds();
-    exit_bounds["maximum_input_atoms"] = json!("50");
-    exit_bounds["minimum_output_per_input_numerator"] = json!("4");
-    exit_bounds["minimum_output_per_input_denominator"] = json!("5");
-    FinancialPlanSpec{version:1,name:format!("Controlled {} vault roundtrip",family.as_str()),summary:Some("Swap 100 USDC atoms; deposit up to 125 tokens; redeem 5 shares; swap proceeds; retain dust.".into()),steps:vec![step("entry-swap","jupiter.swap",swap(INPUT,UNDERLYING,"100","100"),swap_bounds(),vec![]),step("deposit","kamino.deposit",deposit(family,"125"),json!({"maximum_amounts":deposit_caps,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![dependency("entry-swap",&r,UNDERLYING)]),step("withdraw","kamino.withdraw",withdrawal(family),json!({"maximum_shares_atoms":"5","maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![]),step("exit-swap","jupiter.swap",swap(UNDERLYING,INPUT,"50","40"),exit_bounds,vec![dependency("withdraw",&r,UNDERLYING)])],aggregate_bounds:FinancialPlanBounds{maximum_debits:vec![ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(INPUT),atoms:Quantity::from_u64(if family==VaultFamily::Liquidity{110}else{100})}},ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(UNDERLYING),atoms:Quantity::from_u64(175)}}],maximum_costs:vec![CostBound{location:AccountingLocation::Cash{resource:r},amount:Amount{asset:native(),atoms:Quantity::from_u64(40000)},treatment:CostTreatment::AdditionalDebit}]}}
-}
-async fn authorize(client: &Client, spec: FinancialPlanSpec) -> String {
-    let mut request = FinancialPlanAuthorizationRequest {
-        request_id: "kamino-workflow-plan".into(),
-        plan: spec.clone(),
-        valid_for_seconds: Some(900),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let preview = client
-        .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &json!(spec).to_string(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::PreviewPlan {
-                request: request.clone(),
-            },
-            true,
-        )
-        .await;
-    request.expected_review_hash = Some(preview["review_hash"].as_str().unwrap().into());
-    let result = client
-        .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &json!(spec).to_string(),
-                "--id",
-                "kamino-workflow-plan",
-                "--review-hash",
-                request.expected_review_hash.as_deref().unwrap(),
-                "--valid-for",
-                "15m",
-                "--json",
-            ]),
-            BrokerRequest::AuthorizePlan { request },
-            true,
-        )
-        .await;
-    result["plan_id"].as_str().unwrap().into()
-}
-async fn execute(
-    client: &Client,
-    plan: &str,
-    step: &str,
-    operation: &str,
-    input: Value,
-    ok: bool,
-) -> Value {
-    let id = format!("kamino-{step}");
+async fn execute(client: &Client, label: &str, operation: &str, input: Value) -> Value {
+    let id = format!("kamino-{label}");
     client
         .call(
             args(&[
@@ -217,15 +150,9 @@ async fn execute(
                 &input.to_string(),
                 "--id",
                 &id,
-                "--plan",
-                plan,
-                "--step",
-                step,
                 "--json",
             ]),
-            BrokerRequest::ExecutePlanStep {
-                plan_id: plan.into(),
-                step_id: step.into(),
+            BrokerRequest::Execute {
                 request: OperationRequest {
                     request_id: id,
                     operation: operation.into(),
@@ -233,7 +160,17 @@ async fn execute(
                     run_id: None,
                 },
             },
-            ok,
+            true,
+        )
+        .await
+}
+async fn status(client: &Client, record: &Value) -> Value {
+    let id = record["id"].as_str().unwrap();
+    client
+        .call(
+            args(&["status", id, "--json"]),
+            BrokerRequest::Status { id: id.into() },
+            true,
         )
         .await
 }
@@ -333,15 +270,15 @@ async fn new_share_account_funding_settles_with_incomplete_inventory() {
                 true,
             )
             .await;
-        let record: OperationRecord = serde_json::from_value(result.clone()).unwrap();
+        let record: OperationRecord = typed_record(result.clone()).unwrap();
         assert_eq!(record.status, Status::Completed, "{result}");
         assert_eq!(chain.balance(&share(family)), 10);
         assert_eq!(chain.lamports(), initial_lamports - ACCOUNT_RENT - 5000);
         assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        let durable: OperationRecord = serde_json::from_value(
+        let durable: OperationRecord = typed_record(
             Store::open(&path)
                 .unwrap()
-                .get_record(&record.id)
+                .get_typed_record(&record.id)
                 .unwrap()
                 .unwrap(),
         )
@@ -480,7 +417,7 @@ async fn exact_standalone_roundtrip_preserves_starting_shares_and_durable_settle
                     true,
                 )
                 .await;
-            let record: OperationRecord = serde_json::from_value(result.clone()).unwrap();
+            let record: OperationRecord = typed_record(result.clone()).unwrap();
             assert_eq!(record.status, Status::Completed, "{result}");
             assert!(record.approval.is_some());
             assert_ne!(
@@ -494,10 +431,10 @@ async fn exact_standalone_roundtrip_preserves_starting_shares_and_durable_settle
             let submission = record.submission.as_ref().unwrap();
             let verified = record.effects.as_ref().unwrap();
             assert_eq!(verified.submission, *submission);
-            let durable: OperationRecord = serde_json::from_value(
+            let durable: OperationRecord = typed_record(
                 Store::open(&path)
                     .unwrap()
-                    .get_record(&record.id)
+                    .get_typed_record(&record.id)
                     .unwrap()
                     .unwrap(),
             )
@@ -580,7 +517,7 @@ async fn exact_standalone_roundtrip_preserves_starting_shares_and_durable_settle
                     true,
                 )
                 .await;
-            let recovered: OperationRecord = serde_json::from_value(status).unwrap();
+            let recovered: OperationRecord = typed_record(status).unwrap();
             assert_eq!(recovered.status, Status::Completed);
             assert_eq!(recovered.submission, expected.submission);
             assert_eq!(recovered.effects, expected.effects);
@@ -594,34 +531,19 @@ async fn exact_standalone_roundtrip_preserves_starting_shares_and_durable_settle
     }
 }
 #[tokio::test]
-async fn separate_jupiter_and_native_kamino_steps_preserve_receipt_floors_across_restart() {
+async fn separate_jupiter_and_native_kamino_actions_preserve_receipt_floors_across_restart() {
     for family in [VaultFamily::Lending, VaultFamily::Liquidity] {
         let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("journal.sqlite");
         let (chain, wallet) = Chain::new();
         let approval = Arc::new(Approval::default());
         let mut client = Client::new(
-            runtime(
-                &temp.path().join("journal.sqlite"),
-                chain.clone(),
-                wallet.clone(),
-                approval.clone(),
-            ),
+            runtime(&path, chain.clone(), wallet.clone(), approval.clone()),
             temp.path(),
         )
         .await;
-        let mut spec = plan(&chain, family);
-        // Shares are a position source, not a cash debit. A receipt target must
-        // remain executable under the finite share permission approved here.
-        let receipt_floor = ResourceAmount {
-            resource: chain.resource(),
-            amount: Amount {
-                asset: asset(UNDERLYING),
-                atoms: Quantity::from_u64(50),
-            },
-        };
-        spec.steps[2].completion.minimum_net_receipt = Some(receipt_floor.clone());
-        let id = authorize(&client, spec).await;
-        for (step, op, input) in [
+        let mut records = vec![];
+        for (index, (label, operation, input)) in [
             (
                 "entry-swap",
                 "jupiter.swap",
@@ -634,72 +556,42 @@ async fn separate_jupiter_and_native_kamino_steps_preserve_receipt_floors_across
                 "jupiter.swap",
                 swap(UNDERLYING, INPUT, "50", "40"),
             ),
-        ] {
-            if step == "withdraw" {
-                let before = client
-                    .call(
-                        args(&["plans", "status", &id, "--json"]),
-                        BrokerRequest::PlanStatus {
-                            plan_id: id.clone(),
-                        },
-                        true,
-                    )
-                    .await;
-                assert_eq!(before["next_eligible_step_id"], "withdraw", "{before}");
-                assert_eq!(before["steps"][2]["state"], "not_started", "{before}");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if label == "withdraw" {
                 assert_eq!(chain.balance(&share(family)), 10);
                 drop(client);
                 client = Client::new(
-                    runtime(
-                        &temp.path().join("journal.sqlite"),
-                        chain.clone(),
-                        wallet.clone(),
-                        approval.clone(),
-                    ),
+                    runtime(&path, chain.clone(), wallet.clone(), approval.clone()),
                     temp.path(),
                 )
                 .await;
-                let after = client
-                    .call(
-                        args(&["plans", "status", &id, "--json"]),
-                        BrokerRequest::PlanStatus {
-                            plan_id: id.clone(),
-                        },
-                        true,
-                    )
-                    .await;
-                assert_eq!(after["next_eligible_step_id"], "withdraw", "{after}");
-                assert_eq!(after["revision"], before["revision"]);
-                assert_eq!(after["usage"], before["usage"]);
+                for record in &records {
+                    let observed = status(&client, record).await;
+                    assert_eq!(observed["submission"], record["submission"]);
+                    assert_eq!(observed["outcome"]["replay_safe"], false);
+                }
                 assert_eq!(chain.send_count.load(Ordering::SeqCst), 2);
-                assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+                assert_eq!(approval.0.load(Ordering::SeqCst), 2);
             }
-            let result = execute(&client, &id, step, op, input, true).await;
+            let result = execute(&client, label, operation, input.clone()).await;
             assert_eq!(result["status"], "completed", "{result}");
+            let repeated = execute(&client, label, operation, input).await;
+            assert_eq!(repeated["id"], result["id"]);
+            assert_eq!(repeated["submission"], result["submission"]);
+            assert_eq!(approval.0.load(Ordering::SeqCst), index + 1);
+            records.push(result);
         }
         assert_eq!(chain.balance(UNDERLYING), 10);
         assert_eq!(chain.balance(&share(family)), 5);
         assert_eq!(chain.send_count.load(Ordering::SeqCst), 4);
-        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-        let status = client
-            .call(
-                args(&["plans", "status", &id, "--json"]),
-                BrokerRequest::PlanStatus { plan_id: id },
-                true,
-            )
-            .await;
-        assert!(status["next_eligible_step_id"].is_null(), "{status}");
-        let status: FinancialPlanStatus = serde_json::from_value(status).unwrap();
-        let withdraw = &status.steps[2];
-        assert_eq!(withdraw.state, FinancialPlanStepProgressState::Completed);
-        assert_eq!(withdraw.attempts.len(), 1);
-        assert_eq!(withdraw.attempts[0].status, Status::Completed);
-        assert!(withdraw.blockers.is_empty());
-        assert!(withdraw.verified_receipts.iter().any(|receipt| {
-            receipt.resource == receipt_floor.resource
-                && receipt.asset == receipt_floor.amount.asset
-                && receipt.available == receipt_floor.amount.atoms
-        }));
+        assert_eq!(approval.0.load(Ordering::SeqCst), 4);
+        let withdraw = typed_record(records[2].clone()).unwrap();
+        assert!(withdraw.effects.unwrap().effects.iter().any(
+            |e| matches!(e,FinancialEffect::PositionChange {delta,..} if delta.as_str()=="-5")
+        ));
     }
 }
 #[tokio::test]
@@ -717,93 +609,46 @@ async fn later_native_failure_keeps_verified_swap_assets_and_does_not_reverse() 
         temp.path(),
     )
     .await;
-    let id = authorize(&client, plan(&chain, VaultFamily::Lending)).await;
     let swap_result = execute(
         &client,
-        &id,
         "entry-swap",
         "jupiter.swap",
         swap(INPUT, UNDERLYING, "100", "100"),
-        true,
     )
     .await;
     assert_eq!(swap_result["status"], "completed");
     chain.reject_deposit.store(true, Ordering::SeqCst);
-    let failure = execute(
+    let failed = execute(
         &client,
-        &id,
         "deposit",
         "kamino.deposit",
         deposit(VaultFamily::Lending, "115"),
-        false,
     )
     .await;
-    assert!(failure["message"].as_str().unwrap().contains("unavailable"));
+    assert_eq!(failed["status"], "failed");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
     assert_eq!(chain.balance(UNDERLYING), 125);
     assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        status(&client, &swap_result).await["outcome"]["replay_safe"],
+        false
+    );
 }
 #[tokio::test]
 async fn restart_reconciles_original_swap_and_does_not_auto_execute_deposit() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("journal.sqlite");
-    let (chain, wallet) = Chain::new();
-    let approval = Arc::new(Approval::default());
-    let client = Client::new(
-        runtime(&path, chain.clone(), wallet.clone(), approval.clone()),
-        temp.path(),
-    )
-    .await;
-    let id = authorize(&client, plan(&chain, VaultFamily::Lending)).await;
-    chain.lose_response.store(true, Ordering::SeqCst);
-    chain.hide_receipts.store(true, Ordering::SeqCst);
-    let result = execute(
-        &client,
-        &id,
-        "entry-swap",
-        "jupiter.swap",
-        swap(INPUT, UNDERLYING, "100", "100"),
-        true,
-    )
-    .await;
-    assert_ne!(result["status"], "completed");
-    assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
-    drop(client);
-    chain.hide_receipts.store(false, Ordering::SeqCst);
-    chain.lose_response.store(false, Ordering::SeqCst);
-    let client = Client::new(
-        runtime(&path, chain.clone(), wallet, approval.clone()),
-        temp.path(),
-    )
-    .await;
-    let status = client
-        .call(
-            args(&["plans", "status", &id, "--json"]),
-            BrokerRequest::PlanStatus {
-                plan_id: id.clone(),
-            },
-            true,
-        )
-        .await;
-    assert_eq!(status["next_eligible_step_id"], "deposit", "{status}");
-    assert_eq!(chain.balance(&share(VaultFamily::Lending)), 0);
-    assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
-    let result = execute(
-        &client,
-        &id,
-        "deposit",
-        "kamino.deposit",
-        deposit(VaultFamily::Lending, "115"),
-        true,
-    )
-    .await;
-    assert_eq!(result["status"], "completed", "{result}");
-    assert_eq!(chain.send_count.load(Ordering::SeqCst), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    recover_lost_action(false).await;
 }
-
 #[tokio::test]
 async fn lost_kamino_response_reconciles_original_submission_after_broker_restart() {
+    recover_lost_action(true).await;
+}
+async fn recover_lost_action(lose_deposit: bool) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("journal.sqlite");
     let (chain, wallet) = Chain::new();
@@ -813,32 +658,37 @@ async fn lost_kamino_response_reconciles_original_submission_after_broker_restar
         temp.path(),
     )
     .await;
-    let id = authorize(&client, plan(&chain, VaultFamily::Lending)).await;
-    let entry = execute(
-        &client,
-        &id,
-        "entry-swap",
-        "jupiter.swap",
-        swap(INPUT, UNDERLYING, "100", "100"),
-        true,
-    )
-    .await;
-    assert_eq!(entry["status"], "completed", "{entry}");
+    if lose_deposit {
+        assert_eq!(
+            execute(
+                &client,
+                "entry-swap",
+                "jupiter.swap",
+                swap(INPUT, UNDERLYING, "100", "100")
+            )
+            .await["status"],
+            "completed"
+        );
+    }
     chain.lose_response.store(true, Ordering::SeqCst);
     chain.hide_receipts.store(true, Ordering::SeqCst);
-    let result = execute(
-        &client,
-        &id,
-        "deposit",
-        "kamino.deposit",
-        deposit(VaultFamily::Lending, "115"),
-        true,
-    )
-    .await;
+    let (label, operation, input) = if lose_deposit {
+        (
+            "deposit",
+            "kamino.deposit",
+            deposit(VaultFamily::Lending, "115"),
+        )
+    } else {
+        (
+            "entry-swap",
+            "jupiter.swap",
+            swap(INPUT, UNDERLYING, "100", "100"),
+        )
+    };
+    let result = execute(&client, label, operation, input.clone()).await;
     assert_ne!(result["status"], "completed");
-    let original_submission = result["submission"].clone();
-    assert_eq!(chain.balance(&share(VaultFamily::Lending)), 10);
-    assert_eq!(chain.send_count.load(Ordering::SeqCst), 2);
+    let count = if lose_deposit { 2 } else { 1 };
+    assert_eq!(chain.send_count.load(Ordering::SeqCst), count);
     drop(client);
     chain.hide_receipts.store(false, Ordering::SeqCst);
     chain.lose_response.store(false, Ordering::SeqCst);
@@ -847,37 +697,32 @@ async fn lost_kamino_response_reconciles_original_submission_after_broker_restar
         temp.path(),
     )
     .await;
-    let status = client
-        .call(
-            args(&["plans", "status", &id, "--json"]),
-            BrokerRequest::PlanStatus {
-                plan_id: id.clone(),
-            },
-            true,
-        )
-        .await;
-    assert_eq!(status["next_eligible_step_id"], "withdraw", "{status}");
-    let replay = execute(
-        &client,
-        &id,
-        "deposit",
-        "kamino.deposit",
-        deposit(VaultFamily::Lending, "115"),
-        true,
-    )
-    .await;
-    assert_eq!(replay["status"], "completed", "{replay}");
-    assert_eq!(replay["submission"], original_submission);
-    assert_eq!(
-        chain.send_count.load(Ordering::SeqCst),
-        2,
-        "recovery must not rebroadcast or replay the deposit"
-    );
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    let observed = status(&client, &result).await;
+    assert_eq!(observed["status"], "completed", "{observed}");
+    let repeated = execute(&client, label, operation, input).await;
+    assert_eq!(repeated["submission"], result["submission"]);
+    assert_eq!(repeated["id"], result["id"]);
+    assert_eq!(chain.send_count.load(Ordering::SeqCst), count);
+    assert_eq!(approval.0.load(Ordering::SeqCst), count);
+    if !lose_deposit {
+        assert_eq!(chain.balance(&share(VaultFamily::Lending)), 0);
+        assert_eq!(
+            execute(
+                &client,
+                "deposit",
+                "kamino.deposit",
+                deposit(VaultFamily::Lending, "115")
+            )
+            .await["status"],
+            "completed"
+        );
+        assert_eq!(chain.send_count.load(Ordering::SeqCst), 2);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 2);
+    }
 }
 
 #[tokio::test]
-async fn durably_denied_native_submission_releases_reservation_and_survives_restart() {
+async fn durably_denied_native_submission_proves_nonexecution_and_survives_restart() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("journal.sqlite");
     let (chain, wallet) = Chain::new();
@@ -912,7 +757,7 @@ async fn durably_denied_native_submission_releases_reservation_and_survives_rest
             true,
         )
         .await;
-    let record: OperationRecord = serde_json::from_value(result.clone()).unwrap();
+    let record: OperationRecord = typed_record(result.clone()).unwrap();
     assert_eq!(record.status, Status::Failed, "{result}");
     assert!(record.submission.is_some());
     assert_eq!(
@@ -924,10 +769,10 @@ async fn durably_denied_native_submission_releases_reservation_and_survives_rest
     assert_eq!(verified.evidence["state"], "not_dispatched");
     // Public records redact the signed wire; validate the digest against the
     // complete immutable journal instead of that public projection.
-    let durable: OperationRecord = serde_json::from_value(
+    let durable: OperationRecord = typed_record(
         Store::open(&path)
             .unwrap()
-            .get_record(&record.id)
+            .get_typed_record(&record.id)
             .unwrap()
             .unwrap(),
     )
@@ -961,7 +806,7 @@ async fn durably_denied_native_submission_releases_reservation_and_survives_rest
             true,
         )
         .await;
-    let recovered: OperationRecord = serde_json::from_value(status).unwrap();
+    let recovered: OperationRecord = typed_record(status).unwrap();
     assert_eq!(recovered, record);
     assert_eq!(
         Store::open(&path)
@@ -1034,7 +879,7 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 true,
             )
             .await;
-        let original: OperationRecord = serde_json::from_value(result.clone()).unwrap();
+        let original: OperationRecord = typed_record(result.clone()).unwrap();
         assert!(
             matches!(original.status, Status::Pending | Status::Unknown),
             "{result}"
@@ -1046,13 +891,14 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 .as_ref()
                 .is_none_or(|v| v["no_network_send"] != true)
         );
-        assert!(
+        assert_eq!(
             Store::open(&path)
                 .unwrap()
                 .reservation_count(&original.id)
-                .unwrap()
-                > 0
+                .unwrap(),
+            0
         );
+        assert_eq!(result["outcome"]["replay_safe"], false);
         assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
 
         chain.finalized_height.store(1001, Ordering::SeqCst);
@@ -1088,19 +934,20 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 true,
             )
             .await;
-        let pending: OperationRecord = serde_json::from_value(unresolved.clone()).unwrap();
+        let pending: OperationRecord = typed_record(unresolved.clone()).unwrap();
         assert!(
             matches!(pending.status, Status::Pending | Status::Unknown),
             "Missing block history cannot prove absence: {unresolved}"
         );
         assert!(pending.effects.is_none());
-        assert!(
+        assert_eq!(
             Store::open(&path)
                 .unwrap()
                 .reservation_count(&original.id)
-                .unwrap()
-                > 0
+                .unwrap(),
+            0
         );
+        assert_eq!(result["outcome"]["replay_safe"], false);
         assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
 
         chain.block_history_available.store(true, Ordering::SeqCst);
@@ -1113,19 +960,20 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 true,
             )
             .await;
-        let pending: OperationRecord = serde_json::from_value(uncorroborated.clone()).unwrap();
+        let pending: OperationRecord = typed_record(uncorroborated.clone()).unwrap();
         assert!(
             matches!(pending.status, Status::Pending | Status::Unknown),
-            "One provider cannot release the reservation: {uncorroborated}"
+            "One provider cannot establish non-inclusion: {uncorroborated}"
         );
         assert!(pending.effects.is_none());
-        assert!(
+        assert_eq!(
             Store::open(&path)
                 .unwrap()
                 .reservation_count(&original.id)
-                .unwrap()
-                > 0
+                .unwrap(),
+            0
         );
+        assert_eq!(result["outcome"]["replay_safe"], false);
         secondary.history_available.store(true, Ordering::SeqCst);
         let result = client
             .call(
@@ -1136,7 +984,7 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 true,
             )
             .await;
-        let settled: OperationRecord = serde_json::from_value(result.clone()).unwrap();
+        let settled: OperationRecord = typed_record(result.clone()).unwrap();
         assert_eq!(
             settled.status,
             Status::Failed,
@@ -1161,10 +1009,10 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 .unwrap(),
             0
         );
-        let durable: OperationRecord = serde_json::from_value(
+        let durable: OperationRecord = typed_record(
             Store::open(&path)
                 .unwrap()
-                .get_record(&original.id)
+                .get_typed_record(&original.id)
                 .unwrap()
                 .unwrap(),
         )
@@ -1200,17 +1048,11 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
                 true,
             )
             .await;
-        assert_eq!(
-            serde_json::from_value::<OperationRecord>(recovered).unwrap(),
-            settled
-        );
+        assert_eq!(typed_record(recovered).unwrap(), settled);
         let replay = client
             .call(execute_args, BrokerRequest::Execute { request }, true)
             .await;
-        assert_eq!(
-            serde_json::from_value::<OperationRecord>(replay).unwrap(),
-            settled
-        );
+        assert_eq!(typed_record(replay).unwrap(), settled);
         assert_eq!(
             Store::open(&path)
                 .unwrap()
@@ -1225,53 +1067,384 @@ async fn expired_unlanded_native_withdrawal_requires_full_history_and_never_repl
     }
 }
 
-struct Clock(std::sync::atomic::AtomicI64);
-impl gofin_domain::clock::Clock for Clock {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        chrono::Utc::now() + chrono::Duration::seconds(self.0.load(Ordering::SeqCst))
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned Surfpool and public development CLI"]
+async fn public_cli_real_surfpool_blockhash_expiry_preserves_original_signature() {
+    use std::time::{Duration, Instant};
+    struct Node(std::process::Child);
+    impl Drop for Node {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let binary =
+        std::env::var("GOFIN_SURFPOOL_BIN").expect("pinned owned Surfpool binary required");
+    assert!(
+        std::env::var("GOFIN_KAMINO_CLI").is_ok(),
+        "public CLI required"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("journal.sqlite");
+    let rpc_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let ws_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let node = std::process::Command::new(binary)
+        .args([
+            "start",
+            "--no-tui",
+            "--no-studio",
+            "--no-deploy",
+            "--host",
+            "127.0.0.1",
+            "--offline",
+            "--port",
+            &rpc_port.to_string(),
+            "--ws-port",
+            &ws_port.to_string(),
+            "--slot-time",
+            "100",
+            "--airdrop-amount",
+            "0",
+            "--airdrop-keypair-path",
+            temp.path().join("no-airdrop.json").to_str().unwrap(),
+            "--db",
+            ":memory:",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _node = Node(node);
+    let url = format!("http://127.0.0.1:{rpc_port}");
+    let http = reqwest::Client::new();
+    let mut height = 0u64;
+    for _ in 0..300 {
+        if let Ok(response)=http.post(&url).json(&json!({"jsonrpc":"2.0","id":1,"method":"getBlockHeight","params":[{"commitment":"finalized"}]})).send().await && let Ok(value)=response.json::<Value>().await && let Some(h)=value["result"].as_u64() && h>0 {height=h;break}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(height > 0, "owned Surfpool did not start");
+    // The simulator first exposes the upstream bootstrap height before its
+    // local bank is ready; let the local block-height clock settle.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let (chain, initial_wallet) = Chain::new();
+    chain.drop_before_landing.store(true, Ordering::SeqCst);
+    let primary = RpcEndpoint::new_with_history(chain.clone(), Some(url.clone())).await;
+    let secondary = RpcEndpoint::new_with_history(chain.clone(), Some(url.clone())).await;
+    let pooled = gofin_solana::rpc::HttpRpc::isolated_localhost_pool(vec![
+        primary.url.clone(),
+        secondary.url.clone(),
+    ])
+    .unwrap();
+    let wallet = Arc::new(
+        gofin_solana::SolanaWalletAdapter::new(
+            "wallet",
+            &chain.owner,
+            initial_wallet.signer(),
+            pooled,
+            Arc::new(Prices),
+        )
+        .unwrap(),
+    );
+    let second_key = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+    let second_signer = Arc::new(
+        gofin_solana::SolanaSigner::parse(
+            &serde_json::to_string(&second_key.to_keypair_bytes().to_vec()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let second_rpc = gofin_solana::rpc::HttpRpc::isolated_localhost_pool(vec![
+        primary.url.clone(),
+        secondary.url.clone(),
+    ])
+    .unwrap();
+    let second_wallet = Arc::new(
+        gofin_solana::SolanaWalletAdapter::new(
+            "other-wallet",
+            second_signer.address(),
+            Some(second_signer.clone()),
+            second_rpc,
+            Arc::new(Prices),
+        )
+        .unwrap(),
+    );
+    let approval = Arc::new(Approval::default());
+    let client = Client::new(
+        expiry_fixture_runtime(&path, wallet.clone(), second_wallet, approval.clone()),
+        temp.path(),
+    )
+    .await;
+    let recipient = bs58::encode([7u8; 32]).into_string();
+    let input = json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","requestId":"surfpool-expiry","recipient":recipient,"amount":"0.001","max_fee_sol":"0.001"});
+    let req = OperationRequest {
+        request_id: "surfpool-expiry".into(),
+        operation: "wallet.transfer".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let execute = args(&[
+        "execute",
+        "wallet.transfer",
+        "--input",
+        &input.to_string(),
+        "--id",
+        "surfpool-expiry",
+        "--json",
+    ]);
+    let initial = client
+        .call(
+            execute.clone(),
+            BrokerRequest::Execute {
+                request: req.clone(),
+            },
+            true,
+        )
+        .await;
+    let id = initial["id"].as_str().unwrap().to_owned();
+    let submission = initial["submission"].clone();
+    assert!(!submission.is_null(), "{initial}");
+    let last_valid = submission["data"]["last_valid_block_height"]
+        .as_u64()
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        let value:Value=http.post(&url).json(&json!({"jsonrpc":"2.0","id":1,"method":"getBlockHeight","params":[{"commitment":"finalized"}]})).send().await.unwrap().json().await.unwrap();
+        if value["result"].as_u64().is_some_and(|h| h > last_valid + 2) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "Surfpool did not advance past lifetime"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let mut result = Value::Null;
+    for _ in 0..5 {
+        result = client
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+                true,
+            )
+            .await;
+        if result["status"] == "failed" {
+            break;
+        }
+    }
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["outcome"]["replay_safe"], true);
+    assert_eq!(result["outcome"]["result"], "failed");
+    assert_eq!(result["outcome"]["retry_approval"], "required");
+    assert_eq!(result["outcome"]["next_action"]["code"], "reauthorize");
+    assert_eq!(
+        result["last_reconciliation_evidence"]["state"],
+        "expired_without_inclusion"
+    );
+    assert_eq!(result["submission"], submission);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
+    let replay = client
+        .call(execute, BrokerRequest::Execute { request: req }, true)
+        .await;
+    assert_eq!(replay["id"], id);
+    assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            chain.send_count.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
+    for (probe_id, wallet_name) in [("expiry-same", "wallet"), ("expiry-other", "other-wallet")] {
+        let input = json!({"wallet":wallet_name,"network":"solana","cluster":"mainnet-beta","requestId":probe_id,"recipient":recipient,"amount":"0.001","max_fee_sol":"0.001"});
+        let req = BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: probe_id.into(),
+                operation: "wallet.transfer".into(),
+                input: input.clone(),
+                run_id: None,
+            },
+        };
+        let before = snapshot();
+        let result = client
+            .call(
+                args(&[
+                    "execute",
+                    "wallet.transfer",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    probe_id,
+                    "--json",
+                ]),
+                req,
+                true,
+            )
+            .await;
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet_name == "wallet" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &result,
+        ));
+    }
+    assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+    assert_eq!(chain.send_count.load(Ordering::SeqCst), 3);
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let mut evidence = json!({"scenario":"outcome.a11","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"rpc_evidence":"two local fixture endpoints relay one patched owned Surfpool; not independent production providers"});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
-#[tokio::test]
-async fn expired_native_permission_cannot_consume_settled_predecessor_proceeds() {
-    let temp = tempfile::tempdir().unwrap();
-    let (chain, wallet) = Chain::new();
-    let approval = Arc::new(Approval::default());
-    let clock = Arc::new(Clock(std::sync::atomic::AtomicI64::new(0)));
-    let runtime = runtime_with_clock(
-        &temp.path().join("journal.sqlite"),
-        chain.clone(),
-        wallet,
-        approval.clone(),
-        clock.clone(),
-    );
-    let client = Client::new(runtime, temp.path()).await;
-    let id = authorize(&client, plan(&chain, VaultFamily::Lending)).await;
-    let entry = execute(
-        &client,
-        &id,
-        "entry-swap",
-        "jupiter.swap",
-        swap(INPUT, UNDERLYING, "100", "100"),
-        true,
+
+struct ExpiryFixtureWalletRouter {
+    first: Arc<gofin_solana::SolanaWalletAdapter>,
+    second: Arc<gofin_solana::SolanaWalletAdapter>,
+}
+impl ExpiryFixtureWalletRouter {
+    fn selected(&self, input: &Value) -> &gofin_solana::SolanaWalletAdapter {
+        if input["wallet"] == "other-wallet" {
+            &self.second
+        } else {
+            &self.first
+        }
+    }
+}
+#[async_trait]
+impl Adapter for ExpiryFixtureWalletRouter {
+    fn definitions(&self) -> Vec<Definition> {
+        self.first.definitions()
+    }
+    fn connections(&self) -> Vec<ConnectionMetadata> {
+        let mut c = self.first.connections();
+        c.extend(self.second.connections());
+        c
+    }
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        self.selected(input).uses_rpc_reads(operation, input)
+    }
+    fn supports_independent_submission(&self, p: &PreparedOperation) -> bool {
+        self.selected(&p.input).supports_independent_submission(p)
+    }
+    fn preparation_reuse_window(&self, p: &PreparedOperation) -> Option<std::time::Duration> {
+        self.selected(&p.input).preparation_reuse_window(p)
+    }
+    fn validate_approved_candidate(
+        &self,
+        a: &PreparedOperation,
+        b: &PreparedOperation,
+    ) -> Result<()> {
+        self.selected(&a.input).validate_approved_candidate(a, b)
+    }
+    async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        self.selected(input).read(operation, input).await
+    }
+    async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        self.selected(input).prepare(operation, input).await
+    }
+    async fn revalidate(&self, p: &PreparedOperation) -> Result<PreparedOperation> {
+        self.selected(&p.input).revalidate(p).await
+    }
+    async fn submit(
+        &self,
+        p: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        self.selected(&p.input).submit(p, journal).await
+    }
+    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        self.selected(&record.input).reconcile(record).await
+    }
+}
+fn expiry_fixture_runtime(
+    path: &Path,
+    first: Arc<gofin_solana::SolanaWalletAdapter>,
+    second: Arc<gofin_solana::SolanaWalletAdapter>,
+    approval: Arc<Approval>,
+) -> Arc<gofin_broker::BrokerRuntime> {
+    compose_runtime_with_clock(
+        BrokerConfigV2 {
+            version: 2,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![],
+            policy: BrokerPolicy::beta(),
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        RuntimeDependencies {
+            store: Store::open(path).unwrap(),
+            adapters: vec![Arc::new(ExpiryFixtureWalletRouter { first, second })],
+            authorizer: approval,
+            valuator: Arc::new(SharedUsdValuator::with_source(Arc::new(Prices))),
+            bridge: None,
+        },
+        Arc::new(gofin_domain::clock::SystemClock),
     )
-    .await;
-    assert_eq!(entry["status"], "completed", "{entry}");
-    clock.0.store(901, Ordering::SeqCst);
-    let error = execute(
-        &client,
-        &id,
-        "deposit",
-        "kamino.deposit",
-        deposit(VaultFamily::Lending, "115"),
-        false,
-    )
-    .await;
-    assert!(
-        error["code"].as_str().unwrap().contains("EXPIRED")
-            || error["code"].as_str().unwrap().contains("INACTIVE"),
-        "{error}"
-    );
-    assert_eq!(chain.balance(UNDERLYING), 125);
-    assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    .unwrap()
+}
+
+struct StalledSolanaRpc {
+    chain: Arc<Chain>,
+    first_accepted: std::sync::atomic::AtomicBool,
+    release_first: std::sync::atomic::AtomicBool,
+}
+#[async_trait]
+impl gofin_solana::SolanaRpc for StalledSolanaRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let result = self.chain.request(method, params).await;
+        if method == "sendTransaction" && !self.first_accepted.swap(true, Ordering::SeqCst) {
+            while !self.release_first.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        result
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn solana_distinct_memo_bound_actions_advance_while_first_response_stalls() {
+    Box::pin(async {
+        let temp=tempfile::tempdir().unwrap();let path=temp.path().join("journal.sqlite");let (chain,original_wallet)=Chain::new();chain.drop_before_landing.store(true,Ordering::SeqCst);
+        let rpc=Arc::new(StalledSolanaRpc{chain:chain.clone(),first_accepted:std::sync::atomic::AtomicBool::new(false),release_first:std::sync::atomic::AtomicBool::new(false)});
+        let first=Arc::new(gofin_solana::SolanaWalletAdapter::new("wallet",&chain.owner,original_wallet.signer(),rpc.clone(),Arc::new(Prices)).unwrap());
+        let key=ed25519_dalek::SigningKey::from_bytes(&[2u8;32]);let signer=Arc::new(gofin_solana::SolanaSigner::parse(&serde_json::to_string(&key.to_keypair_bytes().to_vec()).unwrap()).unwrap());
+        let second=Arc::new(gofin_solana::SolanaWalletAdapter::new("other-wallet",signer.address(),Some(signer.clone()),rpc.clone(),Arc::new(Prices)).unwrap());
+        let approval=Arc::new(Approval::default());let client=Arc::new(Client::new(expiry_fixture_runtime(&path,first,second,approval.clone()),temp.path()).await);
+        let run=|id:&str,wallet:&str| {let id=id.to_owned();let wallet=wallet.to_owned();let client=client.clone();async move {let input=json!({"wallet":wallet,"network":"solana","cluster":"mainnet-beta","requestId":id,"recipient":bs58::encode([7u8;32]).into_string(),"amount":"0.001","max_fee_sol":"0.001"});let req=BrokerRequest::Execute{request:OperationRequest {request_id:id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None}};client.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&id,"--json"]),req,true).await}};
+        let first_call=tokio::spawn(run("solana-first","wallet"));
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {while !rpc.first_accepted.load(Ordering::SeqCst) {tokio::time::sleep(std::time::Duration::from_millis(5)).await}}).await.unwrap();
+        let snapshot=|| (approval.0.load(Ordering::SeqCst),chain.send_count.load(Ordering::SeqCst));
+        let main_counts=snapshot();
+        let b=tokio::time::timeout(std::time::Duration::from_secs(10),run("solana-same","wallet")).await.unwrap();
+        let same_probe=outcome_evidence::admission_probe("same_account",main_counts,snapshot(),&b);
+        let before=snapshot();
+        let c=tokio::time::timeout(std::time::Duration::from_secs(10),run("solana-other","other-wallet")).await.unwrap();
+        let other_probe=outcome_evidence::admission_probe("different_account",before,snapshot(),&c);
+        rpc.release_first.store(true,Ordering::SeqCst);
+        let a=first_call.await.unwrap();
+        assert_ne!(a["id"],b["id"]);assert_ne!(a["id"],c["id"]);assert_ne!(a["submission"]["reference"],b["submission"]["reference"]);assert_ne!(a["submission"]["reference"],c["submission"]["reference"]);
+        assert_eq!(approval.0.load(Ordering::SeqCst),3);assert_eq!(chain.send_count.load(Ordering::SeqCst),3);
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+            let mut evidence:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(evidence["scenario"],"outcome.a6");
+            evidence["approval_count"]=json!(evidence["approval_count"].as_u64().unwrap()+main_counts.0 as u64);
+            evidence["external_submission_count"]=json!(evidence["external_submission_count"].as_u64().unwrap()+main_counts.1 as u64);
+            let mut probes=evidence["admission_probes"].as_array().unwrap().clone();probes.extend([same_probe,other_probe]);
+            outcome_evidence::attach_probes(&mut evidence,&probes);
+            evidence["solana_fixture"]=json!({"approvals":snapshot().0,"submissions":snapshot().1,"same_wallet_independent":true,"different_wallet_independent":true});
+            std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        }
+    }).await
 }

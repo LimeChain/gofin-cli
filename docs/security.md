@@ -28,8 +28,8 @@ protected terminal confirmation for configuration approval. Binance account UID 
 the usual main-authorized child list attests email but does not reliably attest
 the child UID/email association, so the approval explicitly requires human
 confirmation of that mapping. Updates preserve physical identity and account
-relationships. Active runs, malformed records, and unresolved movements refuse
-configuration mutation. A durable approved-attempt audit does not imply activation:
+relationships. Open operations and malformed historical records do not block
+configuration changes; their original persisted identities remain unchanged. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
 Enrollment recovery inventories connection credentials separately from runtime
@@ -71,19 +71,12 @@ venue-calculated additional fees in the withdrawn currency without a guaranteed
 cap. The engine admits this fee mode only for a credit on a chain GoFin observes
 (a `gofin-networks` EVM chain or Solana mainnet-beta) and only when the source,
 fee reserve and Coinbase binding share one currency. Its typed `venue_calculated_additional_debit` treatment is approval-bound
-to the exact source resource and asset. The finite cost amount reserves policy
-and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
-records the complete fee from the original native transaction, including costs
-above that reserve. Principal, destination and receipt requirements remain
-fixed. Exact-input named plans can carry the same explicit consent and finite
-reserve; native plan approval must disclose the uncapped Coinbase fee policy.
-Future funding dependencies must be explicitly `principal_only`; unknown fees
-cannot be guaranteed to fit finite producer proceeds, so `all_debits` is rejected.
-Fees are charged to the same explicitly approved Coinbase account cash. Actual
-available cash must cover principal plus reserve before dispatch, and the full
-actual fee remains in cash accounting and history without creating authority. Ordinary cost treatments keep their
-hard caps. Scoped runs, bounded plan variations and reusable boundaries do not
-accept this fee mode.
+to the exact source resource and asset. The displayed fee estimate is not a quoted or venue-enforced maximum. Settlement
+records the actual fee from the original native transaction. Principal,
+destination and receipt requirements remain fixed. The structured review labels
+venue-calculated fees as checked after execution; ordinary enforceable native fee
+caps remain hard bounds. No optional USD estimate or local accounting reserve
+grants financial authority or blocks observation.
 
 Synthetic tests establish rejection logic and exact nonce/hash/expiry checks.
 They do **not** establish actual terminal isolation, native Touch ID, root
@@ -151,12 +144,12 @@ GoFin omits the `/order` slippage override so Jupiter's RTSE chooses slippage
 when the order is created. RTSE does not update an approved transaction at
 execution time. A returned order outside the approved slippage, minimum receipt
 or cost limits is rejected; those limits are not raised to accommodate it.
-Changing a candidate requires the applicable exact or bounded authority.
+A refreshed candidate must remain within the original approved native intent.
 
 Jupiter execution acceptance is not settlement. The broker persists submission
 identity before dispatch, independently verifies finalized transaction identity
-and financial effects, and retains unresolved reservations when evidence is
-missing or violates the approved bounds. Receipt verification detects a mismatch
+and financial effects, preserving uncertainty when evidence is missing and
+reporting discrepancies when proven execution violates approved bounds. Receipt verification detects a mismatch
 after execution; it does not replace the provider trust required before signing.
 Uncertain outcomes reconcile the original request and transaction without an
 automatic new order or replay.
@@ -182,56 +175,28 @@ is unchanged.
 UniswapX orders are signed only after durable submission admission. Acceptance
 is pending execution, not settlement. Recovery follows the persisted original
 order identity and independently verifies finalized fill effects; unresolved
-orders retain reservations and are never replaced by a blind retry. The same
+orders retain their original identities and are never replaced by a blind retry. The same
 original-identity rule applies to AMM transactions. API permissions bind the
 provider identity explicitly, so historical local-pool Uniswap permissions do
 not silently authorize hosted API execution.
 
 ## Per-write approval and recovery
 
-The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.
-Configuration review is in the protected human terminal; its consumed review proof
-binds that exact account, operation, hash, nonce and expiry after fresh sudo. The
-configuration-only authorizer records `AuthorizationSource::Sudo` with mechanism
-`sudo-terminal-review`; it does not invoke Touch ID. Financial writes, boundary
-grants and named plans reject this source, including stored approvals before
-relabeling and route-aware durable submission admission. Financial writes keep an
-independent trusted native review of their bound scope. Standalone writes display
-the applicable accounts, asset quantities, destination, contracts and fee/slippage
-limits. Named plans display their bound caller-authored name and optional financial
-summary, with step count and duration; these words are not broker-verified financial
-claims. The full structured plan remains independently enforced, and exact limits
-are available in terminal review. The internal signed
-helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
+The broker approves native economic intent independently of an exact dispatch candidate. The review binds operation, account, assets, networks, destination, amounts, worst acceptable outcome, fees and expiry. Structured terms are labelled enforced, estimate or checked after execution. The native prompt uses the compact action, amount, asset, account and service template with necessary action-specific details; it does not append fees, deadlines or classification labels. Agents state material amounts, destinations, outcome bounds, fees, fee caps, uncapped venue fee risks and timing in chat as relevant before execution, including under Yolo, without requiring a separate chat confirmation. The complete structured intent remains bound and independently validated. A requested hard bound cannot silently become an estimate. Quotes, fees, blockhashes and nonces may refresh only within approved intent; quote expiry never extends or expires human consent. Fixed output bounds and explicitly approved fresh-quote-relative slippage both apply when both are present.
 
-With Yolo off, each native approval uses biometric-only Touch ID with zero reuse and no password fallback.
-The native financial envelope binds the exact execution binding together with
-its broker-derived review and purpose. The private helper response must match
-that envelope hash; an old execution-only hash cannot approve a changed review.
-The broker retains the original execution hash in durable authority records.
-Review text never changes typed dispatch constraints. Unknown actions, malformed
-material fields and oversized messages fail before biometric approval; financial
-review text is not silently truncated.
+With Yolo off, native approval uses biometric-only Touch ID with zero reuse and no password fallback. The native envelope binds the broker-derived review and purpose. Private helper responses must match that envelope; execution-only historical hashes cannot approve changed review text. Unknown actions, malformed material terms and oversized messages fail before approval, without truncation. Historical binding versions remain readable and enforce their original meaning.
 
-The broker checks nonce, hash and timing and consumes approval once. Changed
-material parameters outside approved bounds or expired consent require a new
-approval. A fresh candidate within an active plan's bounds reuses that authority.
-For agent-nominated bridge and swap steps, that authority binds exact financial
-identities, a finite permitted provider/deployment set and cumulative limits.
-The broker validates the concrete adapter-prepared candidate against that scope;
-agent quote comparisons grant no authority, and arbitrary calldata is not a
-nomination. Submitted bridge child actions retain one durable route identity.
-Expiry, response loss or an uncertain outcome cannot authorize route switching
-or reset consumption. Quote freshness and plan lifetime are checked separately.
-Every cleanup write follows the applicable exact or bounded authorization path.
-An admitted dispatch error triggers one bounded read-only reconciliation of the
-original identity. Only verified adapter evidence can establish externally verified
-settlement; the separately authorized human disposition below is not such evidence.
-Empty history or a transient read failure does not authorize a
-replacement write. Unresolved work retains its error, identity and reservations.
-A sealed local signing or nonce-construction failure can prove no HTTP dispatch
-and settle as failure. Recovery searches bounded closed-order history for positive
-original-identity evidence; incomplete or empty history does not release a hold.
+The Touch ID challenge remains valid for at most 90 seconds, including for compound actions and explicit reauthorization. A compound prompt also cannot outlive its reviewed action deadline; after validating the short response, the broker retains that reviewed deadline as the compound authority expiry. After validating a successful standalone Touch ID financial approval against its original challenge, the broker grants a 30-minute execution window measured from the approved timestamp. Development approvals retain their own expiry and do not acquire this window. This window is persisted with the action; observation, continuation, restart and candidate refresh cannot restart it or extend historical approvals. Candidate freshness remains independently enforced. Configuration approval and protected Yolo retain their separate authorization rules.
+
+Standalone approval covers one submitted attempt. A submitted failed attempt, including a gas-burning revert, needs new authority. Compound approval covers only declared stages through its bound admission deadline (`actionDeadline` for `bridge.execute`); it does not receive an extra 30 minutes. This is independent of a provider-enforced protocol completion deadline; unsupported protocol guarantees are rejected. Before every admission the broker checks authority, stage prerequisites, native economic bounds and cumulative native fee caps, including costs already spent. Successful stages are immutable and never re-granted or repeated.
+
+An adapter may explicitly opt into bounded reuse of initial preparation before standalone admission. The reuse window starts before preparation and cannot extend candidate, price or approval deadlines. The broker still performs full revalidation under the submission resource lock before admission; boundary and plan attempts cannot use this standalone-only optimization.
+
+The journal atomically records concrete attempt identity, candidate binding, authority consumption and signer allocation before dispatch. Repeating execute observes the existing logical action. Continuation uses a broker-issued token with durable idempotency, including concurrent calls and lost responses. Explicit reauthorization binds a broker token and revised native input to a fresh review of unfinished work, retaining completed stages and spent fees. Repeating the token is idempotent. Financial invocation termination closes further admission; already admitted immutable submissions may finish. Status is bounded observation only and needs no approval. There is no background runner. If approval persistence succeeds but admission setup is interrupted, startup restores only the missing passive recovery metadata from the retained approved binding. It preserves the original expiry; an expired approval requires explicit reauthorization of the original action before any submission.
+
+When an action never obtained approval or dispatched a submission, its broker-issued preapproval token can also request explicit revised-input review on the original operation ID. An expired compound deadline requires that revised review; continuation cannot extend it. The store preserves the original request identity and record, binds the token to the revised input, and rejects different-input token reuse or any previously authorized or admitted action. Restart and lost responses cannot create another approval or submission from a consumed token. A prepared transfer alone is not evidence that funds are in transit.
+
+Replay safety requires proof against duplicate execution. Successful or partially successful execution never becomes replay-safe merely through finality. An empty history, timeout or failed observation is not proof of nonexecution. Authoritative correlated evidence establishes outcomes; later read failure cannot erase established effects. Reporting gaps and discrepancies cannot freeze another action. Source confirmation does not establish destination credit or a refund.
 
 Kraken signing does not grant dispatch authority. Secrets undergo strict local
 Base64 validation before native signing; permissive decoding in the pinned CCXT
@@ -245,49 +210,9 @@ through the pinned signer (`<= 2^53 - 1`). Exhaustion or a nonce mismatch fails
 before dispatch; neither can trigger a replay of an uncertain submitted request.
 The original financial submission and both authority guards remain unchanged.
 
-The separate `reservations.release` operation is an explicit human exception to
-account and cash reservations. It requires fresh Touch ID, including when Yolo is enabled;
-plan, boundary, sudo and Yolo authority cannot approve it. The broker derives the
-eligible account locks and binds the review to the original immutable submission,
-record and reservation snapshots. A changed snapshot or cancelled/expired approval
-releases nothing. Its atomic durable audit permits response-loss recovery with the
-same request ID. It preserves the unresolved operation, historical reservation rows, allocation
-charges and plan usage. Only exact reviewed account-lock and cash principal/fee
-rows cease blocking use of current funds; changed rows and unrelated reservations
-remain enforced. Reusing those funds may create overlapping financial exposure.
-The override does not cancel, settle, replay or authorize another financial action.
-Subsequent actions still require sufficient fresh balance after remaining holds and
-independently valid authority. Order, position and nonce locks remain enforced.
-`operations.force-resolve` is a separate explicit human exception for a supported
-historical outcome. Its exact preview binds the original operation and durable
-submission, attested debits/costs/receipts, released holds, plan/accounting impact and
-all retained risk to immutable snapshots. Fresh Touch ID is mandatory even under
-Yolo. It can accept success or failure without external proof, including a disclosed
-historical breach, but cannot rewrite the original approval, submission or evidence.
-The stored disposition and any human-attested proceeds are labeled separately from
-`VerifiedEffects`. Normal independent balance checks and remaining authority still
-apply to future writes; acceptance cannot renew a plan or enlarge its limits.
-Connection changes honor this validated durable disposition once no effective
-reservation remains for the operation. Retained lifecycle holds still protect the
-original mappings, and a reservation release alone does not resolve an operation.
+Personal USD limits, balance reservations, cross-operation accounting admission and human overrides are retired. Old records, approval bindings and manual attestations remain historical evidence with their provenance; they grant no new financial authority. A corrupt record is isolated to its own action and cannot grant replay safety.
 
-Manual acceptance is idempotent and audited atomically. Changed state during approval
-must invalidate the review; no approval artifact supplied by the client is trusted.
-The native review accepts the broker's typed cash and cost reservation keys as well
-as lifecycle lock identities. Presentation failures are reported separately from
-biometric rejection: `APPROVAL_REVIEW_INVALID` means no Touch ID prompt was requested,
-and repeating the unchanged approval is not a remedy.
-The original action is never replayed. Later contradictory evidence must remain
-visible and must not double-credit proceeds or silently erase the human disposition.
-Unspent human-attested proceeds are quarantined on contradiction. Additional proven
-spending increases cumulative charges and reduces remaining plan authority without
-charging the same proof twice.
-Unsupported position, debt, allowance and other noncash lifecycle changes cannot be
-invented through cash attestations. Outcome-only acceptance for these operations
-retains their lifecycle holds until the adapter independently proves their effects.
-Missing original identity is not repaired by
-asserting success. Read-only receipt recovery verifies a user-supplied reference
-through the adapter; the reference alone grants no proof or authority.
+A human may dismiss an unconfirmed action using the verified terminal and fresh sudo confirmation. Dismissal only hides it from the open list. It does not change facts, authorize execution or establish replay safety. Read-only receipt recovery independently verifies a supplied reference against the original identity; the reference alone grants no proof.
 
 Client-supplied approval receipts, arbitrary signed venue methods, raw signing
 and client-controlled authorization-disable switches are unavailable. The sole
@@ -324,30 +249,11 @@ An already admitted submission may finish dispatch after disable. An unadmitted
 attempt cannot acquire new Yolo authority. Disable never cancels venue orders
 or replaces uncertain transactions; reconciliation preserves the original identity.
 
-Yolo may authorize exact financial writes, bounded authority creation/replacement,
-plan creation/revision and explicitly requested steps or recovery writes. It
-does not run plans, schedule or retry work. Exact identities and schemas,
-configured limits, cumulative caps, expiry, pricing, fees, slippage, minimum
-receipts, simulation, reservations and settlement proof remain enforced.
-Credential, connection, financial policy and Yolo configuration changes remain
-separate human-only administrative actions. Audit output identifies Yolo and
-its revision/check time without exporting protected state or secrets.
+Yolo authorizes native terms of each action the agent chooses. There are no personal USD limits; the enable review says this explicitly. Exact identities, economic bounds, expiry, native fees, slippage, simulation and signed-payload verification remain enforced. Yolo cannot change credentials, connections or protected configuration. Audit evidence identifies activation, revision and concrete attempt check time.
 
-Persisted request and submission identities survive response loss and restart.
-An uncertain result keeps its reservation and requires reconciliation of the
-original operation; it is never permission to issue a replacement write. Canonical
-receipts and application-specific effects must establish settlement before costs
-or funds are released. Legacy journals remain read-only and cannot be silently
-reset, migrated or replayed.
+The protected runtime update requires explicit acknowledgement of retired personal limits and continuation of enabled Yolo. It preserves credentials, financial history and pending identities. Migration and per-file runtime replacement use forward recovery once the new schema may have been opened; restarting old code against a newer journal is prohibited.
 
-RPC-backed read and status observations can wait without a command deadline.
-The broker confirms this policy from the selected adapter, snapshot scope or
-original journal identity; a client flag cannot declare RPC use or change
-financial authority. Disconnecting an opted-in read client cancels its evidence
-collection and releases service resources. Financial dispatch continues under
-its durable identity when its observer disconnects. Approval expiry, quote
-freshness, financial evidence limits and primary-only transaction broadcasts
-remain enforced independently of read waiting.
+Observations are bounded. Disconnecting an opted-in read client cancels evidence collection; disconnecting a financial invocation prevents new stage admissions while admitted immutable dispatch remains observable. No read, dismissal or reporting error can authorize a financial write.
 
 ## Solana protocol account and signer scope
 
@@ -356,7 +262,7 @@ inside the broker's protected credential store under an owner-, purpose-, and
 logical-operation-bound reference. Their key material never appears in prepared
 input, approval JSON, or the journal. Safe pre-dispatch refresh and restart reuse
 the same generated identity; a distinct owner, protocol action, pool, request,
-or plan step receives a distinct reference.
+receives a distinct reference.
 
 SPL transfer-hook extra accounts are resolved from canonical mint metadata. The
 adapter permits writable extras and evaluates their simulated/finalized effects

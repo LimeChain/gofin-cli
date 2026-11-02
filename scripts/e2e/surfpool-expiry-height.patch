@@ -1,0 +1,35 @@
+diff --git a/crates/core/src/rpc/minimal.rs b/crates/core/src/rpc/minimal.rs
+index ae31ece..b0bce38 100644
+--- a/crates/core/src/rpc/minimal.rs
++++ b/crates/core/src/rpc/minimal.rs
+@@ -715,7 +715,7 @@ impl Minimal for SurfpoolMinimalRpc {
+ 
+         if let Some(target_slot) = config.min_context_slot {
+             let block_exists =
+-                meta.with_svm_reader(|svm_reader| svm_reader.blocks.contains_key(&target_slot))??;
++                meta.with_svm_reader(|svm_reader| svm_reader.get_block_or_reconstruct(target_slot).map(|v|v.is_some()))??;
+ 
+             if !block_exists {
+                 return Err(jsonrpc_core::Error::invalid_params(format!(
+@@ -727,7 +727,7 @@ impl Minimal for SurfpoolMinimalRpc {
+ 
+         meta.with_svm_reader(|svm_reader| {
+             if let Some(target_slot) = config.min_context_slot {
+-                if let Some(block_header) = svm_reader.blocks.get(&target_slot)? {
++                if let Some(block_header) = svm_reader.get_block_or_reconstruct(target_slot)? {
+                     return Ok(block_header.block_height);
+                 }
+             }
+diff --git a/crates/core/src/surfnet/svm.rs b/crates/core/src/surfnet/svm.rs
+index 43a023c..5d4bed7 100644
+--- a/crates/core/src/surfnet/svm.rs
++++ b/crates/core/src/surfnet/svm.rs
+@@ -1313,7 +1313,7 @@ impl SurfnetSvm {
+     /// Reconstructs an empty block header for a slot that wasn't stored.
+     /// This is used for sparse block storage where empty blocks are not persisted.
+     pub fn reconstruct_empty_block(&self, slot: Slot) -> BlockHeader {
+-        let block_height = slot;
++        let block_height = slot.saturating_sub(self.genesis_slot);
+         BlockHeader {
+             hash: SyntheticBlockhash::new(block_height).to_string(),
+             previous_blockhash: SyntheticBlockhash::new(block_height.saturating_sub(1)).to_string(),

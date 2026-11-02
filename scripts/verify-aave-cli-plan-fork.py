@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aave lifecycle through public CLI, one named plan, owned local fork only.
+"""Aave lifecycle through public CLI standalone actions on an owned local fork.
 
 Reuses the owned AMM transport/bootstrap helpers. Lifecycle writes use GoFin.
 Synthetic funding/mining and canonical pin RPCs are recorded orchestration gaps.
@@ -58,9 +58,10 @@ class AaveRehearsal(AMM.Rehearsal):
 
     def settled(self, operation, payload, plan=None, step=None):
         argv=['execute',operation,'--input',json.dumps(payload),'--id',payload['request_id']]
-        if plan: argv += ['--plan',plan,'--step',step]
+        self.begin_execution_evidence()
         try: record=self.cli(*argv)
         except AssertionError as failure:
+            self.unplanned_interventions += 1
             rejected=failure.args[0]
             assert isinstance(rejected,dict) and rejected.get('error',{}).get('code')=='EVIDENCE_TIMEOUT', rejected
             attempts=[r for r in self.operations() if r['request_id']==payload['request_id']]
@@ -68,10 +69,10 @@ class AaveRehearsal(AMM.Rehearsal):
             assert rejected['error']['stage']=='preflight'
             assert not any(r.get('input',{}).get('request_id')==payload['request_id'] and r.get('submission') for r in self.operations())
             # A confirmed unsubmitted timeout consumes no write authority. The
-            # same grant/input may make ONE fresh attempt; never renew consent.
+            # A deliberate fresh standalone attempt obtains its own authority.
             self.save('unsubmitted-timeout',{'original_id':attempts[0]['id'] if attempts else None,'new_attempt_id':payload['request_id']+'-fresh-evidence','scope_unchanged':True,'submission_absent':True})
             # Allow a bounded provider read cooldown before a fresh candidate.
-            # This neither changes the grant nor extends its expiry.
+            # The prior attempt is proved unsubmitted before retry.
             time.sleep(45)
             argv[argv.index('--id')+1]=payload['request_id']+'-fresh-evidence'
             record=self.cli(*argv)
@@ -80,6 +81,7 @@ class AaveRehearsal(AMM.Rehearsal):
             self.rpc('anvil_mine',['0x2'],'Owned local settlement advancement; no GoFin block-mining command')
             record=self.cli('status',record['id'])
         assert record['status']=='completed', record
+        assert record['outcome']['result']=='executed' and record['outcome']['phase']=='done' and record['outcome']['replay_safe'] is False, record
         duplicate=self.cli(*argv)
         assert duplicate['id']==record['id'] and duplicate['submission']==record['submission'] and duplicate['effects']==record['effects']
         return record
@@ -119,7 +121,7 @@ class AaveRehearsal(AMM.Rehearsal):
         self.rpc('anvil_setBalance',[self.secondary,hex(10**16)],'Synthetic secondary-wallet gas funding on owned fork')
         self.started=True;self.make('dev-env-start',DEV_MODE='live',DEV_FLAGS='--json')
         self.cli('--help');self.cli('capabilities')
-        for op in ['plans.authorize','aave.supply','aave.borrow','aave.repay','aave.withdraw','aave.collateral']:
+        for op in ['aave.supply','aave.borrow','aave.repay','aave.withdraw','aave.collateral']:
             self.cli('schema',op)
         if self.market != 'lido':
             self.fund_repayment_interest()
@@ -191,16 +193,7 @@ class AaveRehearsal(AMM.Rehearsal):
     def run(self, positive_only=False):
         self.initial=self.state();positions=self.initial['positions']['data'];assert int(positions['account']['debt_base'])==0
         assert all(int(r[k])==0 for r in positions['positions'] for k in ['supplied','stable_debt','variable_debt','pool_allowance'])
-        plan=self.plan();review=self.cli('plans','preview','--input',json.dumps(plan),'--valid-for','30m')
-        grant=self.cli('plans','authorize','--input',json.dumps(plan),'--id',self.name+'-grant','--review-hash',review['review_hash'],'--valid-for','30m');pid=grant['plan_id']
-        before=self.submissions()
-        if not positive_only:
-            last=plan['steps'][-1]
-            self.cli('execute',last['operation'],'--input',json.dumps(last['input']),'--id',self.name+'-out-of-order','--plan',pid,'--step',last['step_id'],'--dry-run',error=True)
-            assert self.submissions()==before
-            changed={**plan['steps'][0]['input'],'amount':'0.0013'}
-            self.cli('execute','wallet.wrap','--input',json.dumps(changed),'--id',self.name+'-out-of-bounds','--plan',pid,'--step','wrap','--dry-run',error=True)
-            assert self.submissions()==before
+        plan=self.plan();before=self.submissions()
         records=[];secondary_fee=0
         for step in plan['steps']:
             if step['step_id']=='supply' and not positive_only:
@@ -220,7 +213,7 @@ class AaveRehearsal(AMM.Rehearsal):
                 assert all(r.get('approval') is None and r.get('authorization_source') is None for r in attempts)
                 assert all(r.get('submission') is None and r.get('dispatch_evidence') is None for r in attempts)
                 self.save('mcp-approval-plan-rejected',{'request_id':bad['request_id'],'error':'AAVE_MCP_REJECTED','approval_audit_created':False,'submission_or_dispatch_created':False,'hidden_original_supply_present':True})
-            r=self.settled(step['operation'],step['input'],pid,step['step_id']);records.append(r)
+            r=self.settled(step['operation'],step['input']);records.append(r)
             if step['step_id']=='borrow':
                 if positive_only:
                     def secondary_usdc():
@@ -246,11 +239,8 @@ class AaveRehearsal(AMM.Rehearsal):
         wrapped=int(AMM.conversion(records[0])['spent']['atoms']);unwrapped=int(AMM.conversion(records[-1])['received']['atoms'])
         assert f[w]==b[w]==0 and f['native']-b['native']==unwrapped-wrapped-fees+secondary_fee
         usdc_cost=sum(int(e['amount']['atoms']) for e in effects if e['kind']=='cost' and e['amount']['asset']['reference']==u);assert b[u]-f[u]==usdc_cost
-        status=self.cli('plans','status',pid);assert all(s['state']=='completed' for s in status['steps']) and not status['usage']['reservations']
-        if not positive_only:
-            self.cli('plans','cancel',pid);self.restart();revoked=self.cli('plans','status',pid);assert revoked['revision']['status']=='revoked' and revoked['usage']==status['usage']
         assert self.submissions()==before+14+(2 if positive_only else 0)
-        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_named_plan_lifecycle':'passed','financial_submissions':14+(2 if positive_only else 0),'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14+(2 if positive_only else 0),'second_wallet_transfer_round_trip':positive_only,'restart_with_outstanding_debt':not positive_only,'revocation_persisted':not positive_only,'out_of_order_and_bound_rejections_without_submission':not positive_only,'mcp_approval_batch_rejected_before_submission':not positive_only,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; deterministic local Aave MCP response fixture; local rollup fee fixtures; synthetic fixed owned-fork pricing'})
+        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_standalone_lifecycle':'passed','financial_submissions':14+(2 if positive_only else 0),'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14+(2 if positive_only else 0),'second_wallet_transfer_round_trip':positive_only,'restart_with_outstanding_debt':not positive_only,'mcp_approval_batch_rejected_before_submission':not positive_only,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; deterministic local Aave MCP response fixture; local rollup fee fixtures; synthetic fixed owned-fork pricing'})
 
 
     def run_horizon(self):
@@ -398,7 +388,7 @@ def main():
     rehearsal=AaveRehearsal(evidence,str(args.chain))
     rehearsal.market=args.market
     if args.pin: rehearsal.saved_pin=json.loads(args.pin.read_text())
-    try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);print('Aave public CLI named-plan fork passed',args.chain,flush=True)
+    try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);rehearsal.write_execution_evidence();print('Aave public CLI standalone fork passed',args.chain,flush=True)
     finally:rehearsal.close()
 
 

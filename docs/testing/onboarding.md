@@ -237,16 +237,14 @@ construct a replacement financial action merely because a response was lost.
 For Binance failures, retain GoFin's safe error code, stage, and message. The
 message may contain a numeric HTTP status and Binance error code; upstream
 messages and response bodies are suppressed. Those numbers help diagnosis but
-do not establish a terminal outcome or release an unresolved reservation.
-Fresh cleanup-plan revision retains the original baseline, allocation, consumed
-costs and unresolved identities; it authorizes no write. Service stop preserves
+do not establish a terminal outcome.
+Retain original identities and consumed costs during cleanup; observation authorizes no write. Service stop preserves
 the journal and does not perform financial cleanup.
 
 ## Production/mainnet round trips
 
 Reconcile all earlier test records before starting new financial acceptance.
-Uncertain outcomes retain their original identities, reservations and charged
-allocations. Unchanged balances or absent history alone are not terminal proof.
+Uncertain outcomes retain their original identities and observed costs. Unchanged balances or absent history alone are not terminal proof.
 Do not replay an uncertain request, discard its journal, or use installation or
 enrollment to forget it. Carry unresolved records and outstanding cleanup into
 the private human-session report; a previous approval never authorizes a new run.
@@ -283,32 +281,9 @@ Verify policy terminal isolation, protected confirmation acceptance, decline, ca
 expiry and installed configuration reload independently of synthetic tests.
 These configuration checks need no financial movement.
 
-1. During a separately authorized fresh setup, verify both limit prompts, Enter
-   preserving $100, and zero shown explicitly as “No limit” in the trusted review.
-   Cancel before approval to check that no configuration is saved.
-   Run `gofin policy show` and `gofin policy show --json`; on an unchanged installation,
-   verify both personal limits remain $100 and included costs are explained.
-2. In your own macOS Terminal run
-   `gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000`.
-   Verify the password explanation and trusted old/new USD values. Decline,
-   cancel, and separately let the 90-second approval expire. Each must leave
-   both limits unchanged, with a fresh explicit retry required.
-3. Repeat with fresh sudo and accept protected terminal confirmation. Run `gofin policy show --json`; if the old
-   broker reports `CONFIG_CHANGED_RESTART_REQUIRED`, allow launchd to restart
-   and repeat the read. Verify 1000/5000 personal limits and the rolling allocation scope/usage. Restore the original policy through another fresh approved
-   `gofin policy set --max-movement-usd 100 --max-run-allocation-usd 100`.
-4. Separately test `gofin policy set --max-movement-usd 0 --max-run-allocation-usd 0`:
-   review “No limit” for both fields, decline first and verify no change, then
-   accept protected terminal confirmation and confirm JSON `"0"` values and unchanged operation approval requirements. Restore both original limits through fresh approval.
-   Verify agent invocation, redirected input, direct unprivileged broker invocation
-   and `--json` cannot change policy or bypass fresh sudo and terminal review.
-   The synthetic suite tests pending-operation refusal and historical-run compatibility; do not create a
-   live financial operation solely for this configuration check.
-5. Any later authorized live acceptance follows the LLM testing instructions: the
-   $100 total allocation and per-movement contract, a baseline, a complete funded
-   return plan, observed restoration, and fresh Touch ID for every write.
-   Ordinary permanent portfolio changes do not require these test artifacts.
-   No runtime verification classification exists.
+1. Verify setup no longer requests personal USD limits, and `gofin policy show` reports historical settings as retired.
+2. Verify `gofin policy set` rejects retired personal-limit changes without changing protected configuration. Test agent invocation, redirected input and JSON behavior with synthetic fixtures.
+3. Test per-action native approval and the separate Yolo checklist independently. Do not create a live financial operation solely for this configuration check.
 
 ## Yolo human checklist
 

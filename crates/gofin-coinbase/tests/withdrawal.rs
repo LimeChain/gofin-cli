@@ -661,6 +661,7 @@ async fn all_routes_reject_wrong_contract_without_dispatch() {
 }
 
 struct RecoveryApi {
+    calls: std::sync::atomic::AtomicUsize,
     reads: ReadApi,
     idem: std::sync::Mutex<String>,
     network: std::sync::Mutex<String>,
@@ -675,6 +676,7 @@ impl CoinbaseApi for RecoveryApi {
         request: CoinbaseRequest,
         guard: Option<DispatchGuard>,
     ) -> Result<CoinbaseResponse, CoinbaseError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert!(guard.is_none(), "recovery must never dispatch");
         let body = match endpoint {
             CoinbaseRoute::Transactions { account_id, .. } => {
@@ -756,6 +758,7 @@ fn recovery_profile(
         WALLET
     };
     let api = Arc::new(RecoveryApi {
+        calls: std::sync::atomic::AtomicUsize::new(0),
         reads: ReadApi {
             available_usdc: Arc::new(std::sync::Mutex::new("5".into())),
             currency,
@@ -799,6 +802,78 @@ async fn unknown_submission(
 }
 
 #[tokio::test]
+async fn captured_definitive_rejection_exposes_recovery_without_replaying_send() {
+    use sha2::{Digest, Sha256};
+    let route = &COINBASE_NETWORKS[0];
+    let (profile, api) = recovery_profile(destination_for(route), "USDC", tx_hash(route));
+    let mut record = unknown_submission(&profile, &api, &input_for(route)).await;
+    let body = serde_json::to_vec(&json!({"errors":[{"id":"invalid_request","message":"Incomplete travel rules information provided."}]})).unwrap();
+    let receipt = json!({"httpStatus":400,"bodyHex":hex::encode(&body),"bodySha256":hex::encode(Sha256::digest(&body))});
+    record.dispatch_evidence = Some(receipt.clone());
+    let calls = api.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let rejected = profile
+        .reconcile_submission(&record, record.submission.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), calls);
+    assert_eq!(rejected.status, gofin_domain::Status::Failed);
+    let proof = rejected.verified.unwrap();
+    assert!(proof.effects.is_empty());
+    assert_eq!(
+        gofin_domain::verified_effect_digest(&proof).unwrap(),
+        proof.proof_digest
+    );
+    assert_eq!(
+        proof.evidence["submission_reference"],
+        record.submission.as_ref().unwrap().reference
+    );
+    assert_eq!(proof.evidence["outcome_dispatch"], "rejected");
+    assert_eq!(proof.evidence["outcome_replay_safe"], true);
+    assert_eq!(proof.evidence["definitive_nonexecution"], true);
+    for http in [408, 409, 429, 500] {
+        record.dispatch_evidence = Some(receipt.clone());
+        record.dispatch_evidence.as_mut().unwrap()["httpStatus"] = json!(http);
+        let observed = profile
+            .reconcile_submission(&record, record.submission.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(observed.evidence["outcome_replay_safe"], true, "{http}");
+    }
+    record.dispatch_evidence = Some(receipt);
+    record.dispatch_evidence.as_mut().unwrap()["bodySha256"] = json!("tampered");
+    let invalid = profile
+        .reconcile_submission(&record, record.submission.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(invalid.status, gofin_domain::Status::Unknown);
+    assert_ne!(invalid.evidence["outcome_replay_safe"], true);
+}
+
+#[tokio::test]
+async fn destination_side_uses_original_venue_observation_without_coinbase_calls() {
+    let route = &COINBASE_NETWORKS[0];
+    let (profile, api) = recovery_profile(destination_for(route), "USDC", tx_hash(route));
+    let input = input_for(route);
+    let mut record = unknown_submission(&profile, &api, &input).await;
+    let submission = record.submission.clone().unwrap();
+    let source = profile
+        .observe_transfer_side(&record, &submission, "source")
+        .await
+        .unwrap();
+    record.last_reconciliation_evidence = Some(source.reconciliation.unwrap().evidence);
+    let before = api.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let destination = profile
+        .observe_transfer_side(&record, &submission, "destination")
+        .await
+        .unwrap();
+    assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), before);
+    assert_eq!(destination.metadata["status"], "completed");
+    let observation = destination.reconciliation.unwrap();
+    assert_eq!(observation.status, gofin_domain::Status::Pending);
+    assert_eq!(observation.evidence["outcome_transfer"], "credited");
+}
+
+#[tokio::test]
 async fn all_networks_recover_original_unknown_submission_and_reject_cross_network_receipts() {
     for route in COINBASE_NETWORKS {
         let (profile, api) = recovery_profile(destination_for(route), "USDC", tx_hash(route));
@@ -816,8 +891,14 @@ async fn all_networks_recover_original_unknown_submission_and_reject_cross_netwo
             route.network,
             result.evidence
         );
+        assert_eq!(result.evidence["outcome_transfer"], "credited");
         let effects = result.verified.unwrap();
         assert_eq!(&effects.submission, submission);
+        assert_eq!(effects.evidence["outcome_transfer"], "credited");
+        assert_eq!(
+            effects.proof_digest,
+            gofin_domain::verified_effect_digest(&effects).unwrap()
+        );
         assert!(effects.effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Transfer { credit, .. } if credit.asset.network == route.asset_network() && credit.asset.reference == route.usdc)));
         *api.network.lock().unwrap() = if route.network == "base" {
             "ethereum"

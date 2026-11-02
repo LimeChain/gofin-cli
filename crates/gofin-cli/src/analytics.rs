@@ -280,7 +280,7 @@ pub(crate) fn notice(command: &Command, machine: bool, development: bool, ui: &U
 pub(crate) fn privileged_context(action: &PrivilegedAction) -> CommandContext {
     let (command, operation, input) = match action {
         PrivilegedAction::Setup => ("setup", None, None),
-        PrivilegedAction::PolicySet(_) => ("policy.set", None, None),
+        PrivilegedAction::DismissOperation(_) => ("operations.dismiss", None, None),
         PrivilegedAction::Configure(request) => (
             "configure",
             Some(request.operation.as_str()),

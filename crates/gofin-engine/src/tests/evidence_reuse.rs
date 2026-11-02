@@ -31,6 +31,9 @@ struct ReuseAdapter {
     stale_price_after_window: bool,
     advance_after_window: chrono::Duration,
     revalidations: AtomicUsize,
+    pre_admission_only: bool,
+    pre_admission_queries: AtomicUsize,
+    fail_first: AtomicBool,
 }
 
 impl ReuseAdapter {
@@ -45,6 +48,9 @@ impl ReuseAdapter {
             stale_price_after_window: false,
             advance_after_window: chrono::Duration::zero(),
             revalidations: AtomicUsize::new(0),
+            pre_admission_only: false,
+            pre_admission_queries: AtomicUsize::new(0),
+            fail_first: AtomicBool::new(false),
         }
     }
 }
@@ -101,12 +107,31 @@ impl Adapter for ReuseAdapter {
         &self,
         _prepared: &PreparedOperation,
     ) -> Option<std::time::Duration> {
+        if self.pre_admission_only {
+            return None;
+        }
         self.clock.advance(self.advance_after_window);
         self.window
     }
 
+    fn pre_admission_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.pre_admission_queries.fetch_add(1, Ordering::SeqCst);
+        if self.pre_admission_only {
+            self.clock.advance(self.advance_after_window);
+            self.window
+        } else {
+            None
+        }
+    }
+
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         self.revalidations.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first.swap(false, Ordering::SeqCst) {
+            return Err(GoFinError::validation("Synthetic pre-dispatch rejection."));
+        }
         self.inner.revalidate(prepared).await
     }
 
@@ -126,6 +151,78 @@ impl Adapter for ReuseAdapter {
 struct AdvancingApproval {
     clock: Arc<ManualClock>,
     delay: std::time::Duration,
+}
+
+struct TouchIdApproval(Arc<ManualClock>, AtomicUsize);
+#[async_trait]
+impl Authorizer for TouchIdApproval {
+    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::TouchId),
+            yolo_provenance: None,
+            mechanism: "touch-id".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: self.0.now().to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn standalone_touch_id_revalidation_after_prompt_deadline_keeps_all_checks() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.advance_after_window = chrono::Duration::seconds(100);
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let result = engine
+        .execute(ordinary_request("approval-revalidation-100s"))
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Pending, "{:?}", result.error);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    let audit = result.approval.unwrap();
+    assert_eq!(
+        parse_time(&audit.expires_at).unwrap() - parse_time(&audit.approved_at).unwrap(),
+        chrono::Duration::minutes(30)
+    );
+}
+
+#[tokio::test]
+async fn standalone_touch_id_expiry_still_blocks_late_admission() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.advance_after_window = chrono::Duration::seconds(1800);
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let result = engine
+        .execute(ordinary_request("approval-revalidation-1800s"))
+        .await
+        .unwrap();
+    assert!(result.submission.is_none());
+    assert_eq!(result.error.unwrap().code, "APPROVAL_EXPIRED");
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
 }
 
 #[async_trait]
@@ -186,7 +283,7 @@ async fn fresh_evidence_is_reused_without_widening_exact_intent() {
     )
     .await;
 
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
     let intent = &result.preview.unwrap().intent;
     assert_eq!(
@@ -211,7 +308,7 @@ async fn preparation_age_starts_before_slow_adapter_work() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -227,7 +324,7 @@ async fn delayed_human_approval_falls_back_to_fresh_adapter_validation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -245,7 +342,7 @@ async fn older_but_generically_fresh_observation_falls_back_to_revalidation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -283,7 +380,7 @@ async fn expired_price_observation_is_not_extended_by_reuse() {
     .await;
 
     assert_eq!(result.error.unwrap().code, "STALE_VALUATION");
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -301,5 +398,572 @@ async fn adapters_without_a_reuse_window_keep_final_revalidation() {
     .await;
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
-    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_admission_reuse_keeps_locked_refresh_and_original_freshness_checks() {
+    for scenario in [
+        "fresh",
+        "slow_prepare",
+        "slow_approval",
+        "old_observation",
+        "expired_candidate",
+        "expired_price",
+    ] {
+        let clock = Arc::new(ManualClock::new());
+        let mut adapter = ReuseAdapter::new(clock.clone());
+        adapter.pre_admission_only = true;
+        let mut delay = std::time::Duration::ZERO;
+        match scenario {
+            "slow_prepare" => adapter.preparation_delay = std::time::Duration::from_secs(31),
+            "slow_approval" => delay = std::time::Duration::from_secs(31),
+            "old_observation" => {
+                adapter.candidate_observation_age = Some(chrono::Duration::seconds(45))
+            }
+            "expired_candidate" => {
+                adapter.candidate_lifetime = Some(chrono::Duration::seconds(1));
+                adapter.advance_after_window = chrono::Duration::seconds(2);
+            }
+            "expired_price" => {
+                adapter.stale_price_after_window = true;
+                adapter.advance_after_window = chrono::Duration::seconds(2);
+            }
+            _ => {}
+        }
+        let adapter = Arc::new(adapter);
+        let result = execute_with(adapter.clone(), clock, delay, scenario).await;
+        assert_eq!(
+            adapter.pre_admission_queries.load(Ordering::SeqCst),
+            1,
+            "{scenario}"
+        );
+        match scenario {
+            "expired_candidate" | "expired_price" => {
+                assert_eq!(
+                    result.error.unwrap().code,
+                    if scenario == "expired_candidate" {
+                        "PREVIEW_EXPIRED"
+                    } else {
+                        "STALE_VALUATION"
+                    }
+                );
+                assert!(result.submission.is_none());
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+            }
+            _ => {
+                assert_eq!(
+                    result.status,
+                    Status::Pending,
+                    "{scenario}: {:?}",
+                    result.error
+                );
+                // Fresh initial evidence eliminates only the pre-lock refresh.
+                // Slow preparation/approval or older observations retain both.
+                assert_eq!(
+                    adapter.revalidations.load(Ordering::SeqCst),
+                    if scenario == "fresh" { 1 } else { 2 },
+                    "{scenario}"
+                );
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pre_admission_opt_in_is_never_queried_for_boundary_or_plan_attempts() {
+    let clock = Arc::new(ManualClock::new());
+    let mut adapter = ReuseAdapter::new(clock);
+    adapter.pre_admission_only = true;
+    let prepared = adapter
+        .prepare("synthetic.transfer", &json!({}))
+        .await
+        .unwrap();
+    for (boundary, plan) in [(true, false), (false, true), (true, true)] {
+        assert!(execution_preparation_reuse_window(&adapter, &prepared, boundary, plan).is_none());
+    }
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        execution_preparation_reuse_window(&adapter, &prepared, false, false),
+        adapter.window
+    );
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 1);
+    // Existing explicit final-evidence reuse remains unchanged for those routes.
+    adapter.pre_admission_only = false;
+    for (boundary, plan) in [(true, false), (false, true), (true, true)] {
+        assert_eq!(
+            execution_preparation_reuse_window(&adapter, &prepared, boundary, plan),
+            adapter.window
+        );
+    }
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn standalone_touch_id_promotion_rejects_invalid_short_responses() {
+    let now = Utc::now();
+    let challenge = AuthorizationChallenge {
+        review: None,
+        purpose: "financial_write".into(),
+        operation_id: "operation".into(),
+        binding: json!({}),
+        binding_hash: "binding".into(),
+        summary: "test".into(),
+        nonce: "nonce".into(),
+        expires_at: (now + chrono::Duration::seconds(90)).to_rfc3339(),
+    };
+    let audit = ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
+        mechanism: "touch-id".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.to_rfc3339(),
+        expires_at: challenge.expires_at.clone(),
+    };
+    validate_approval(&audit, &challenge, now).unwrap();
+    let mut promoted = audit.clone();
+    promote_standalone_touch_id_approval(&mut promoted, &challenge, now).unwrap();
+    assert_eq!(
+        parse_time(&promoted.expires_at).unwrap(),
+        now + chrono::Duration::minutes(30)
+    );
+    assert_eq!(promoted.binding_hash, audit.binding_hash);
+    assert_eq!(promoted.challenge_nonce, audit.challenge_nonce);
+    for invalid in [
+        "invalid".to_owned(),
+        (now + chrono::Duration::seconds(1)).to_rfc3339(),
+        (now - chrono::Duration::seconds(1)).to_rfc3339(),
+    ] {
+        let mut bad = audit.clone();
+        bad.approved_at = invalid;
+        assert!(promote_standalone_touch_id_approval(&mut bad, &challenge, now).is_err());
+    }
+    let mut late = audit.clone();
+    assert!(
+        promote_standalone_touch_id_approval(
+            &mut late,
+            &challenge,
+            now + chrono::Duration::seconds(90)
+        )
+        .is_err()
+    );
+    let mut bad = audit.clone();
+    bad.challenge_nonce = "other".into();
+    assert!(validate_approval(&bad, &challenge, now).is_err());
+    let mut non_touch = audit.clone();
+    non_touch.source = None;
+    promote_standalone_touch_id_approval(&mut non_touch, &challenge, now).unwrap();
+    assert_eq!(non_touch.expires_at, challenge.expires_at);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_continuation_after_restart_preserves_original_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    fixture.fail_first.store(true, Ordering::SeqCst);
+    let adapter = Arc::new(fixture);
+    let authorizer = Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let original = engine
+        .execute(ordinary_request("touchid-restart"))
+        .await
+        .unwrap();
+    let expiry = original.approval.as_ref().unwrap().expires_at.clone();
+    let token = engine
+        .operation_view(&original)
+        .unwrap()
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+    drop(engine);
+    clock.advance(chrono::Duration::seconds(100));
+    let engine = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let restored = engine.status(&original.id, false).await.unwrap();
+    assert_eq!(restored.approval.unwrap().expires_at, expiry);
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let continued = invocation
+        .scope(engine.continue_operation(&original.id, &token))
+        .await
+        .unwrap();
+    assert!(continued["stage"]["submission"].is_object(), "{continued}");
+    assert_eq!(authorizer.1.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_explicit_reauthorization_gets_fresh_window_once() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    fixture.fail_first.store(true, Ordering::SeqCst);
+    let adapter = Arc::new(fixture);
+    let authorizer = Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let original = engine
+        .execute(ordinary_request("touchid-reauthorize"))
+        .await
+        .unwrap();
+    let original_expiry = original.approval.as_ref().unwrap().expires_at.clone();
+    let token = engine
+        .operation_view(&original)
+        .unwrap()
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+    clock.advance(chrono::Duration::seconds(100));
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let result = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result["reauthorization"], "approved");
+    let updated = engine.status(&original.id, false).await.unwrap();
+    let audit = updated.approval.unwrap();
+    assert_eq!(
+        parse_time(&audit.expires_at).unwrap() - parse_time(&audit.approved_at).unwrap(),
+        chrono::Duration::minutes(30)
+    );
+    assert!(parse_time(&audit.expires_at).unwrap() > parse_time(&original_expiry).unwrap());
+    let duplicate = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(duplicate, result);
+    assert_eq!(authorizer.1.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_does_not_extend_candidate_expiry() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = Some(std::time::Duration::from_secs(300));
+    fixture.advance_after_window = chrono::Duration::seconds(100);
+    fixture.candidate_lifetime = Some(chrono::Duration::seconds(90));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let result = engine
+        .execute(ordinary_request("touchid-candidate-expired"))
+        .await
+        .unwrap();
+    assert!(result.submission.is_none());
+    assert_eq!(result.error.unwrap().code, "PREVIEW_EXPIRED");
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response() {
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::hours(2);
+    let challenge = AuthorizationChallenge {
+        review: None,
+        purpose: "financial_write".into(),
+        operation_id: "compound".into(),
+        binding: json!({"actionDeadline": deadline.to_rfc3339()}),
+        binding_hash: "binding".into(),
+        summary: "test".into(),
+        nonce: "nonce".into(),
+        expires_at: (now + chrono::Duration::seconds(90))
+            .min(deadline)
+            .to_rfc3339(),
+    };
+    for source in [
+        Some(gofin_domain::AuthorizationSource::TouchId),
+        Some(gofin_domain::AuthorizationSource::Development),
+        Some(gofin_domain::AuthorizationSource::Yolo),
+        None,
+    ] {
+        let mut audit = ApprovalAudit {
+            source,
+            yolo_provenance: None,
+            mechanism: "test".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: now.to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        };
+        validate_approval(&audit, &challenge, now).unwrap();
+        promote_compound_approval(&mut audit, &challenge, now, deadline).unwrap();
+        assert_eq!(parse_time(&audit.expires_at).unwrap(), deadline);
+    }
+    let audit = ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
+        mechanism: "test".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.to_rfc3339(),
+        expires_at: challenge.expires_at.clone(),
+    };
+    assert!(validate_approval(&audit, &challenge, now + chrono::Duration::seconds(90)).is_err());
+    assert!(promote_compound_approval(&mut audit.clone(), &challenge, deadline, deadline).is_err());
+    let mut changed = audit.clone();
+    changed.expires_at = deadline.to_rfc3339();
+    assert!(promote_compound_approval(&mut changed, &challenge, now, deadline).is_err());
+    let mut retired = audit;
+    retired.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
+    assert!(promote_compound_approval(&mut retired, &challenge, now, deadline).is_err());
+}
+
+struct ExpiredInputAdapter(SyntheticAdapter);
+#[async_trait]
+impl Adapter for ExpiredInputAdapter {
+    fn definitions(&self) -> Vec<Definition> {
+        self.0.definitions()
+    }
+    async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        self.0.read(operation, input).await
+    }
+    async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if input["amount"] == "1" {
+            return Err(GoFinError::validation("deadline expired"));
+        }
+        self.0.prepare(operation, input).await
+    }
+    async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        self.0.revalidate(prepared).await
+    }
+    async fn submit(
+        &self,
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        self.0.submit(prepared, journal).await
+    }
+    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        self.0.reconcile(record).await
+    }
+}
+
+#[tokio::test]
+async fn revised_preapproval_input_keeps_original_identity_and_is_idempotent_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let authorizer = Arc::new(CountApproval(AtomicUsize::new(0)));
+    let make_engine = || {
+        Engine::new(
+            Store::open(&path).unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap()
+    };
+    let engine = make_engine();
+    let request = ordinary_request("expired-input-revision");
+    let original = engine.execute(request.clone()).await.unwrap();
+    assert!(original.approval.is_none() && original.submission.is_none());
+    let token = engine
+        .store
+        .lock()
+        .unwrap()
+        .latest_preapproval_continuation(&original.id)
+        .unwrap()
+        .unwrap()
+        .token;
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+    drop(engine);
+    let engine = make_engine();
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let input = json!({"amount":"2"});
+    let result = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result["id"], original.id);
+    assert_eq!(result["reauthorization"], "approved");
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 1);
+    drop(engine);
+    let engine = make_engine();
+    let replay = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input))
+        .await
+        .unwrap();
+    assert_eq!(replay["id"], original.id);
+    assert_eq!(replay["reauthorization"], "approved");
+    assert!(
+        invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, json!({"amount":"3"})))
+            .await
+            .is_err()
+    );
+    assert_eq!(engine.execute(request).await.unwrap().id, original.id);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn preapproval_failure_overrides_unsubmitted_prepared_transfer_observation() {
+    use gofin_domain::outcome::{Dispatch, OutcomeResult, TransferState};
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter],
+        Arc::new(SyntheticAuthorizer),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let original = engine
+        .execute(ordinary_request("predispatch-stale-observation"))
+        .await
+        .unwrap();
+    assert!(original.approval.is_none() && original.submission.is_none());
+    let mut stale = operation_resolutions::outcome_facts(&original);
+    stale.result = OutcomeResult::Pending;
+    stale.dispatch = Dispatch::NotDispatched;
+    stale.transfer = Some(TransferState::SourcePending);
+    engine
+        .store
+        .lock()
+        .unwrap()
+        .append_outcome_observation(&original.id, &stale, "bridge_destination")
+        .unwrap();
+    let view = engine.operation_view(&original).unwrap();
+    assert_eq!(view["outcome"]["result"], "failed", "{view}");
+    assert_eq!(view["outcome"]["dispatch"], "not_dispatched");
+    assert_ne!(view["outcome"]["transfer"], "source_pending");
+
+    let mut bridge = original.clone();
+    bridge.id = "expired-bridge-projection".into();
+    bridge.request_id = "expired-bridge-request".into();
+    bridge.operation = "bridge.execute".into();
+    bridge.input = json!({"actionDeadline": Utc::now().timestamp() - 1});
+    bridge.fingerprint = request_fingerprint(&OperationRequest {
+        request_id: bridge.request_id.clone(),
+        operation: bridge.operation.clone(),
+        input: bridge.input.clone(),
+        run_id: None,
+    })
+    .unwrap();
+    let mut expected = bridge.clone();
+    expected.status = Status::AwaitingApproval;
+    expected.error = None;
+    expected.last_reconciliation_evidence = None;
+    {
+        let mut store = engine.store.lock().unwrap();
+        store
+            .create_request(
+                &bridge.id,
+                &bridge.request_id,
+                &bridge.fingerprint,
+                &bridge.operation,
+                None,
+                "awaiting_approval",
+                &to_value(&expected).unwrap(),
+                &bridge.created_at,
+            )
+            .unwrap();
+        store
+            .record_predispatch_failure_and_issue(
+                &bridge.id,
+                &to_value(&expected).unwrap(),
+                &to_value(&bridge).unwrap(),
+                &bridge.updated_at,
+            )
+            .unwrap();
+    }
+    let view = engine.operation_view(&bridge).unwrap();
+    assert_eq!(
+        view["outcome"]["next_action"]["code"], "reauthorize",
+        "{view}"
+    );
+    assert_eq!(
+        view["outcome"]["next_action"]["command"],
+        "operations reauthorize"
+    );
+    assert_eq!(
+        view["outcome"]["next_action"]["arguments"]["input_required"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn rejected_revised_preapproval_replays_its_successor_without_prompt() {
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        approvals.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let original = engine
+        .execute(ordinary_request("revised-rejected"))
+        .await
+        .unwrap();
+    let token = engine
+        .store
+        .lock()
+        .unwrap()
+        .latest_preapproval_continuation(&original.id)
+        .unwrap()
+        .unwrap()
+        .token;
+    let input = json!({"amount":"1","revised":true});
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let first = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input.clone()))
+        .await
+        .unwrap();
+    let next = first
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(first["outcome"]["next_action"]["code"], "reauthorize");
+    let duplicate = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input))
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str),
+        Some(next)
+    );
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
 }

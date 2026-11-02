@@ -1440,3 +1440,9 @@ async fn futures_settings_require_a_dispatch_guard() {
     }
     assert_eq!(server.finish(), 0);
 }
+
+#[test]
+fn order_not_found_keeps_ccxt_typed_classification() {
+    let error = ccxt::ExchangeError::new("OrderNotFound", "provider could not find order");
+    assert_eq!(sanitized(error).kind, CcxtErrorKind::OrderNotFound);
+}

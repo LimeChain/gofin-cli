@@ -4,13 +4,7 @@ use gofin_bridge::*;
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
 use gofin_domain::{
     Adapter, ApprovalAudit, AuthorizationChallenge, Authorizer, BridgeStepKind as DomainStepKind,
-    BridgeStepLink, OperationRequest, Quantity, Result, Status,
-    boundaries::BoundaryAuthorizationRequest,
-    financial_plans::{
-        FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
-        FinancialPlanStepSpec, FinancialStepCompletion,
-    },
-    now,
+    BridgeStepLink, OperationRequest, Quantity, Result, Status, now,
 };
 use gofin_engine::{Engine, EngineOptions};
 use gofin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection};
@@ -53,6 +47,15 @@ fn omit_nulls(value: &mut Value) {
 
 #[derive(Default)]
 struct CountingApproval(AtomicUsize);
+struct UnavailablePrices;
+#[async_trait]
+impl gofin_pricing::UsdPriceSource for UnavailablePrices {
+    async fn quote(&self, _: &gofin_domain::AssetId) -> Result<gofin_pricing::UsdQuote> {
+        Err(gofin_domain::GoFinError::validation(
+            "synthetic price unavailable",
+        ))
+    }
+}
 #[async_trait]
 impl Authorizer for CountingApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
@@ -112,6 +115,22 @@ impl Harness {
         destination_chain_id: u64,
         native_withheld_fee: Option<Quantity>,
     ) -> Self {
+        Self::build_with_prices(
+            initial_allowance,
+            payout,
+            destination_chain_id,
+            native_withheld_fee,
+            false,
+        )
+    }
+
+    fn build_with_prices(
+        initial_allowance: gofin_evm::alloy::primitives::U256,
+        payout: DestinationPayout,
+        destination_chain_id: u64,
+        native_withheld_fee: Option<Quantity>,
+        unavailable: bool,
+    ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("journal.sqlite"))
             .unwrap()
@@ -130,7 +149,11 @@ impl Harness {
             destination_chain_id,
             None,
         ));
-        let prices = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+        let prices = Arc::new(SharedUsdValuator::with_source(if unavailable {
+            Arc::new(UnavailablePrices)
+        } else {
+            Arc::new(Prices)
+        }));
         let source_wallet = Arc::new(
             EthereumAdapter::new(
                 EthereumConfig::wallet_only(1, 1, vec![]),
@@ -299,21 +322,6 @@ impl Harness {
         value
     }
 
-    fn native_quote_input(&self) -> Value {
-        json!({
-            "intent": {
-                "wallet":"synthetic-wallet",
-                "source":{"chainId":1},
-                "destinationChainId":4663,
-                "destinationAssets":[{"chainId":4663}],
-                "recipient":self.wallet,
-                "refundTo":self.wallet,
-                "allowedRefundAssets":[{"chainId":1}],
-                "amount":"10000000000000000"
-            }
-        })
-    }
-
     fn native_bounds(&self) -> BridgeBounds {
         BridgeBounds {
             input: Some(AmountInterval {
@@ -321,14 +329,8 @@ impl Harness {
                 maximum: q("10000000000000000"),
             }),
             maximum_source_debit: Some(q("10000000000000000")),
-            input_usd_micros: Some(AmountInterval {
-                minimum: q("20000000"),
-                maximum: q("20000000"),
-            }),
-            source_usd_per_unit_micros: Some(AmountInterval {
-                minimum: q("2000000000"),
-                maximum: q("2000000000"),
-            }),
+            input_usd_micros: None,
+            source_usd_per_unit_micros: None,
             minimum_net_receipt: Some(
                 EvmAsset {
                     chain_id: 4663,
@@ -347,7 +349,7 @@ impl Harness {
                     .asset_id(),
                     kind: FeeKind::Gas,
                     maximum: q("1000000000000000"),
-                    maximum_usd_micros: Some(2_000_000),
+                    maximum_usd_micros: None,
                 },
                 FeeCap {
                     asset: EvmAsset {
@@ -361,7 +363,7 @@ impl Harness {
                     maximum_usd_micros: None,
                 },
             ],
-            maximum_total_usd_micros: Some(25_000_000),
+            maximum_total_usd_micros: None,
             authorization_seconds: Some(600),
             ..BridgeBounds::default()
         }
@@ -378,14 +380,8 @@ impl Harness {
                 maximum: q("10000000"),
             }),
             maximum_source_debit: Some(q("12000000")),
-            input_usd_micros: Some(AmountInterval {
-                minimum: q("10000000"),
-                maximum: q("10000000"),
-            }),
-            source_usd_per_unit_micros: Some(AmountInterval {
-                minimum: q("1000000"),
-                maximum: q("1000000"),
-            }),
+            input_usd_micros: None,
+            source_usd_per_unit_micros: None,
             minimum_net_receipt: Some(
                 EvmAsset {
                     chain_id: 42161,
@@ -407,9 +403,9 @@ impl Harness {
                 .asset_id(),
                 kind: FeeKind::Gas,
                 maximum: q("1000000000000000"),
-                maximum_usd_micros: Some(2_000_000),
+                maximum_usd_micros: None,
             }],
-            maximum_total_usd_micros: Some(14_000_000),
+            maximum_total_usd_micros: None,
             authorization_seconds: Some(600),
             ..BridgeBounds::default()
         }
@@ -430,28 +426,6 @@ impl Harness {
         .unwrap();
         omit_nulls(&mut value);
         value
-    }
-
-    async fn execute(
-        &self,
-        grant: &str,
-        transfer: &str,
-        step: &BridgeStepLink,
-        request_id: &str,
-        bounds: &BridgeBounds,
-    ) -> gofin_domain::OperationRecord {
-        self.engine
-            .execute_boundary(
-                grant,
-                OperationRequest {
-                    request_id: request_id.into(),
-                    operation: "bridge.transfer".into(),
-                    input: self.step_input(transfer, step, Some(bounds.clone())),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap()
     }
 
     async fn execute_exact(
@@ -550,6 +524,114 @@ async fn execute_source_and_get_transfer(
 }
 
 #[tokio::test]
+async fn new_bridge_quote_and_direct_stage_reject_retired_usd_bounds() {
+    let h = Harness::new();
+    let mut retired = Vec::new();
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = Some(AmountInterval {
+        minimum: q("1"),
+        maximum: q("2"),
+    });
+    retired.push(bounds);
+    let mut bounds = h.bounds();
+    bounds.source_usd_per_unit_micros = Some(AmountInterval {
+        minimum: q("1"),
+        maximum: q("2"),
+    });
+    retired.push(bounds);
+    let mut bounds = h.bounds();
+    bounds.maximum_total_usd_micros = Some(14_000_000);
+    retired.push(bounds);
+    let mut bounds = h.bounds();
+    bounds.fee_caps[0].maximum_usd_micros = Some(2_000_000);
+    retired.push(bounds);
+    for bounds in &retired {
+        let mut quote_input = h.quote_input(None);
+        quote_input["bounds"] = serde_json::to_value(bounds).unwrap();
+        let error = h
+            .bridge
+            .read("bridge.quotes", &quote_input)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("USD approval bounds are retired"));
+    }
+    let quote = h
+        .bridge
+        .read("bridge.quotes", &h.quote_input(None))
+        .await
+        .unwrap();
+    let transfer = quote["transfers"][0]["transfer_id"].as_str().unwrap();
+    let steps: Vec<BridgeStepLink> =
+        serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
+    let step = steps.iter().find(|s| s.depends_on.is_empty()).unwrap();
+    for bounds in retired {
+        let error = h
+            .bridge
+            .prepare(
+                "bridge.transfer",
+                &h.step_input(transfer, step, Some(bounds)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("USD approval bounds are retired"));
+    }
+    // Model a saved pre-cutover quote. A fresh action may not inherit its USD
+    // authority, even when the new request omits bounds.
+    let mut historical = h.state.transfer(transfer).unwrap().unwrap();
+    historical.metadata["quote_bounds"]["maximum_total_usd_micros"] = json!(14_000_000);
+    historical.quote_revisions.last_mut().unwrap().payload["bounds"]["maximum_total_usd_micros"] =
+        json!(14_000_000);
+    let db = rusqlite::Connection::open(h._tmp.path().join("journal.sqlite")).unwrap();
+    db.execute(
+        "UPDATE bridge_transfers SET record_json=?1 WHERE transfer_id=?2",
+        rusqlite::params![serde_json::to_string(&historical).unwrap(), transfer],
+    )
+    .unwrap();
+    let error = h
+        .bridge
+        .prepare("bridge.transfer", &h.step_input(transfer, step, None))
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("USD approval bounds are retired"));
+    let error = h
+        .bridge
+        .read("bridge.quotes", &h.quote_input(Some(transfer.into())))
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("USD approval bounds are retired"));
+    assert_eq!(h.source.broadcasts(), 0);
+}
+
+#[tokio::test]
+async fn native_quote_and_direct_stage_execute_when_usd_pricing_is_unavailable() {
+    let h = Harness::build_with_prices(
+        gofin_evm::alloy::primitives::U256::ZERO,
+        DestinationPayout::Router,
+        42161,
+        None,
+        true,
+    );
+    let quote = h
+        .bridge
+        .read("bridge.quotes", &h.quote_input(None))
+        .await
+        .unwrap();
+    let transfer = quote["transfers"][0]["transfer_id"].as_str().unwrap();
+    let steps: Vec<BridgeStepLink> =
+        serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
+    let approval = steps
+        .iter()
+        .find(|s| s.kind == DomainStepKind::Approval)
+        .unwrap();
+    let result = h
+        .execute_exact(transfer, approval, "unpriced-native-stage", &h.bounds())
+        .await;
+    assert_eq!(result.status, Status::Completed, "{result:?}");
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.source.broadcasts(), 1);
+}
+
+#[tokio::test]
 async fn direct_native_order_tagged_payout_accepts_alternate_nonself_sender() {
     let harness = Harness::with_destination_payout(
         gofin_evm::alloy::primitives::U256::from(5_000_000u64),
@@ -614,551 +696,413 @@ async fn direct_erc20_order_tagged_payout_needs_no_historical_code_read() {
 }
 
 #[tokio::test]
-async fn nominated_bridge_intent_reuses_one_plan_step_until_destination_settlement() {
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let h = Harness::new();
-        let quote_a = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(None))
-            .await
-            .unwrap();
-        let unsubmitted_quote = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(None))
-            .await
-            .unwrap();
-        let transfer_a = quote_a["transfers"][0]["transfer_id"]
-            .as_str()
+async fn standalone_bridge_preserves_route_after_restart_until_destination_settlement() {
+    let h = Harness::new();
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "standalone-bridge-restart".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request.clone())))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        h.state
+            .transfer(&transfer_id)
             .unwrap()
-            .to_owned();
-        let links_a: Vec<BridgeStepLink> =
-            serde_json::from_value(quote_a["transfers"][0]["steps"].clone()).unwrap();
-        let unsubmitted_transfer = unsubmitted_quote["transfers"][0]["transfer_id"]
-            .as_str()
-            .unwrap();
-        let unsubmitted_links: Vec<BridgeStepLink> =
-            serde_json::from_value(unsubmitted_quote["transfers"][0]["steps"].clone()).unwrap();
-
-        let bounds = h.bounds();
-        let scope = json!({
-            "intent": {
-                "wallet":"synthetic-wallet",
-                "source":{"chainId":1,"token":ETH_USDC},
-                "destinationChainId":42161,
-                "destinationAssets":[{"chainId":42161,"token":ARB_USDC}],
-                "recipient":h.wallet,
-                "refundTo":h.wallet,
-                "allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],
-                "amount":{"minimum":"10000000","maximum":"10000000"}
-            },
-            "allowedProviders":["relay"],
-            "bounds":bounds
-        });
-        let plan = FinancialPlanSpec {
-            version: gofin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
-            name: "Nominated bridge route".into(),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                action_deadline_seconds: None,
-                step_id: "bridge-intent".into(),
-                operation: "bridge.execute".into(),
-                input: scope,
-                permitted_variations: json!({"mode":"agent_nominated"}),
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: Some(gofin_domain::ResourceAmount {
-                        resource: gofin_domain::ResourceId(format!("ethereum:42161:{}", h.wallet)),
-                        amount: gofin_domain::Amount {
-                            asset: gofin_domain::AssetId {
-                                network: "ethereum:42161".into(),
-                                reference: ARB_USDC.into(),
-                                decimals: 6,
-                            },
-                            atoms: q("9500000"),
-                        },
-                    }),
-                },
-                funding_dependencies: vec![],
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
-                    amount: gofin_domain::Amount {
-                        asset: gofin_domain::AssetId {
-                            network: "ethereum:1".into(),
-                            reference: ETH_USDC.into(),
-                            decimals: 6,
-                        },
-                        atoms: q("12000000"),
-                    },
-                }],
-                maximum_costs: vec![gofin_domain::CostBound {
-                    location: gofin_domain::AccountingLocation::Cash {
-                        resource: gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
-                    },
-                    amount: gofin_domain::Amount {
-                        asset: gofin_domain::AssetId {
-                            network: "ethereum:1".into(),
-                            reference: "native".into(),
-                            decimals: 18,
-                        },
-                        atoms: q("1000000000000000"),
-                    },
-                    treatment: gofin_domain::CostTreatment::AdditionalDebit,
-                }],
-            },
-        };
-        let preview = h
-            .engine
-            .preview_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "bridge-intent-preview".into(),
-                plan: plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            })
-            .await
-            .unwrap();
-        let plan_id = h
-            .engine
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "bridge-intent-authorize".into(),
-                plan: plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: Some(preview.review_hash),
-            })
-            .await
             .unwrap()
-            .plan_id;
-
-        // An invalid, unsubmitted nomination does not acquire or freeze a route.
-        let mut invalid_input = h.step_input(
-            unsubmitted_transfer,
-            &unsubmitted_links[0],
-            Some(bounds.clone()),
-        );
-        invalid_input["stepKind"] = json!("deposit");
-        let invalid = h
-            .engine
-            .execute_financial_plan_step(
-                &plan_id,
-                "bridge-intent",
-                OperationRequest {
-                    request_id: "bridge-intent-invalid".into(),
-                    operation: "bridge.execute".into(),
-                    input: invalid_input,
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(invalid.code, "BRIDGE_STEP_KIND_MISMATCH");
-
-        // The first submitted child binds this logical intent to transfer A.
-        let first = h
-            .engine
-            .execute_financial_plan_step(
-                &plan_id,
-                "bridge-intent",
-                OperationRequest {
-                    request_id: "bridge-intent-reset".into(),
-                    operation: "bridge.execute".into(),
-                    input: h.step_input(&transfer_a, &links_a[0], Some(bounds.clone())),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.status, Status::Completed, "{:?}", first.error);
-        assert_eq!(
-            h.engine
-                .financial_plan_status(&plan_id)
-                .await
-                .unwrap()
-                .steps[0]
-                .state,
-            gofin_domain::financial_plans::FinancialPlanStepProgressState::InProgress
-        );
-
-        // Quote a second candidate after the reset has settled, so its finite
-        // allowance topology is current. It still cannot replace the route
-        // already submitted by this logical plan step.
-        let quote_c = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(None))
-            .await
-            .unwrap();
-        let transfer_c = quote_c["transfers"][0]["transfer_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert_ne!(transfer_a, transfer_c);
-        let links_c: Vec<BridgeStepLink> =
-            serde_json::from_value(quote_c["transfers"][0]["steps"].clone()).unwrap();
-        // A different route is rejected after restart, while the same saved
-        // route can continue its approval and deposit children.
-        let (bridge, engine, _) = h.reopen();
-        let conflict = engine
-            .execute_financial_plan_step(
-                &plan_id,
-                "bridge-intent",
-                OperationRequest {
-                    request_id: "bridge-intent-other-route".into(),
-                    operation: "bridge.execute".into(),
-                    input: h.step_input(&transfer_c, &links_c[0], Some(bounds.clone())),
-                    run_id: None,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(conflict.code, "PLAN_BRIDGE_ROUTE_FROZEN");
-
-        for (index, link) in links_a.iter().enumerate().skip(1) {
-            let child = engine
-                .execute_financial_plan_step(
-                    &plan_id,
-                    "bridge-intent",
-                    OperationRequest {
-                        request_id: format!("bridge-intent-child-{index}"),
-                        operation: "bridge.execute".into(),
-                        input: h.step_input(&transfer_a, link, Some(bounds.clone())),
-                        run_id: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(child.status, Status::Completed, "{:?}", child.error);
-        }
-        assert_eq!(
-            engine.financial_plan_status(&plan_id).await.unwrap().steps[0].state,
-            gofin_domain::financial_plans::FinancialPlanStepProgressState::InProgress,
-            "source submission alone must not complete a bridge intent"
-        );
-        let status = bridge
-            .read("bridge.status", &json!({"transferId":transfer_a}))
-            .await
-            .unwrap();
-        assert_eq!(status["state"], "completed", "{status}");
-        let final_status = engine.financial_plan_status(&plan_id).await.unwrap();
-        assert_eq!(
-            final_status.steps[0].state,
-            gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed
-        );
-        assert_eq!(final_status.usage.verified_proceeds.len(), 1);
-    })
-    .await
-    .expect(
-        "nominated bridge intent should survive restart and complete only on destination proof",
+            .transit
+            .as_ref()
+            .is_some_and(|t| !t.spendable)
     );
+    let broadcasts = h.source.broadcasts();
+    h.destination
+        .destination_ready
+        .store(true, Ordering::SeqCst);
+    let (bridge, engine, state) = h.reopen();
+    let mut changed = request.clone();
+    changed.input["intent"]["recipient"] = json!("0x1111111111111111111111111111111111111111");
+    assert!(
+        Box::pin(engine.execute(changed)).await.is_err(),
+        "same request cannot replace its approved route"
+    );
+    let restored = Box::pin(engine.status(&action.id, false)).await.unwrap();
+    assert_eq!(
+        restored.preview.as_ref().unwrap().binding["transfer_id"],
+        transfer_id
+    );
+    assert_eq!(
+        bridge
+            .observe_transfer_side(&restored, "destination")
+            .await
+            .unwrap()
+            .metadata["state"],
+        "completed"
+    );
+    let observed = Box::pin(engine.status(&action.id, true)).await.unwrap();
+    assert_eq!(
+        engine.operation_view(&observed).unwrap()["outcome"]["phase"],
+        "done"
+    );
+    assert_eq!(
+        state
+            .transfer(&transfer_id)
+            .unwrap()
+            .unwrap()
+            .settlement_proofs
+            .len(),
+        1
+    );
+    assert_eq!(h.source.broadcasts(), broadcasts);
 }
 
 #[tokio::test]
-async fn native_relay_settlement_cost_backfill_is_idempotent_and_survives_restart() {
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let h = Harness::with_native_withheld_fee("100000000000000");
-        let bounds = h.native_bounds();
-        let quote = h
-            .bridge
-            .read("bridge.quotes", &h.native_quote_input())
-            .await
-            .unwrap();
-        let transfer_id = quote["transfers"][0]["transfer_id"]
-            .as_str()
+async fn legacy_usd_bound_admitted_bridge_reconciles_after_restart() {
+    let h = Harness::new();
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "legacy-usd-bridge-restart".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request.clone())))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        h.state
+            .transfer(&transfer_id)
             .unwrap()
-            .to_owned();
-        let links: Vec<BridgeStepLink> =
-            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, DomainStepKind::Deposit);
-
-        let scope = json!({
-            "intent": {
-                "wallet":"synthetic-wallet",
-                "source":{"chainId":1},
-                "destinationChainId":4663,
-                "destinationAssets":[{"chainId":4663}],
-                "recipient":h.wallet,
-                "refundTo":h.wallet,
-                "allowedRefundAssets":[{"chainId":1}],
-                "amount":{"minimum":"10000000000000000","maximum":"10000000000000000"}
-            },
-            "allowedProviders":["relay"],
-            "bounds":bounds
-        });
-        let source_resource = gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet));
-        let source_asset = gofin_domain::AssetId {
-            network: "ethereum:1".into(),
-            reference: "native".into(),
-            decimals: 18,
-        };
-        let plan = FinancialPlanSpec {
-            version: gofin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
-            name: "Native Relay settlement accounting".into(),
-            summary: None,
-            steps: vec![FinancialPlanStepSpec {
-                action_deadline_seconds: None,
-                step_id: "bridge-intent".into(),
-                operation: "bridge.execute".into(),
-                input: scope,
-                permitted_variations: json!({"mode":"agent_nominated"}),
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: Some(gofin_domain::ResourceAmount {
-                        resource: gofin_domain::ResourceId(format!("ethereum:4663:{}", h.wallet)),
-                        amount: gofin_domain::Amount {
-                            asset: gofin_domain::AssetId {
-                                network: "ethereum:4663".into(),
-                                reference: "native".into(),
-                                decimals: 18,
-                            },
-                            atoms: q("9800000000000000"),
-                        },
-                    }),
-                },
-                funding_dependencies: vec![],
-            }],
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: source_resource.clone(),
-                    amount: gofin_domain::Amount {
-                        asset: source_asset.clone(),
-                        atoms: q("10000000000000000"),
-                    },
-                }],
-                maximum_costs: vec![
-                    gofin_domain::CostBound {
-                        location: gofin_domain::AccountingLocation::Cash {
-                            resource: source_resource.clone(),
-                        },
-                        amount: gofin_domain::Amount {
-                            asset: source_asset.clone(),
-                            atoms: q("1000000000000000"),
-                        },
-                        treatment: gofin_domain::CostTreatment::AdditionalDebit,
-                    },
-                    gofin_domain::CostBound {
-                        location: gofin_domain::AccountingLocation::Cash {
-                            resource: source_resource.clone(),
-                        },
-                        amount: gofin_domain::Amount {
-                            asset: source_asset.clone(),
-                            atoms: q("200000000000000"),
-                        },
-                        treatment: gofin_domain::CostTreatment::IncludedInDebit,
-                    },
-                ],
-            },
-        };
-        let preview = h
-            .engine
-            .preview_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "native-relay-cost-preview".into(),
-                plan: plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: None,
-            })
-            .await
-            .unwrap();
-        let plan_id = h
-            .engine
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: "native-relay-cost-authorize".into(),
-                plan: plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: Some(preview.review_hash),
-            })
+            .unwrap()
+            .transit
+            .as_ref()
+            .is_some_and(|t| !t.spendable)
+    );
+    let mut historical = h.state.transfer(&transfer_id).unwrap().unwrap();
+    historical.metadata["quote_bounds"]["maximum_total_usd_micros"] = json!(14_000_000);
+    historical.quote_revisions.last_mut().unwrap().payload["bounds"]["maximum_total_usd_micros"] =
+        json!(14_000_000);
+    let db = rusqlite::Connection::open(h._tmp.path().join("journal.sqlite")).unwrap();
+    db.execute(
+        "UPDATE bridge_transfers SET record_json=?1 WHERE transfer_id=?2",
+        rusqlite::params![serde_json::to_string(&historical).unwrap(), transfer_id],
+    )
+    .unwrap();
+    drop(db);
+    let broadcasts = h.source.broadcasts();
+    h.destination
+        .destination_ready
+        .store(true, Ordering::SeqCst);
+    let (bridge, engine, state) = h.reopen();
+    let mut changed = request.clone();
+    changed.input["intent"]["recipient"] = json!("0x1111111111111111111111111111111111111111");
+    assert!(
+        Box::pin(engine.execute(changed)).await.is_err(),
+        "same request cannot replace its approved route"
+    );
+    let restored = Box::pin(engine.status(&action.id, false)).await.unwrap();
+    assert_eq!(
+        restored.preview.as_ref().unwrap().binding["transfer_id"],
+        transfer_id
+    );
+    assert_eq!(
+        bridge
+            .observe_transfer_side(&restored, "destination")
             .await
             .unwrap()
-            .plan_id;
+            .metadata["state"],
+        "completed"
+    );
+    let observed = Box::pin(engine.status(&action.id, true)).await.unwrap();
+    assert_eq!(
+        engine.operation_view(&observed).unwrap()["outcome"]["phase"],
+        "done"
+    );
+    assert_eq!(
+        state
+            .transfer(&transfer_id)
+            .unwrap()
+            .unwrap()
+            .settlement_proofs
+            .len(),
+        1
+    );
+    assert_eq!(h.source.broadcasts(), broadcasts);
+}
 
-        let source_attempt = h
-            .engine
-            .execute_financial_plan_step(
-                &plan_id,
-                "bridge-intent",
-                OperationRequest {
-                    request_id: "native-relay-cost-deposit".into(),
-                    operation: "bridge.execute".into(),
-                    input: h.step_input(&transfer_id, &links[0], Some(bounds)),
-                    run_id: None,
-                },
-            )
+#[tokio::test]
+async fn native_relay_settlement_evidence_is_idempotent_and_survives_restart() {
+    let h = Harness::with_native_withheld_fee("100000000000000");
+    let mut bounds = h.native_bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "native-relay-evidence".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1}],"amount":{"minimum":"10000000000000000","maximum":"10000000000000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        h.bridge
+            .observe_transfer_side(&action, "destination")
             .await
-            .unwrap();
-        assert_eq!(
-            source_attempt.status,
-            Status::Completed,
-            "{:?}",
-            source_attempt.error
-        );
+            .unwrap()
+            .metadata["state"],
+        "completed"
+    );
+    let before = h.state.transfer(&transfer_id).unwrap().unwrap();
+    let proof = before.settlement_proofs.last().unwrap().clone();
+    let credit = proof
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            gofin_domain::FinancialEffect::UsableCredit { amount, .. } => Some(amount),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        credit.atoms.as_str(),
+        "9900000000000000",
+        "destination credit verifies the withheld 0.0001 native fee"
+    );
+    let count = before.settlement_proofs.len();
+    let (bridge, engine, state) = h.reopen();
+    let status = bridge
+        .read("bridge.status", &json!({"transferId":transfer_id}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "completed");
+    let reopened = Box::pin(engine.status(&action.id, true)).await.unwrap();
+    assert_eq!(
+        engine.operation_view(&reopened).unwrap()["outcome"]["phase"],
+        "done"
+    );
+    let after = state.transfer(&transfer_id).unwrap().unwrap();
+    assert_eq!(after.settlement_proofs.len(), count);
+    assert_eq!(after.settlement_proofs.last(), Some(&proof));
+}
 
-        // Emulate an older adapter version that persisted the verified
-        // destination proof but did not derive a source-denominated fee row.
-        h.provider.set_native_eth_enabled(false);
-        let bridge = h
-            .bridge
-            .read("bridge.status", &json!({"transferId":transfer_id}))
+#[tokio::test]
+async fn historical_native_relay_cost_refinement_preserves_original_proof_across_restart() {
+    let h = Harness::with_native_withheld_fee("100000000000000");
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    let mut bounds = h.native_bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "native-relay-historical-cost".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1}],"amount":{"minimum":"10000000000000000","maximum":"10000000000000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.provider.set_native_eth_enabled(false);
+    h.destination
+        .destination_ready
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        h.bridge
+            .observe_transfer_side(&action, "destination")
             .await
-            .unwrap();
-        assert_eq!(bridge["state"], "completed", "{bridge}");
-        let record_before = h.state.transfer(&transfer_id).unwrap().unwrap();
-        let proof_before = record_before.settlement_proofs.last().unwrap().clone();
-        assert!(proof_before.effects.iter().all(|effect| !matches!(
-            effect,
+            .unwrap()
+            .metadata["state"],
+        "completed"
+    );
+    let original = h.state.transfer(&transfer_id).unwrap().unwrap();
+    let proof = original.settlement_proofs.last().unwrap().clone();
+    assert!(!proof.effects.iter().any(|e| matches!(e, gofin_domain::FinancialEffect::Cost { category, .. } if category == "withheld_from_output")));
+    let original_operations = h.engine.operations().unwrap();
+    let broadcast_count = h.source.broadcasts();
+    h.provider.set_native_eth_enabled(true);
+    let (bridge, engine, state) = h.reopen();
+    let status = bridge
+        .read("bridge.status", &json!({"transferId":transfer_id}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "completed", "{status}");
+    let refined = state.transfer(&transfer_id).unwrap().unwrap();
+    assert_eq!(refined.settlement_proofs.len(), 2);
+    assert_eq!(refined.settlement_proofs[0], proof);
+    let refined_proof = &refined.settlement_proofs[1];
+    assert!(refined_proof.effects.starts_with(&proof.effects));
+    let costs = refined_proof
+        .effects
+        .iter()
+        .filter_map(|e| match e {
             gofin_domain::FinancialEffect::Cost {
-                category,
-                treatment: gofin_domain::CostTreatment::IncludedInDebit,
-                ..
-            } if category == "withheld_from_output"
-        )));
-        let source_before = h
-            .engine
-            .operations()
+                amount, category, ..
+            } if category == "withheld_from_output" => Some(amount),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(costs.len(), 1);
+    assert_eq!(costs[0].atoms.as_str(), "100000000000000");
+    let again = bridge
+        .read("bridge.status", &json!({"transferId":transfer_id}))
+        .await
+        .unwrap();
+    assert_eq!(again["state"], "completed");
+    assert_eq!(
+        state
+            .transfer(&transfer_id)
             .unwrap()
-            .into_iter()
-            .find(|operation| operation.id == source_attempt.id)
-            .unwrap();
-
-        h.provider.set_native_eth_enabled(true);
-        let destination = proof_before
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                gofin_domain::FinancialEffect::UsableCredit { amount, .. } => Some(amount),
-                _ => None,
-            })
-            .unwrap();
-        let source_quote = source_before.preview.as_ref().unwrap().binding["quote"].clone();
-        let gross_atoms = source_quote["gross_debit"]["atoms"]
-            .as_str()
             .unwrap()
-            .parse::<u128>()
-            .unwrap();
-        let measured_fee = gross_atoms - destination.atoms.as_str().parse::<u128>().unwrap();
-        let candidate = gofin_domain::CostBound {
-            location: gofin_domain::AccountingLocation::Cash {
-                resource: source_resource,
-            },
-            amount: gofin_domain::Amount {
-                asset: source_asset,
-                atoms: q(&measured_fee.to_string()),
-            },
-            treatment: gofin_domain::CostTreatment::IncludedInDebit,
-        };
-        assert_eq!(candidate.amount.atoms.as_str(), "100000000000000");
+            .settlement_proofs,
+        refined.settlement_proofs
+    );
+    assert_eq!(engine.operations().unwrap(), original_operations);
+    assert_eq!(h.source.broadcasts(), broadcast_count);
+}
 
-        let usage_before_backfill = h
-            .engine
-            .financial_plan_status(&plan_id)
-            .await
-            .unwrap()
-            .usage;
-        let first = h
-            .engine
-            .commit_bridge_external_settlement_cost_accounting(
-                &transfer_id,
-                &proof_before.proof_digest,
-                candidate.clone(),
-            )
-            .unwrap();
-        let second = h
-            .engine
-            .commit_bridge_external_settlement_cost_accounting(
-                &transfer_id,
-                &proof_before.proof_digest,
-                candidate.clone(),
-            )
-            .unwrap();
-        assert_eq!(first, Some(candidate.clone()));
-        assert_eq!(second, Some(candidate.clone()));
-        let revision_before_restart = h.engine.financial_plan_status(&plan_id).await.unwrap();
-        let mut expected_costs = usage_before_backfill.consumed_costs;
-        expected_costs.push(candidate.clone());
-        assert_eq!(revision_before_restart.usage.consumed_costs, expected_costs);
-
-        let (bridge_reopened, engine_reopened, state_reopened) = h.reopen();
-        let status = bridge_reopened
-            .read("bridge.status", &json!({"transferId":transfer_id}))
-            .await
-            .unwrap();
-        assert_eq!(status["state"], "completed", "{status}");
-        assert_eq!(
-            status["settlement_accounting"]["proof_digest"],
-            proof_before.proof_digest
-        );
-        assert_eq!(
-            status["settlement_accounting"]["cost"]["amount"]["atoms"],
-            candidate.amount.atoms.as_str()
-        );
-        let revision_after_restart = engine_reopened
-            .financial_plan_status(&plan_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            revision_after_restart.revision.revision_id,
-            revision_before_restart.revision.revision_id
-        );
-        assert_eq!(revision_after_restart.usage.consumed_costs, expected_costs);
-
-        // A same-scope renewal may preserve the completed logical step and
-        // carry measured settlement usage forward without recording it twice.
-        let renewal = FinancialPlanAuthorizationRequest {
-            request_id: "native-relay-cost-renew".into(),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: Some(revision_after_restart.revision.revision_id.clone()),
-            expected_review_hash: None,
-        };
-        let renewal_review = engine_reopened
-            .preview_financial_plan(renewal.clone())
-            .await
-            .unwrap();
-        let renewed = engine_reopened
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                expected_review_hash: Some(renewal_review.review_hash),
-                ..renewal
-            })
-            .await
-            .unwrap();
-        assert_eq!(renewed.plan_id, plan_id);
-        assert_eq!(renewed.usage.consumed_costs, expected_costs);
-        assert_eq!(
-            renewed
-                .usage
-                .consumed_costs
-                .iter()
-                .filter(|cost| **cost == candidate)
-                .count(),
-            1
-        );
-        let after_renewal_status = bridge_reopened
-            .read("bridge.status", &json!({"transferId":transfer_id}))
-            .await
-            .unwrap();
-        assert_eq!(after_renewal_status["state"], "completed");
-        let renewed_status = engine_reopened
-            .financial_plan_status(&plan_id)
-            .await
-            .unwrap();
-        assert_eq!(renewed_status.usage.consumed_costs, expected_costs);
-        let record_after = state_reopened.transfer(&transfer_id).unwrap().unwrap();
-        assert_eq!(record_after.settlement_proofs.last(), Some(&proof_before));
-        let source_after = engine_reopened
-            .operations()
-            .unwrap()
-            .into_iter()
-            .find(|operation| operation.id == source_attempt.id)
-            .unwrap();
-        assert_eq!(source_after.preview, source_before.preview);
-        assert_eq!(source_after.effects, source_before.effects);
-    })
-    .await
-    .expect("measured native Relay settlement cost backfill should be idempotent after restart");
+#[tokio::test]
+async fn native_relay_proven_over_cap_cost_is_executed_with_discrepancy() {
+    let h = Harness::with_native_withheld_fee("100000000000000");
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    let mut bounds = h.native_bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+        if cap.kind == FeeKind::WithheldFromOutput {
+            cap.maximum = q("100500000000000");
+        }
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "native-relay-over-cap".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1}],"amount":{"minimum":"10000000000000000","maximum":"10000000000000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    let order = transfer
+        .quote_revisions
+        .last()
+        .unwrap()
+        .order_id
+        .as_ref()
+        .unwrap();
+    h.destination.set_direct_destination(
+        &EvmAsset {
+            chain_id: 4663,
+            token: None,
+            decimals: 18,
+        },
+        &h.wallet,
+        order,
+        &q("9899100000000000"),
+        DestinationPayout::Direct,
+    );
+    h.destination
+        .destination_ready
+        .store(true, Ordering::SeqCst);
+    let destination = h
+        .bridge
+        .observe_transfer_side(&action, "destination")
+        .await
+        .unwrap();
+    assert_eq!(
+        destination.metadata["state"], "completed",
+        "{destination:?}"
+    );
+    let observed = Box::pin(h.engine.status(&action.id, true)).await.unwrap();
+    let view = h.engine.operation_view(&observed).unwrap();
+    assert_eq!(view["outcome"]["result"], "executed", "{view}");
+    assert_eq!(view["outcome"]["transfer"], "available", "{view}");
+    assert_eq!(
+        view["outcome"]["attention"]["kind"], "discrepancy",
+        "{view}"
+    );
+    assert_eq!(h.source.broadcasts(), 1);
 }
 
 #[tokio::test]
@@ -1254,501 +1198,123 @@ async fn direct_erc20_wrong_token_or_missing_transfer_log_stays_in_transit() {
 }
 
 #[tokio::test]
-async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_or_simulation() {
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let h =
-            Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::from(5_000_000u64));
-        let quote = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(None))
-            .await
-            .unwrap();
-        let transfer = quote["transfers"][0]["transfer_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let mut links: Vec<BridgeStepLink> =
-            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
-        links.sort_by_key(|link| match link.kind {
-            DomainStepKind::ResetAllowance => 0,
-            DomainStepKind::Approval => 1,
-            DomainStepKind::Deposit => 2,
-            DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => {
-                panic!("SYNTHETIC Relay fixture does not declare deferred destination stages")
-            }
-        });
-        assert_eq!(links.len(), 3);
-
-        // A future-funded plan must be reviewable while this wallet has no
-        // source USDC. Quote construction reads allowance but does not inspect
-        // token balances; plan permission must not estimate/simulate a tx.
-        *h.source.token_balance.lock().unwrap() = gofin_evm::alloy::primitives::U256::ZERO;
-        assert_eq!(h.source.token_balance_reads(), 0);
-        assert_eq!(h.source.estimate_gas_calls(), 0);
-        let bounds = h.bounds();
-        let inputs = links
+async fn standalone_bridge_review_binds_steps_without_source_balance_or_simulation() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::from(5_000_000u64));
+    *h.source.token_balance.lock().unwrap() = gofin_evm::alloy::primitives::U256::ZERO;
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let review = h.bridge.prepare("bridge.execute", &input).await.unwrap();
+    let transfer_id = review.binding["transfer_id"].as_str().unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        transfer
+            .steps
             .iter()
-            .map(|link| h.step_input(&transfer, link, Some(bounds.clone())))
-            .collect::<Vec<_>>();
-
-        let mut wrong_identity = inputs[0].clone();
-        wrong_identity["stepKind"] = json!("deposit");
-        let error = h
-            .bridge
-            .prepare_plan_permission("bridge.transfer", &wrong_identity, &json!({}))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "BRIDGE_STEP_KIND_MISMATCH");
-
-        let plan_steps = links
-            .iter()
-            .zip(inputs.iter())
-            .enumerate()
-            .map(|(index, (_link, input))| FinancialPlanStepSpec {
-                action_deadline_seconds: None,
-                step_id: format!("bridge-step-{index}"),
-                operation: "bridge.transfer".into(),
-                input: input.clone(),
-                permitted_variations: json!({}),
-                completion: FinancialStepCompletion {
-                    operation_succeeded: true,
-                    principal_spend: None,
-                    minimum_net_receipt: None,
-                },
-                funding_dependencies: vec![],
-            })
-            .collect::<Vec<_>>();
-        let wallet_resource = gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet));
-        let source_asset = gofin_domain::AssetId {
-            network: "ethereum:1".into(),
-            reference: ETH_USDC.into(),
-            decimals: 6,
-        };
-        let gas_asset = gofin_domain::AssetId {
-            network: "ethereum:1".into(),
-            reference: "native".into(),
-            decimals: 18,
-        };
-        let plan = FinancialPlanSpec {
-            version: gofin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
-            name: "Bridge route review".into(),
-            summary: None,
-            steps: plan_steps,
-            aggregate_bounds: FinancialPlanBounds {
-                maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: wallet_resource.clone(),
-                    amount: gofin_domain::Amount {
-                        asset: source_asset,
-                        atoms: q("12000000"),
-                    },
-                }],
-                // Each concrete EVM step has a finite per-step preview cap;
-                // the transfer cumulative scope below separately limits their
-                // combined paid cost to one route cap.
-                maximum_costs: vec![gofin_domain::CostBound {
-                    location: gofin_domain::AccountingLocation::Cash {
-                        resource: wallet_resource,
-                    },
-                    amount: gofin_domain::Amount {
-                        asset: gas_asset,
-                        atoms: q("3000000000000000"),
-                    },
-                    treatment: gofin_domain::CostTreatment::AdditionalDebit,
-                }],
-            },
-        };
-        let request = FinancialPlanAuthorizationRequest {
-            request_id: "synthetic-bridge-plan-preview".into(),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
-        let review = h.engine.preview_financial_plan(request).await.unwrap();
-        assert_eq!(review.permissions.len(), 3);
-        for (permission, link) in review.permissions.iter().zip(links.iter()) {
-            let adapter = permission.permission.as_ref().unwrap();
-            assert_eq!(
-                adapter.spec.fixed["plan_step_identity"]["transfer_id"],
-                transfer
-            );
-            assert_eq!(
-                adapter.spec.fixed["plan_step_identity"]["step_id"],
-                link.step_id
-            );
-            assert_eq!(
-                adapter.spec.fixed["plan_step_identity"]["step_kind"],
-                serde_json::to_value(&link.kind).unwrap()
-            );
-            let cumulative = adapter.cumulative_scope.as_ref().unwrap();
-            assert_eq!(cumulative.scope_id, transfer);
-            assert_eq!(cumulative.maximum_debits.len(), 1);
-            assert_eq!(cumulative.maximum_debits[0].amount.atoms, q("12000000"));
-            assert_eq!(cumulative.maximum_costs.len(), 1);
-            assert_eq!(
-                cumulative.maximum_costs[0].amount.atoms,
-                q("1000000000000000")
-            );
-        }
-        assert_eq!(h.source.token_balance_reads(), 0);
-        assert_eq!(h.source.estimate_gas_calls(), 0);
-        assert_eq!(h.source.broadcasts(), 0);
-    })
-    .await
-    .expect("future-funded bridge permissions should be read-only");
+            .map(|s| s.kind.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            DomainStepKind::ResetAllowance,
+            DomainStepKind::Approval,
+            DomainStepKind::Deposit
+        ]
+    );
+    assert_eq!(
+        review.intent.maximum_costs[0].amount.atoms,
+        q("1000000000000000")
+    );
+    assert_eq!(h.source.token_balance_reads(), 0);
+    assert_eq!(h.source.estimate_gas_calls(), 0);
+    assert_eq!(h.source.broadcasts(), 0);
 }
 
 #[tokio::test]
-async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destination_proof() {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let h =
-            Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::from(5_000_000u64));
-        let quote = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(None))
-            .await
-            .unwrap();
-        let transfer = quote["transfers"][0]["transfer_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let mut links: Vec<BridgeStepLink> =
-            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
-        links.sort_by_key(|link| match link.kind {
-            DomainStepKind::ResetAllowance => 0,
-            DomainStepKind::Approval => 1,
-            DomainStepKind::Deposit => 2,
-         DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => panic!("SYNTHETIC Relay fixture does not declare deferred destination stages"), });
-        let quoted_floor = h.state.transfer(&transfer).unwrap().unwrap()
-            .settlement_expectation.unwrap().destination[0].minimum_atoms.clone();
-        let mut bounds = h.bounds();
-        bounds.minimum_net_receipt.as_mut().unwrap().atoms = q("9400000");
-        assert!(quoted_floor > bounds.minimum_net_receipt.as_ref().unwrap().atoms,
-            "first claim must bind the approved floor even below the provisional quote floor");
-        let inputs = links
-            .iter()
-            .map(|link| h.step_input(&transfer, link, Some(bounds.clone())))
-            .collect::<Vec<_>>();
-        let mut plan = bridge_plan_spec(&h, &links, &inputs);
-        plan.steps[2].completion.minimum_net_receipt = Some(gofin_domain::ResourceAmount {
-            resource: gofin_domain::ResourceId(format!("ethereum:42161:{}", h.wallet)),
-            amount: bounds.minimum_net_receipt.clone().unwrap(),
-        });
-        plan.steps.push(FinancialPlanStepSpec {
-                action_deadline_seconds: None,
-            step_id: "bridge-status-after-settlement".into(),
-            operation: "bridge.status".into(),
-            input: json!({"transferId":transfer}),
-            permitted_variations: json!({
-                "mode":"exact",
-                "maximum_debits":[],
-                "maximum_costs":[],
-                "possible_credits":[]
-            }),
-            completion: FinancialStepCompletion {
-                operation_succeeded: true,
-                principal_spend: None,
-                minimum_net_receipt: None,
-            },
-            funding_dependencies: vec![],
-        });
-        let preview_request = FinancialPlanAuthorizationRequest {
-            request_id: format!("plan-preview-{transfer}"),
-            plan: plan.clone(),
-            valid_for_seconds: Some(600),
-            replaces_revision_id: None,
-            expected_review_hash: None,
-        };
-        let review = h
-            .engine
-            .preview_financial_plan(preview_request)
-            .await
-            .unwrap();
-        let plan_id = h
-            .engine
-            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
-                request_id: format!("plan-authorize-{transfer}"),
-                plan: plan.clone(),
-                valid_for_seconds: Some(600),
-                replaces_revision_id: None,
-                expected_review_hash: Some(review.review_hash),
-            })
-            .await
-            .unwrap()
-            .plan_id;
-        assert_eq!(
-            h.approval.0.load(Ordering::SeqCst),
-            1,
-            "one Touch ID authorizes the named plan"
-        );
-
-        // Simulate an independently completed upstream funding step after plan
-        // review. The plan permission itself succeeded while the balance was 0.
-        *h.source.token_balance.lock().unwrap() =
-            gofin_evm::alloy::primitives::U256::from(20_000_000u64);
-
-        // Model a provider quote expiring while an upstream funding step is
-        // being completed. Refresh after plan approval, before the first
-        // bridge claim, and retain the exact selected bounds and step IDs.
-        let latest = h.state.transfer(&transfer).unwrap().unwrap();
-        let mut expired = latest.quote_revisions.last().unwrap().clone();
-        expired.revision += 1;
-        expired.observed_at = "2026-10-01T00:00:00Z".into();
-        expired.valid_until = "2026-10-01T00:01:00Z".into();
-        expired.payload["quote"]["observed_at"] = json!(expired.observed_at);
-        expired.payload["quote"]["valid_until"] = json!(expired.valid_until);
-        h.state.append_quote_revision(&transfer, &expired).unwrap();
-        let preclaim_refresh = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(Some(transfer.clone())))
-            .await
-            .unwrap();
-        let preclaim_links: Vec<BridgeStepLink> =
-            serde_json::from_value(preclaim_refresh["transfers"][0]["steps"].clone()).unwrap();
-        assert_eq!(
-            preclaim_links
-                .iter()
-                .map(|link| link.step_id.clone())
-                .collect::<Vec<_>>(),
-            links
-                .iter()
-                .map(|link| link.step_id.clone())
-                .collect::<Vec<_>>(),
-            "refresh after plan approval retains exact provider step identities"
-        );
-        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
-
-        let execute_plan_step = |index: usize, attempt: String| {
-            let engine = h.engine.clone();
-            let plan_id = plan_id.clone();
-            let input = inputs[index].clone();
-            async move {
-                engine
-                    .execute_financial_plan_step(
-                        &plan_id,
-                        &format!("bridge-step-{index}"),
-                        OperationRequest {
-                            request_id: attempt,
-                            operation: "bridge.transfer".into(),
-                            input,
-                            run_id: None,
-                        },
-                    )
-                    .await
-                    .unwrap()
-            }
-        };
-
-        let reset = execute_plan_step(0, "plan-erc20-reset".into()).await;
-        assert_eq!(
-            reset.status,
-            Status::Completed,
-            "reset error={:?}",
-            reset.error
-        );
-        let first_claim = h.state.transfer(&transfer).unwrap().unwrap();
-        assert_eq!(first_claim.settlement_expectation.as_ref().unwrap().destination[0].minimum_atoms,
-            q("9400000"), "first claim freezes the plan-approved receipt floor");
-        let mut changed_bounds = bounds.clone();
-        changed_bounds.minimum_net_receipt.as_mut().unwrap().atoms = q("9300000");
-        let rebind = h.bridge.prepare("bridge.transfer",
-            &h.step_input(&transfer, &links[1], Some(changed_bounds))).await.unwrap_err();
-        assert_eq!(rebind.code, "BRIDGE_BOUNDS_ALREADY_APPROVED");
-        let approve = execute_plan_step(1, "plan-erc20-approve".into()).await;
-        assert_eq!(
-            approve.status,
-            Status::Completed,
-            "approval error={:?}",
-            approve.error
-        );
-        assert_eq!(
-            h.approval.0.load(Ordering::SeqCst),
-            1,
-            "plan steps reuse the revision approval without child grants"
-        );
-
-        // Provider omits the allowance already satisfied by settled steps.
-        h.provider.omit_approval.store(true, Ordering::SeqCst);
-        let broadcasts_before_refresh = h.source.broadcasts();
-        // A quote refresh before principal dispatch is still on the same
-        // protected parent and preserves each exact step and plan authority.
-        let refreshed = h
-            .bridge
-            .read("bridge.quotes", &h.quote_input(Some(transfer.clone())))
-            .await
-            .unwrap();
-        let refreshed_links: Vec<BridgeStepLink> =
-            serde_json::from_value(refreshed["transfers"][0]["steps"].clone()).unwrap();
-        assert_eq!(h.source.broadcasts(), broadcasts_before_refresh,
-            "refresh never replays a satisfied allowance");
-        assert_eq!(
-            refreshed_links
-                .iter()
-                .map(|link| link.step_id.clone())
-                .collect::<Vec<_>>(),
-            links
-                .iter()
-                .map(|link| link.step_id.clone())
-                .collect::<Vec<_>>()
-        );
-        assert!(refreshed_links[..2].iter().all(|link| {
-            link.state == gofin_domain::BridgeStepState::Settled
-                && link
-                    .plan_authority
-                    .as_ref()
-                    .is_some_and(|authority| authority.plan_id == plan_id)
-        }));
-        assert!(refreshed_links[2].plan_authority.is_none());
-        let saved = h.state.transfer(&transfer).unwrap().unwrap();
-        assert_eq!(
-            saved.grant_id, None,
-            "named plans do not synthesize a bridge boundary grant"
-        );
-        assert_eq!(saved.plan_scope.as_ref().unwrap().plan_id, plan_id);
-
-        let deposit = execute_plan_step(2, "plan-erc20-deposit".into()).await;
-        assert_eq!(
-            deposit.status,
-            Status::Completed,
-            "deposit error={:?}",
-            deposit.error
-        );
-        let source_only_status = h.engine.financial_plan_status(&plan_id).await.unwrap();
-        assert!(
-            !source_only_status.blockers.is_empty(),
-            "source proof cannot satisfy the parent-level destination settlement obligation"
-        );
-        assert_eq!(
-            source_only_status.steps[2].state,
-            gofin_domain::financial_plans::FinancialPlanStepProgressState::InProgress,
-            "an explicit destination receipt floor remains pending after source proof"
-        );
-        assert!(
-            source_only_status.usage.verified_proceeds.is_empty(),
-            "no destination proceeds become spendable before final receipt proof"
-        );
-        assert!(
-            source_only_status.next_eligible_step_id.is_none(),
-            "pending destination floor must block later plan steps: {:?}",
-            source_only_status.next_eligible_step_id
-        );
-        assert_eq!(
-            h.source.broadcasts(),
-            3,
-            "status must not replay source writes"
-        );
-        let in_transit = h.state.transfer(&transfer).unwrap().unwrap();
-        assert!(
-            in_transit
-                .transit
-                .as_ref()
-                .is_some_and(|transit| !transit.spendable),
-            "source settlement records nonspendable transit while destination remains pending"
-        );
-        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
-
-        let status = h
-            .bridge
-            .read("bridge.status", &json!({"transferId":transfer}))
-            .await
-            .unwrap();
-        assert_eq!(status["state"], "completed", "final status={status}");
-        let settled = h.engine.financial_plan_status(&plan_id).await.unwrap();
-        assert!(
-            settled.blockers.is_empty(),
-            "final proof clears bridge blocker: {:?}",
-            settled.blockers
-        );
-        assert!(settled.steps.iter().take(3).all(|step| {
-            step.state == gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed
-        }));
-        assert_eq!(
-            settled.next_eligible_step_id.as_deref(),
-            Some("bridge-status-after-settlement"),
-            "destination proof completes the receipt-bound deposit and exposes the next independent step"
-        );
-        assert_eq!(
-            h.approval.0.load(Ordering::SeqCst),
-            1,
-            "proof-only status reconciliation needs no extra approval"
-        );
-        // A completed bridge can be a prefix of a plan whose remaining suffix
-        // still needs renewal. Historical permission is reviewable, but source
-        // submission remains terminal and must never be repeated.
-        let renewal = FinancialPlanAuthorizationRequest {
-            request_id: format!("plan-renew-{transfer}"),
-            plan,
-            valid_for_seconds: Some(600),
-            replaces_revision_id: Some(settled.revision.revision_id.clone()),
-            expected_review_hash: None,
-        };
-        let review = h.engine.preview_financial_plan(renewal.clone()).await.unwrap();
-        let renewed = h.engine.authorize_financial_plan(FinancialPlanAuthorizationRequest {
-            expected_review_hash: Some(review.review_hash),
-            ..renewal
-        }).await.unwrap();
-        assert_eq!(renewed.plan_id, plan_id);
-        assert_eq!(renewed.usage, settled.usage);
-        assert_eq!(h.source.broadcasts(), 3);
-        assert_eq!(h.approval.0.load(Ordering::SeqCst), 2);
-    })
-    .await
-    .expect("named bridge plan should retain its parent until final destination proof");
-}
-
-fn bridge_plan_spec(h: &Harness, links: &[BridgeStepLink], inputs: &[Value]) -> FinancialPlanSpec {
-    assert_eq!(links.len(), inputs.len());
-    let steps = links
-        .iter()
-        .zip(inputs)
-        .enumerate()
-        .map(|(index, (_, input))| FinancialPlanStepSpec {
-            action_deadline_seconds: None,
-            step_id: format!("bridge-step-{index}"),
-            operation: "bridge.transfer".into(),
-            input: input.clone(),
-            permitted_variations: json!({}),
-            completion: FinancialStepCompletion {
-                operation_succeeded: true,
-                principal_spend: None,
-                minimum_net_receipt: None,
-            },
-            funding_dependencies: vec![],
-        })
-        .collect();
-    FinancialPlanSpec {
-        version: gofin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
-        name: "Synthetic bridge plan".into(),
-        summary: None,
-        steps,
-        aggregate_bounds: FinancialPlanBounds {
-            maximum_debits: vec![gofin_domain::ResourceAmount {
-                resource: gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
-                amount: gofin_domain::Amount {
-                    asset: gofin_domain::AssetId {
-                        network: "ethereum:1".into(),
-                        reference: ETH_USDC.into(),
-                        decimals: 6,
-                    },
-                    atoms: q("12000000"),
-                },
-            }],
-            maximum_costs: vec![gofin_domain::CostBound {
-                location: gofin_domain::AccountingLocation::Cash {
-                    resource: gofin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
-                },
-                amount: gofin_domain::Amount {
-                    asset: gofin_domain::AssetId {
-                        network: "ethereum:1".into(),
-                        reference: "native".into(),
-                        decimals: 18,
-                    },
-                    atoms: q("3000000000000000"),
-                },
-                treatment: gofin_domain::CostTreatment::AdditionalDebit,
-            }],
-        },
+async fn standalone_bridge_keeps_parent_and_waits_for_destination_proof() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::from(5_000_000u64));
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
     }
+    bounds.minimum_net_receipt.as_mut().unwrap().atoms = q("9400000");
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "standalone-bridge-pending-destination".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request.clone())))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    assert_eq!(h.source.broadcasts(), 3, "{action:?}");
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let source = h.state.transfer(transfer_id).unwrap().unwrap();
+    let ids = source
+        .steps
+        .iter()
+        .map(|s| s.step_id.clone())
+        .collect::<Vec<_>>();
+    assert!(source.transit.as_ref().is_some_and(|t| !t.spendable));
+    assert!(
+        source.settlement_expectation.as_ref().unwrap().destination[0].minimum_atoms
+            >= q("9400000")
+    );
+    let refresh = h
+        .bridge
+        .read(
+            "bridge.quotes",
+            &h.quote_input(Some(transfer_id.to_owned())),
+        )
+        .await;
+    // Once the source has dispatched the route is frozen; a quote read may
+    // refuse refresh but must never replay a settled child.
+    if let Ok(refreshed) = refresh {
+        let links: Vec<BridgeStepLink> =
+            serde_json::from_value(refreshed["transfers"][0]["steps"].clone()).unwrap();
+        assert_eq!(
+            links.iter().map(|s| s.step_id.clone()).collect::<Vec<_>>(),
+            ids
+        );
+    }
+    assert_eq!(h.source.broadcasts(), 3);
+    h.destination
+        .destination_ready
+        .store(true, Ordering::SeqCst);
+    let destination = h
+        .bridge
+        .observe_transfer_side(&action, "destination")
+        .await
+        .unwrap();
+    assert_eq!(destination.metadata["state"], "completed");
+    let observed = Box::pin(h.engine.status(&action.id, true)).await.unwrap();
+    assert_eq!(
+        h.engine.operation_view(&observed).unwrap()["outcome"]["phase"],
+        "done"
+    );
+    let duplicate = Box::pin(h.engine.execute(request)).await.unwrap();
+    assert_eq!(duplicate.id, action.id);
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.source.broadcasts(), 3);
 }
 
 #[tokio::test]
@@ -2003,81 +1569,552 @@ async fn source_receipts_reject_envelope_changes_and_actual_fee_overruns() {
 
 #[tokio::test]
 async fn erc20_reset_finite_approval_deposit_and_settlement_share_one_grant() {
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let h = Harness::new();
-        let first = h.bridge.read("bridge.quotes", &h.quote_input(None)).await.unwrap();
-        let transfer = first["transfers"][0]["transfer_id"].as_str().unwrap().to_owned();
-        let mut steps: Vec<BridgeStepLink> = serde_json::from_value(first["transfers"][0]["steps"].clone()).unwrap();
-        steps.sort_by_key(|step| match step.kind { DomainStepKind::ResetAllowance => 0, DomainStepKind::Approval => 1, DomainStepKind::Deposit => 2, DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => panic!("SYNTHETIC Relay fixture does not declare deferred destination stages"), });
-        assert_eq!(steps.len(), 3);
-        assert_eq!(steps[0].kind, DomainStepKind::ResetAllowance);
-        assert_eq!(steps[1].kind, DomainStepKind::Approval);
-        assert_eq!(steps[2].kind, DomainStepKind::Deposit);
-        let step_ids = steps.iter().map(|s| s.step_id.clone()).collect::<Vec<_>>();
-
-        let bounds = h.bounds();
-        let mut serialized_bounds = serde_json::to_value(&bounds).unwrap();
-        omit_nulls(&mut serialized_bounds);
-        let authorization = h.engine.authorize_boundary(BoundaryAuthorizationRequest {
-            request_id: format!("authorize-{transfer}"),
-            operation: "bridge.transfer".into(),
-            input: h.step_input(&transfer, &steps[0], Some(bounds.clone())),
-            bounds: serialized_bounds,
-            valid_for_seconds: 600,
-            replaces: None,
-        }).await.unwrap();
-        let grant = authorization.id;
-        assert_eq!(authorization.spec.maximum_costs.len(), 1, "one cumulative source gas cap must cover the three wallet steps");
-        assert_eq!(authorization.spec.maximum_costs[0].amount.asset.reference, "native");
-        assert_eq!(authorization.spec.maximum_costs[0].amount.atoms, q("1000000000000000"));
-
-        let reset = h.execute(&grant, &transfer, &steps[0], "erc20-reset", &bounds).await;
-        assert_eq!(reset.status, Status::Completed, "reset error={:?}", reset.error);
-        assert_eq!(*h.source.allowance.lock().unwrap(), gofin_evm::alloy::primitives::U256::ZERO);
-        let approval = h.execute(&grant, &transfer, &steps[1], "erc20-approve", &bounds).await;
-        assert_eq!(approval.status, Status::Completed, "approve error={:?}", approval.error);
-        assert_eq!(*h.source.allowance.lock().unwrap(), gofin_evm::alloy::primitives::U256::from(12_000_000u64));
-        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "one finite grant authorizes all three steps");
-
-        let status_before_refresh = h.engine.boundary_status(&grant).await.unwrap();
-        let spent_before_refresh = status_before_refresh.authorization.spent_costs.clone();
-        assert_eq!(spent_before_refresh.len(), 1);
-        assert!(spent_before_refresh[0].amount.atoms > q("0"));
-        let after_approval = h.state.transfer(&transfer).unwrap().unwrap();
-        assert_eq!(after_approval.steps.iter().map(|s| s.step_id.clone()).collect::<Vec<_>>(), step_ids);
-        assert!(after_approval.steps[..2].iter().all(|s| s.state == gofin_domain::BridgeStepState::Settled));
-
-        let refreshed = h.bridge.read("bridge.quotes", &h.quote_input(Some(transfer.clone()))).await.unwrap();
-        let refreshed_steps: Vec<BridgeStepLink> = serde_json::from_value(refreshed["transfers"][0]["steps"].clone()).unwrap();
-        assert_eq!(refreshed_steps.iter().map(|s| s.step_id.clone()).collect::<Vec<_>>(), step_ids, "refresh keeps every deterministic step identity");
-        assert!(refreshed_steps[..2].iter().all(|s| s.state == gofin_domain::BridgeStepState::Settled));
-        assert_eq!(*h.source.allowance.lock().unwrap(), gofin_evm::alloy::primitives::U256::from(12_000_000u64), "refresh observes the already finite allowance and does not reset it");
-        let status_after_refresh = h.engine.boundary_status(&grant).await.unwrap();
-        assert_eq!(status_after_refresh.authorization.spent_costs, spent_before_refresh, "quote refresh does not replay or refund settled gas");
-        assert_eq!(h.source.broadcasts(), 2);
-
-        let deposit = h.execute(&grant, &transfer, &refreshed_steps[2], "erc20-deposit", &bounds).await;
-        assert_eq!(deposit.status, Status::Completed, "deposit error={:?}", deposit.error);
-        assert_eq!(h.source.broadcasts(), 3);
-        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
-        assert_eq!(*h.source.token_balance.lock().unwrap(), gofin_evm::alloy::primitives::U256::from(10_000_000u64), "the source transferFrom consumes exactly 10 USDC");
-        let final_status = h.bridge.read("bridge.status", &json!({"transferId":transfer})).await.unwrap();
-        assert_eq!(final_status["state"], "completed", "destination settlement requires exact router and ERC-20 evidence: {final_status}");
-        let saved = h.state.transfer(&transfer).unwrap().unwrap();
-        assert!(saved.applied_proofs.len() >= 2, "source RelayErc20Deposit and canonical token Transfer, plus destination FundsMovement and Transfer are verified");
-        let settlement = saved.settlement_proofs.last().expect("destination receipt proof is persisted");
-        assert_eq!(settlement.outcome, gofin_domain::BridgeSettlementOutcome::Destination);
-        assert_eq!(saved.settlement_expectation.as_ref().unwrap().destination[0].minimum_atoms, q("9500000"));
-        let final_grant = h.engine.boundary_status(&grant).await.unwrap();
-        assert_eq!(final_grant.authorization.spec.maximum_costs.len(), 1, "cumulative gas ceiling is recorded once");
-        assert!(final_grant.authorization.spent_costs[0].amount.atoms <= q("1000000000000000"));
-        // Baseline was 5 USDC and approved cap was 12: the deposit consumes
-        // 10, leaving 2. Restoring the baseline requires separately approved
-        // allowance writes and is deliberately outside this lifecycle test.
-        assert_eq!(*h.source.allowance.lock().unwrap(), gofin_evm::alloy::primitives::U256::from(2_000_000u64));
-    }).await.expect("ERC-20 lifecycle should not deadlock");
+    let h = Harness::new();
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "erc20-reset-compound".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request.clone())))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    assert_eq!(
+        h.source.broadcasts(),
+        3,
+        "reset, approval and deposit must each execute once: {action:?}"
+    );
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let saved = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        saved
+            .steps
+            .iter()
+            .map(|s| s.kind.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            DomainStepKind::ResetAllowance,
+            DomainStepKind::Approval,
+            DomainStepKind::Deposit
+        ]
+    );
+    assert!(
+        saved
+            .steps
+            .iter()
+            .all(|s| s.state == gofin_domain::BridgeStepState::Settled)
+    );
+    assert_eq!(
+        *h.source.allowance.lock().unwrap(),
+        gofin_evm::alloy::primitives::U256::from(2_000_000u64)
+    );
+    assert_eq!(
+        *h.source.token_balance.lock().unwrap(),
+        gofin_evm::alloy::primitives::U256::from(10_000_000u64)
+    );
+    let destination = h
+        .bridge
+        .observe_transfer_side(&action, "destination")
+        .await
+        .unwrap();
+    assert_eq!(destination.metadata["state"], "completed");
+    let saved = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert!(saved.applied_proofs.len() >= 2);
+    assert_eq!(
+        saved.settlement_proofs.last().unwrap().outcome,
+        gofin_domain::BridgeSettlementOutcome::Destination
+    );
+    assert_eq!(
+        saved.settlement_expectation.as_ref().unwrap().destination[0].minimum_atoms,
+        q("9500000")
+    );
+    let duplicate = Box::pin(h.engine.execute(request)).await.unwrap();
+    assert_eq!(duplicate.id, action.id);
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.source.broadcasts(), 3, "completed stages must not repeat");
 }
 
 mod preparation_concurrency {
     include!("support/bridge_preparation_concurrency.rs");
+}
+
+#[tokio::test]
+async fn standalone_bridge_advances_approval_and_deposit_with_one_authorization() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::ZERO);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "synthetic-standalone-compound".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let mut retired = request.input.clone();
+    retired["bounds"]["authorization_seconds"] = json!(600);
+    assert!(
+        h.bridge
+            .prepare("bridge.execute", &retired)
+            .await
+            .unwrap_err()
+            .message
+            .contains("retired")
+    );
+    retired["bounds"]["authorization_seconds"] = Value::Null;
+    retired["bounds"]["maximum_total_usd_micros"] = json!(1);
+    assert!(
+        h.bridge
+            .prepare("bridge.execute", &retired)
+            .await
+            .unwrap_err()
+            .message
+            .contains("USD")
+    );
+    assert_eq!(h.source.broadcasts(), 0);
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(h.engine.execute(request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.approval.0.load(Ordering::SeqCst),
+        1,
+        "parent outcome: {action:?}"
+    );
+    assert_eq!(
+        h.source.broadcasts(),
+        2,
+        "the active invocation advances both ready stages: {action:?}"
+    );
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(transfer.steps.len(), 2);
+    assert!(
+        transfer
+            .steps
+            .iter()
+            .all(|step| step.state == gofin_domain::BridgeStepState::Settled)
+    );
+    let destination = h
+        .bridge
+        .observe_transfer_side(&action, "destination")
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "destination={error:?}; quote IDs={:?}; source evidence={:?}",
+                transfer
+                    .quote_revisions
+                    .iter()
+                    .map(|q| &q.order_id)
+                    .collect::<Vec<_>>(),
+                h.engine
+                    .operations()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|record| record
+                        .effects
+                        .as_ref()
+                        .and_then(|effects| effects.evidence.get("correlation")))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(destination.metadata["state"], "completed");
+    let observed = Box::pin(h.engine.status(&action.id, true)).await.unwrap();
+    let view = h.engine.operation_view(&observed).unwrap();
+    assert_eq!(view["outcome"]["phase"], "done", "parent outcome: {view}");
+    assert_ne!(
+        view["outcome"]["next_action"]["code"], "continue",
+        "settled action must not offer another stage: {view}"
+    );
+    assert!(view["outcome"]["next_action"]["continuation_token"].is_null());
+    let context = gofin_domain::PreparationContext {
+        logical_operation_id: Some(action.id.clone()),
+        positions: vec![],
+    };
+    assert!(
+        h.bridge
+            .prepare_remaining_action(&action, &request.input, &[], &context)
+            .await
+            .is_err(),
+        "a completed bridge has no stage to reauthorize"
+    );
+    let duplicate = Box::pin(h.engine.execute(request)).await.unwrap();
+    assert_eq!(duplicate.id, action.id);
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.source.broadcasts(),
+        2,
+        "completed stages are never repeated"
+    );
+}
+
+#[tokio::test]
+async fn revised_bridge_review_keeps_transfer_identity_and_refuses_changed_recipient() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::ZERO);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let preview = h.bridge.prepare("bridge.execute", &input).await.unwrap();
+    let original: gofin_domain::OperationRecord = serde_json::from_value(json!({"id":"synthetic-parent","request_id":"synthetic-request","fingerprint":"synthetic","fingerprint_version":1,"operation":"bridge.execute","input":input,"status":"pending","created_at":now(),"updated_at":now(),"preview":preview,"approval":null,"submission":null,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null})).unwrap();
+    let mut revised = original.input.clone();
+    revised["bounds"]["fee_caps"][0]["maximum"] = json!("2000000000000000");
+    revised["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+    let context = gofin_domain::PreparationContext {
+        logical_operation_id: Some(original.id.clone()),
+        positions: vec![],
+    };
+    let candidate = h
+        .bridge
+        .prepare_remaining_action(&original, &revised, &[], &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        candidate.binding["transfer_id"],
+        original.preview.as_ref().unwrap().binding["transfer_id"]
+    );
+    assert_eq!(
+        candidate.binding["provider"],
+        original.preview.as_ref().unwrap().binding["provider"]
+    );
+    assert_eq!(candidate.input, revised);
+    assert_eq!(h.source.broadcasts(), 0);
+    let mut wrong = revised;
+    wrong["intent"]["recipient"] = json!("0x1111111111111111111111111111111111111111");
+    assert!(
+        h.bridge
+            .prepare_remaining_action(&original, &wrong, &[], &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(h.source.broadcasts(), 0);
+}
+
+#[tokio::test]
+async fn bridge_reauthorizes_remaining_gas_without_repeating_settled_allowance() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::ZERO);
+    h.source.rise_gas_after_first.store(true, Ordering::SeqCst);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "synthetic-bridge-reauthorization".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: input.clone(),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1, "{action:?}");
+    assert_eq!(
+        h.source.broadcasts(),
+        1,
+        "only allowance should be submitted: {action:?}"
+    );
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        transfer.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    let allowance_id = transfer.steps[0].operation_id.as_ref().unwrap();
+    let allowance = h
+        .engine
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|record| &record.id == allowance_id)
+        .unwrap();
+    assert!(allowance.effects.as_ref().unwrap().effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { amount, .. } if !amount.atoms.is_zero())), "settled allowance has a proved consumed native fee");
+    let view = h.engine.operation_view(&action).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .or_else(|| view.pointer("/next_action/continuation_token"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("reauthorization token: {view}"));
+    let mut revised = input;
+    revised["bounds"]["fee_caps"][0]["maximum"] = json!("4000000000000000");
+    revised["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+    let review = invocation
+        .scope(Box::pin(
+            h.engine.reauthorize_operation(&action.id, token, revised),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(review["reauthorization"], "approved", "{review}");
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.source.broadcasts(),
+        2,
+        "the active reauthorization invocation advances only the remaining deposit"
+    );
+    let refreshed = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert!(
+        refreshed
+            .steps
+            .iter()
+            .all(|step| step.state == gofin_domain::BridgeStepState::Settled)
+    );
+    assert_eq!(
+        refreshed.steps[0].operation_id, transfer.steps[0].operation_id,
+        "settled allowance identity is never replaced"
+    );
+}
+
+#[tokio::test]
+async fn bridge_keeps_executed_allowance_but_defers_deposit_when_native_fee_missing() {
+    let h = Harness::with_source_allowance(gofin_evm::alloy::primitives::U256::ZERO);
+    h.destination
+        .destination_ready
+        .store(false, Ordering::SeqCst);
+    h.source
+        .omit_source_receipt_fee
+        .store(true, Ordering::SeqCst);
+    let mut bounds = h.bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.latest_protocol_deadline = Some(chrono::Utc::now().timestamp() as u64 + 600);
+    let request = OperationRequest {
+        request_id: "synthetic-bridge-missing-fee".into(),
+        operation: "bridge.execute".into(),
+        run_id: None,
+        input: json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds}),
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(20));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.source.broadcasts(),
+        1,
+        "missing fee must not consume zero fee room: {action:?}"
+    );
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let transfer = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        transfer.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    let id = transfer.steps[0].operation_id.as_ref().unwrap();
+    let child = h
+        .engine
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|r| &r.id == id)
+        .unwrap();
+    assert_eq!(child.status, Status::Completed);
+    assert_eq!(
+        child.last_reconciliation_evidence.as_ref().unwrap()["native_fee_observed"],
+        false
+    );
+    assert_eq!(
+        child.last_reconciliation_evidence.as_ref().unwrap()["outcome_reporting"],
+        "partial"
+    );
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+    h.source
+        .omit_source_receipt_fee
+        .store(false, Ordering::SeqCst);
+    let observed = Box::pin(h.engine.status(&action.id, true)).await.unwrap();
+    let updated = h
+        .engine
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|r| &r.id == id)
+        .unwrap();
+    assert_eq!(updated.status, Status::Completed);
+    assert_eq!(
+        updated.last_reconciliation_evidence.as_ref().unwrap()["native_fee_observed"],
+        true
+    );
+    assert_eq!(h.source.broadcasts(), 1, "status never sends a write");
+    let view = h.engine.operation_view(&observed).unwrap();
+    assert_ne!(view["outcome"]["phase"], "done", "{view}");
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .or_else(|| view.pointer("/next_action/continuation_token"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("continuation token: {view}"));
+    invocation
+        .scope(Box::pin(h.engine.continue_operation(&action.id, token)))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.source.broadcasts(),
+        2,
+        "only the remaining deposit is submitted"
+    );
+    assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+}
+
+use gofin_protocol::BrokerRequest;
+include!("support/kraken_plan_client.rs");
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_relay_evm_compound_runs_on_normal_worker_stack() {
+    Box::pin(async {
+    assert!(std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some());
+    let dir = tempfile::tempdir().unwrap();
+    let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
+    let address = gofin_evm::lower_address(signer.address());
+    let source = Arc::new(Rpc::source_with_allowance(
+        address.clone(),
+        gofin_evm::alloy::primitives::U256::from(5_000_000u64),
+    ));
+    let destination = Arc::new(Rpc::destination_on(address.clone(), 42161));
+    let source_runtime = Arc::new(EvmRuntime::new(source.clone(), 1, Some(signer)));
+    let destination_runtime = Arc::new(EvmRuntime::new(destination.clone(), 42161, None));
+    let prices = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+    let source_wallet = Arc::new(
+        EthereumAdapter::new(
+            EthereumConfig::wallet_only(1, 1, vec![]),
+            vec![WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: address.clone(),
+                signing_enabled: true,
+            }],
+            source_runtime.clone(),
+        )
+        .unwrap()
+        .with_wallet_valuation(prices.clone()),
+    );
+    let destination_wallet = Arc::new(
+        EthereumAdapter::new(
+            EthereumConfig::wallet_only(42161, 1, vec![]),
+            vec![WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: address.clone(),
+                signing_enabled: false,
+            }],
+            destination_runtime.clone(),
+        )
+        .unwrap(),
+    );
+    let provider = Arc::new(Erc20Provider::with_destination(
+        destination,
+        DestinationPayout::Router,
+    ));
+    let bridge = Arc::new(
+        BridgeAdapter::with_provider_and_observers(
+            provider,
+            BTreeMap::from([(1, source_wallet.clone()), (42161, destination_wallet)]),
+            BTreeMap::from([(1, source_runtime), (42161, destination_runtime)]),
+            prices.clone(),
+        )
+        .unwrap(),
+    );
+    let approval = Arc::new(CountingApproval::default());
+    let broker = gofin_broker::compose_runtime(
+        gofin_broker::BrokerConfigV2 {
+            version: 2,
+            networks: gofin_broker::NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![],
+            policy: gofin_broker::BrokerPolicy::beta(),
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        gofin_broker::RuntimeDependencies {
+            store: Store::open(dir.path().join("journal.sqlite")).unwrap(),
+            adapters: vec![source_wallet, bridge.clone()],
+            authorizer: approval.clone(),
+            valuator: prices,
+            bridge: Some(bridge),
+        },
+    )
+    .unwrap();
+    let client = Client::new(broker, dir.path()).await;
+    let mut bounds = Harness::new().bounds();
+    bounds.input_usd_micros = None;
+    bounds.source_usd_per_unit_micros = None;
+    bounds.maximum_total_usd_micros = None;
+    bounds.authorization_seconds = None;
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    let input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":ARB_USDC}],"recipient":address,"refundTo":address,"allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "cli-relay-normal-stack".into(),
+        operation: "bridge.execute".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let result = client
+        .call(
+            args(&[
+                "execute",
+                "bridge.execute",
+                "--input",
+                &input.to_string(),
+                "--id",
+                &request.request_id,
+                "--json",
+            ]),
+            BrokerRequest::Execute { request: request.clone() },
+            true,
+        )
+        .await;
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1, "{result}");
+    assert_eq!(source.broadcasts(), 3, "{result}");
+        assert_eq!(result["outcome"]["result"], "executed", "{result}");
+        let repeated = client.call(args(&["execute", "bridge.execute", "--input", &input.to_string(), "--id", &request.request_id, "--json"]), BrokerRequest::Execute { request }, true).await;
+        assert_eq!(repeated["id"], result["id"]);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+        assert_eq!(source.broadcasts(), 3);
+    }).await;
 }

@@ -81,8 +81,6 @@ async fn execute(environment: &DevEnvironment, request: Request) -> Result<Value
             "Wallet enrollment requires an environment without a selected rehearsal fixture.",
         ));
     }
-    crate::reject_import_with_unresolved_records(&args.database)
-        .map_err(|_| failure("Wallet enrollment is blocked while an operation is unresolved."))?;
     let credential_dir = args
         .database
         .parent()
@@ -470,7 +468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unresolved_submissions_block_generation_and_removal() {
+    async fn unresolved_submissions_do_not_block_generation_or_removal() {
         let directory = tempfile::tempdir().unwrap();
         let environment = environment(directory.path(), "synthetic").await;
         execute(
@@ -485,15 +483,15 @@ mod tests {
         assert!(
             execute(
                 &environment,
-                request("generate", json!({"network":"solana","name":"blocked"}))
+                request("generate", json!({"network":"solana","name":"independent"}))
             )
             .await
-            .is_err()
+            .is_ok()
         );
         assert!(
             execute(&environment, request("remove", json!({"name":"existing"})))
                 .await
-                .is_err()
+                .is_ok()
         );
         assert_eq!(
             environment

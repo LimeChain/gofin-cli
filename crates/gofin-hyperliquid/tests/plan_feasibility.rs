@@ -4,9 +4,7 @@ use gofin_domain::{
     CostBound, CostTreatment, GoFinError, Quantity, ResourceAmount, SubmissionJournal,
     financial_plans::{
         FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanExactMode,
-        FinancialPlanExactScope, FinancialPlanFundingDependency, FinancialPlanFundingIdentity,
-        FinancialPlanFundingScope, FinancialPlanSpec, FinancialPlanStepSpec,
-        FinancialStepCompletion,
+        FinancialPlanExactScope, FinancialPlanSpec, FinancialPlanStepSpec, FinancialStepCompletion,
     },
 };
 use gofin_engine::{Engine, EngineOptions};
@@ -183,7 +181,7 @@ fn request(scope: &FinancialPlanExactScope) -> FinancialPlanAuthorizationRequest
 }
 
 #[tokio::test]
-async fn all_missing_loss_rows_fail_preview_and_authorization_before_touch_id() {
+async fn retired_plan_review_and_authorization_never_prompt() {
     let approval = Arc::new(CountingApproval::default());
     let engine = Engine::new(
         Store::in_memory().unwrap(),
@@ -192,48 +190,24 @@ async fn all_missing_loss_rows_fail_preview_and_authorization_before_touch_id() 
         EngineOptions::default(),
     )
     .unwrap();
-    let mut incomplete = scope("perpetual", "14", "1");
-    incomplete.maximum_debits.clear();
-    incomplete
-        .maximum_costs
-        .retain(|cost| cost.treatment == CostTreatment::AdditionalDebit);
-    for error in [
+    let legacy = request(&scope("perpetual", "14", "1"));
+    assert_eq!(
         engine
-            .preview_financial_plan(request(&incomplete))
+            .preview_financial_plan(legacy.clone())
             .await
-            .unwrap_err(),
-        engine
-            .authorize_financial_plan(request(&incomplete))
-            .await
-            .unwrap_err(),
-    ] {
-        assert_eq!(error.code, "PLAN_EXACT_SCOPE_INCOMPLETE");
-        let details = error.details.unwrap();
-        assert_eq!(details["before_plan_approval"], true);
-        assert_eq!(details["step_id"], "close-sol");
-        assert_eq!(details["validation_errors"].as_array().unwrap().len(), 2);
-        assert_eq!(details["required_debits"][0]["amount"], json!(amount("14")));
-        assert_eq!(
-            details["required_costs"][1]["treatment"],
-            "included_in_debit"
-        );
-        assert_eq!(details["required_costs"][1]["amount"], json!(amount("14")));
-    }
-    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
-
-    let complete = request(&scope("perpetual", "14", "1"));
-    let review = engine
-        .preview_financial_plan(complete.clone())
-        .await
-        .unwrap();
-    assert!(
-        review
-            .feasibility_warnings
-            .iter()
-            .any(|warning| warning.contains("released margin"))
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
     );
-    engine.authorize_financial_plan(complete).await.unwrap();
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        engine
+            .authorize_financial_plan(legacy)
+            .await
+            .unwrap_err()
+            .code,
+        "EXECUTION_INTERFACE_RETIRED"
+    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -320,72 +294,10 @@ async fn zero_loss_and_fee_need_no_positive_scope_and_batch_requires_summed_caps
 }
 
 #[tokio::test]
-async fn future_funded_loss_scope_is_reviewable_without_present_balance_or_position() {
-    let approval = Arc::new(CountingApproval::default());
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![Arc::new(ExchangeAdapter::new(profile("disabled")))],
-        approval.clone(),
-        EngineOptions::default(),
-    )
-    .unwrap();
-    let mut request = request(&scope("perpetual", "14", "1"));
-    let funding_resource = account().resource("perpetual", None);
-    let source_debit = ResourceAmount {
-        resource: account().resource("spot", None),
-        amount: amount("14"),
-    };
-    let producer_scope = FinancialPlanExactScope {
-        mode: FinancialPlanExactMode::Exact,
-        maximum_debits: vec![source_debit.clone()],
-        maximum_costs: vec![],
-        possible_credits: vec![FinancialPlanFundingIdentity {
-            resource: funding_resource.clone(),
-            asset: usdc(),
-        }],
-    };
-    let producer = FinancialPlanStepSpec {
-        step_id: "fund-perpetual".into(),
-        operation: "hyperliquid.account.transfer".into(),
-        input: json!({"request_id":"fund-perpetual", "account":"main", "asset":"USDC",
-            "amount":"14", "destination":"perpetual", "max_amount_usdc":"14", "max_fee_usdc":"0"}),
-        permitted_variations: serde_json::to_value(producer_scope).unwrap(),
-        completion: FinancialStepCompletion {
-            principal_spend: None,
-            minimum_net_receipt: None,
-            operation_succeeded: true,
-        },
-        funding_dependencies: vec![],
-        action_deadline_seconds: None,
-    };
-    request.plan.steps[0]
-        .funding_dependencies
-        .push(FinancialPlanFundingDependency {
-            producing_step_id: "fund-perpetual".into(),
-            resource: funding_resource,
-            asset: usdc(),
-            funding_scope: Some(FinancialPlanFundingScope::PrincipalOnly),
-            maximum_fraction_bps: None,
-        });
-    request.plan.steps.insert(0, producer);
-    request
-        .plan
-        .aggregate_bounds
-        .maximum_debits
-        .push(source_debit);
-    engine
-        .preview_financial_plan(request.clone())
-        .await
-        .unwrap();
-    engine.authorize_financial_plan(request).await.unwrap();
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn invalid_edit_amounts_fail_before_mode_reads_and_approval() {
     let approval = Arc::new(CountingApproval::default());
     let profile = profile("must-not-read");
-    let engine = Engine::new(
+    let _engine = Engine::new(
         Store::in_memory().unwrap(),
         vec![Arc::new(ExchangeAdapter::new(profile.clone()))],
         approval.clone(),
@@ -415,21 +327,6 @@ async fn invalid_edit_amounts_fail_before_mode_reads_and_approval() {
             } else {
                 edit.clone()
             };
-            let mut request = request(&scope("perpetual", "14", "1"));
-            request.plan.steps[0].operation = operation.into();
-            request.plan.steps[0].input = input.clone();
-            for error in [
-                engine
-                    .preview_financial_plan(request.clone())
-                    .await
-                    .unwrap_err(),
-                engine.authorize_financial_plan(request).await.unwrap_err(),
-            ] {
-                assert_eq!(
-                    error.code, "INVALID_INPUT",
-                    "{operation} {field}={value}: {error:?}"
-                );
-            }
             assert!(profile.prepare_amend(operation, &input).await.is_err());
         }
     }

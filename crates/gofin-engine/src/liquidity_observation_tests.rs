@@ -169,7 +169,7 @@ impl gofin_domain::Authorizer for ReadOnlyAuthorizer {
 }
 
 #[tokio::test]
-async fn public_fin_snapshot_read_preserves_broker_verified_liquidity_history() {
+async fn public_fin_snapshot_reports_current_adapter_observation() {
     let prior_evidence = evidence(
         Some("100"),
         Some("200"),
@@ -260,8 +260,8 @@ async fn public_fin_snapshot_read_preserves_broker_verified_liquidity_history() 
     .unwrap();
     assert_eq!(current.token_a.atoms.unwrap().as_str(), "70");
     assert_eq!(current.token_b.atoms.unwrap().as_str(), "240");
-    assert_eq!(current.history.len(), 2);
-    assert!(current.historical_principal_known);
+    assert!(current.history.is_empty());
+    assert!(!current.historical_principal_known);
 
     let legacy_snapshot = engine.read("fin.snapshot", &json!({})).await.unwrap();
     assert_eq!(legacy_snapshot, public_snapshot);

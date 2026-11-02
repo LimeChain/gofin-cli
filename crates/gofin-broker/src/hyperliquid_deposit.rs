@@ -91,6 +91,8 @@ pub struct HyperliquidEthereumDepositAdapter {
     transport: Arc<dyn HyperliquidTransport>,
 }
 
+type CorrelatedDepositMatches = (Vec<Value>, Vec<(Value, Option<Value>)>);
+
 impl HyperliquidEthereumDepositAdapter {
     pub fn new(
         profile: Arc<HyperliquidProfile>,
@@ -846,6 +848,11 @@ fn mode_error(message: &str) -> GoFinError {
 
 #[async_trait]
 impl Adapter for HyperliquidEthereumDepositAdapter {
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // Advisory polling usefulness only; expiry does not prove nonexecution or authorize replay.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         vec![Self::operation_definition()]
     }
@@ -982,7 +989,104 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
         self.ethereum.submit(&binding.inner_preview, journal).await
     }
 
+    async fn observe_transfer_side(
+        &self,
+        record: &OperationRecord,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation, GoFinError> {
+        if !matches!(side, "source" | "destination") {
+            return Err(GoFinError::validation("Choose source or destination."));
+        }
+        let submission = record.submission.as_ref().ok_or_else(|| {
+            GoFinError::validation("Original submission identity is unavailable.")
+        })?;
+        if side == "source" {
+            let preview = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| GoFinError::validation("Original deposit preview is missing."))?;
+            let b = Self::binding(preview)?;
+            let inner = OperationRecord {
+                operation: "wallet.transfer".into(),
+                input: b.inner_input.clone(),
+                preview: Some(b.inner_preview.clone()),
+                ..record.clone()
+            };
+            let mut observation = self.ethereum.reconcile(&inner).await?;
+            if observation.status == Status::Completed {
+                if observation
+                    .verified
+                    .as_ref()
+                    .is_none_or(|proof| proof.submission != *submission)
+                {
+                    return Err(GoFinError::validation(
+                        "Source proof identity does not match the original submission.",
+                    ));
+                }
+                observation.status = Status::Pending;
+                observation.evidence["outcome_transfer"] = json!("in_transit");
+            }
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata: json!({"side":"source","scope":"source_chain","submission_reference":submission.reference}),
+                reconciliation: Some(observation),
+            });
+        }
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("Original deposit preview is missing."))?;
+        let binding = Self::binding(prepared)?;
+        let input = Self::input(&record.input)?;
+        let start = source_search_start_ms(&record.created_at, &prepared.observed_at);
+        let (amount_candidates, exact_matches) = self
+            .correlate_ledger_candidate(&input, &binding, &submission.reference, start)
+            .await?;
+        let metadata = json!({"side":"destination","scope":"owner_scoped_ledger","submission_reference":submission.reference,
+            "exact_source_hash_rows":exact_matches.len(),"amount_and_time_candidates":amount_candidates});
+        let source = record
+            .effects
+            .as_ref()
+            .and_then(|effects| effects.evidence.get("sourceProof"))
+            .and_then(|value| serde_json::from_value::<VerifiedEffects>(value.clone()).ok())
+            .filter(|proof| {
+                proof.submission == *submission
+                    && verified_effect_digest(proof).ok().as_deref()
+                        == Some(proof.proof_digest.as_str())
+            });
+        let Some(source) = source else {
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata,
+                reconciliation: None,
+            });
+        };
+        let observation = self
+            .reconcile_with_source(
+                record,
+                Some(Reconciliation {
+                    status: Status::Completed,
+                    evidence: source.evidence.clone(),
+                    verified: Some(source),
+                }),
+                Some((amount_candidates, exact_matches)),
+            )
+            .await?;
+        Ok(gofin_domain::TransferSideObservation {
+            metadata,
+            reconciliation: Some(observation),
+        })
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, GoFinError> {
+        self.reconcile_with_source(record, None, None).await
+    }
+}
+
+impl HyperliquidEthereumDepositAdapter {
+    async fn reconcile_with_source(
+        &self,
+        record: &OperationRecord,
+        source: Option<Reconciliation>,
+        cached_matches: Option<CorrelatedDepositMatches>,
+    ) -> Result<Reconciliation, GoFinError> {
         let unknown = |evidence| Reconciliation {
             status: Status::Unknown,
             evidence,
@@ -1025,7 +1129,10 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
             preview: Some(binding.inner_preview.clone()),
             ..record.clone()
         };
-        let chain = self.ethereum.reconcile(&inner_record).await?;
+        let chain = match source {
+            Some(source) => source,
+            None => self.ethereum.reconcile(&inner_record).await?,
+        };
         if chain.status == Status::Failed {
             return Ok(Reconciliation {
                 status: Status::Failed,
@@ -1057,15 +1164,19 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
         // correlation still bind any selected credit to this operation.
         let source_confirmed_at_ms =
             source_search_start_ms(&record.created_at, &prepared.observed_at);
-        let (amount_candidates, exact_matches) = match self
-            .correlate_ledger_candidate(
-                &input,
-                &binding,
-                &submission.reference,
-                source_confirmed_at_ms,
-            )
-            .await
-        {
+        let lookup = match cached_matches {
+            Some(matches) => Ok(matches),
+            None => {
+                self.correlate_ledger_candidate(
+                    &input,
+                    &binding,
+                    &submission.reference,
+                    source_confirmed_at_ms,
+                )
+                .await
+            }
+        };
+        let (amount_candidates, exact_matches) = match lookup {
             Ok(matches) => matches,
             Err(error) => {
                 let evidence = json!({"source":chain.evidence,"sourceProof":verified,"depositState":"source_confirmed_funds_in_transit","ledgerError":error.code,"usable":false});
@@ -1384,6 +1495,7 @@ mod tests {
     }
 
     struct SyntheticDepositRpc {
+        calls: Arc<AtomicUsize>,
         owner: String,
         transaction_hash: String,
         block_hash: String,
@@ -1393,6 +1505,7 @@ mod tests {
     #[async_trait]
     impl EvmRpc for SyntheticDepositRpc {
         async fn request(&self, method: &str, _params: Value) -> gofin_domain::Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let result = match method {
                 "eth_chainId" => json!("0xa4b1"),
                 "eth_getTransactionReceipt" => json!({
@@ -1441,6 +1554,7 @@ mod tests {
     }
 
     struct SyntheticDepositTransport {
+        source_rpc_calls: Arc<AtomicUsize>,
         native_hash: String,
         ledger_hash_override: std::sync::Mutex<Option<String>>,
         ledger_time_override: std::sync::atomic::AtomicU64,
@@ -1760,7 +1874,9 @@ mod tests {
             max_priority_fee_per_gas: Quantity::new("1").unwrap(),
             rollup_fee: None,
         };
+        let source_rpc_calls = Arc::new(AtomicUsize::new(0));
         let rpc = Arc::new(SyntheticDepositRpc {
+            calls: source_rpc_calls.clone(),
             owner: owner.clone(),
             transaction_hash: source_hash.clone(),
             block_hash,
@@ -1780,6 +1896,7 @@ mod tests {
             .unwrap(),
         );
         let transport = Arc::new(SyntheticDepositTransport {
+            source_rpc_calls,
             native_hash,
             ledger_hash_override: std::sync::Mutex::new(None),
             ledger_time_override: std::sync::atomic::AtomicU64::new(0),
@@ -2170,6 +2287,30 @@ mod tests {
         *transport.role.lock().unwrap() = json!({"role":"agent","data":{"master":account.owner}});
         *transport.abstraction.lock().unwrap() = json!({"abstraction":"default"});
         assert!(adapter.deposit_destination_mode(account).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn destination_side_uses_persisted_source_proof_without_source_rpc() {
+        let directory = tempfile::tempdir().unwrap();
+        let (engine, _adapter, transport, operation_id, source_hash) =
+            engine_with_submitted_deposit(&directory.path().join("independent-destination.sqlite"));
+        let source = engine.status(&operation_id, true).await.unwrap();
+        assert_eq!(source.status, Status::Pending);
+        assert!(source.effects.is_some());
+        transport.credit_visible.store(true, Ordering::SeqCst);
+        *transport.action_source_hash.lock().unwrap() = source_hash;
+        let before = transport.source_rpc_calls.load(Ordering::SeqCst);
+        let view = engine
+            .status_side(&operation_id, "destination")
+            .await
+            .unwrap();
+        assert_eq!(transport.source_rpc_calls.load(Ordering::SeqCst), before);
+        assert_eq!(view["status"], "completed", "{view}");
+        assert_eq!(
+            engine.status(&operation_id, false).await.unwrap().status,
+            Status::Completed
+        );
+        assert_eq!(transport.dispatches.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

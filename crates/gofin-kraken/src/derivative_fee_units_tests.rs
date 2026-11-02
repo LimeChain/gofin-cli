@@ -564,28 +564,14 @@ async fn native_correlated_fee_overrun_keeps_gross_watermark_without_settlement_
     let mut request = request("SYNTHETIC-fee-overrun");
     request.input["maximumFees"] = json!({"USD":"0.4"});
     let unresolved = running.execute(request).await.unwrap();
-    assert_eq!(unresolved.status, Status::Unknown, "{:?}", unresolved.error);
-    assert!(
-        unresolved.effects.is_none(),
-        "an overrun does not grant settlement authority"
-    );
-    assert_eq!(
-        unresolved.preview.as_ref().unwrap().input["maximumFees"]["USD"],
-        "0.4"
-    );
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&unresolved.id).unwrap(),
-        Some("100000".into())
-    );
-    assert!(store.reservation_count(&unresolved.id).unwrap() > 0);
-    let proof = store
-        .unresolved_consumption_proof(&unresolved.id)
-        .unwrap()
-        .unwrap();
+    assert_eq!(unresolved.status, Status::Pending, "{:?}", unresolved.error);
+    let proof = unresolved
+        .effects
+        .as_ref()
+        .expect("correlated partial effects");
     assert_eq!(proof.submission, unresolved.submission.clone().unwrap());
     let gross = proof
-        .costs
+        .effects
         .iter()
         .filter_map(|effect| match effect {
             FinancialEffect::Cost { amount, .. } => Some(amount.atoms.clone()),
@@ -593,28 +579,21 @@ async fn native_correlated_fee_overrun_keeps_gross_watermark_without_settlement_
         })
         .try_fold(Quantity::zero(), |sum, q| sum.checked_add(&q))
         .unwrap();
-    assert_eq!(
-        gross.to_decimal(36),
-        "0.7",
-        "full gross cost evidence is retained while the watermark adds only .1 beyond the already reserved .4 fee cap"
-    );
+    assert_eq!(gross.to_decimal(36), "0.7");
     assert_eq!(
         proof.evidence["proofEvents"][0]["collateralBooking"]["fee"],
         "0.5"
     );
-    assert!(proof.costs.iter().any(|effect|matches!(effect,FinancialEffect::Cost{category,amount,..} if category=="krakenfutures_commission"&&amount.atoms.to_decimal(36)=="0.5")));
-    drop(store);
+    assert!(proof.effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{category,amount,..} if category=="krakenfutures_commission"&&amount.atoms.to_decimal(36)=="0.5")));
+    assert_eq!(
+        running.operation_view(&unresolved).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
+    );
     drop(running);
     let restarted = engine(&path, venue.clone());
     let duplicate = restarted.status(&unresolved.id, true).await.unwrap();
-    assert_eq!(duplicate.status, Status::Unknown);
-    assert!(duplicate.effects.is_none());
-    let store = gofin_store::Store::open(&path).unwrap();
-    assert_eq!(
-        store.unresolved_consumption_usd(&unresolved.id).unwrap(),
-        Some("100000".into())
-    );
-    assert!(store.reservation_count(&unresolved.id).unwrap() > 0);
+    assert_eq!(duplicate.status, Status::Pending);
+    assert!(duplicate.effects.is_some());
     assert_eq!(
         venue
             .inner

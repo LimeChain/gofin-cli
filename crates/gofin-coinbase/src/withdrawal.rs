@@ -253,8 +253,8 @@ impl CoinbaseProfile {
             },
             treatment: CostTreatment::VenueCalculatedAdditionalDebit,
         }];
-        let valuation = self.financial_valuation(&debits, &costs).await?;
-        let mut prepared = PreparedOperation {
+        let valuation = self.financial_valuation(&debits, &costs).await.ok();
+        let prepared = PreparedOperation {
             operation: "coinbase.withdraw".into(),
             input: input.clone(),
             binding: json!({
@@ -297,7 +297,7 @@ impl CoinbaseProfile {
             ],
             observed_at: gofin_domain::now(),
             expires_at: (Utc::now() + Duration::seconds(45)).to_rfc3339(),
-            valuation: Some(valuation),
+            valuation,
             intent: FinancialIntent {
                 debits,
                 maximum_costs: costs,
@@ -314,7 +314,6 @@ impl CoinbaseProfile {
             operation_version: 1,
             action_deadline: None,
         };
-        gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
 
@@ -512,10 +511,116 @@ impl CoinbaseProfile {
         Ok(())
     }
 
+    pub(super) async fn observe_withdrawal_side(
+        &self,
+        record: &OperationRecord,
+        submission: &gofin_domain::Submission,
+        side: &str,
+    ) -> Result<gofin_domain::TransferSideObservation> {
+        if side == "source" {
+            let observation = self.reconcile_withdrawal(record, submission, true).await?;
+            return Ok(gofin_domain::TransferSideObservation {
+                metadata: json!({"side":"source","scope":"coinbase_transaction"}),
+                reconciliation: Some(observation),
+            });
+        }
+        if side != "destination" {
+            return Err(GoFinError::validation("Choose source or destination."));
+        }
+        let b = &submission.data["binding"];
+        if submission.kind != "coinbase"
+            || record
+                .preview
+                .as_ref()
+                .is_none_or(|p| p.operation != record.operation || p.binding != *b)
+            || b["idem"] != submission.reference
+        {
+            return Err(GoFinError::validation(
+                "Original withdrawal binding is invalid.",
+            ));
+        }
+        let evidence = record
+            .last_reconciliation_evidence
+            .as_ref()
+            .ok_or_else(|| {
+                GoFinError::validation("Observe the original Coinbase transaction first.")
+            })?;
+        let source = std::iter::once(evidence)
+            .chain(
+                evidence
+                    .get("previous_observations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .rev(),
+            )
+            .find(|entry| {
+                entry.get("transactionId").and_then(Value::as_str).is_some()
+                    && entry.get("txHash").and_then(Value::as_str).is_some()
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Original Coinbase transaction evidence is unavailable.")
+            })?;
+        let tx = &source["transaction"]["data"];
+        let txid = source["transactionId"].as_str().ok_or_else(|| {
+            GoFinError::validation("Original Coinbase transaction identity is missing.")
+        })?;
+        let hash = source["txHash"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                GoFinError::validation("Original destination transaction identity is missing.")
+            })?;
+        if tx["id"].as_str() != Some(txid)
+            || tx.pointer("/network/hash").and_then(Value::as_str) != Some(hash)
+            || tx["type"] != "send"
+            || tx["status"] != "completed"
+            || tx["idem"]
+                .as_str()
+                .is_some_and(|id| id != submission.reference)
+        {
+            return Err(GoFinError::validation(
+                "Persisted Coinbase transaction does not match the original send.",
+            ));
+        }
+        let destination = bound_destination(b)?;
+        let principal = b["amount"]
+            .as_str()
+            .ok_or_else(|| GoFinError::validation("Original withdrawal amount is missing."))?;
+        let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
+            GoFinError::validation("Original destination observer is unavailable.")
+        })?;
+        let receipt = verifier
+            .verify(crate::funding::CoinbasePayoutRequest {
+                destination,
+                tx_hash: hash.into(),
+                minimum: principal.into(),
+                maximum: principal.into(),
+            })
+            .await?;
+        let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount});
+        let mut evidence = source.clone();
+        evidence["destination_observation"] = metadata.clone();
+        evidence["outcome_transfer"] = json!(if receipt.status == Status::Completed {
+            "credited"
+        } else {
+            "in_transit"
+        });
+        Ok(gofin_domain::TransferSideObservation {
+            metadata,
+            reconciliation: Some(Reconciliation {
+                status: Status::Pending,
+                evidence,
+                verified: None,
+            }),
+        })
+    }
+
     pub(super) async fn reconcile_withdrawal(
         &self,
         record: &OperationRecord,
         submission: &gofin_domain::Submission,
+        source_only: bool,
     ) -> Result<Reconciliation> {
         let b = &submission.data["binding"];
         let Ok(route) = withdrawal_network(b) else {
@@ -565,7 +670,13 @@ impl CoinbaseProfile {
                 evidence_version: 1,
                 submission: submission.clone(),
                 effects: Vec::new(),
-                evidence: json!({"nativeRejection":receipt,"httpStatus":http}),
+                evidence: json!({
+                    "nativeRejection":receipt,"httpStatus":http,
+                    "outcome_dispatch":"rejected","outcome_replay_safe":true,
+                    "definitive_nonexecution":true,
+                    "source":"coinbase_captured_send_rejection",
+                    "submission_reference":submission.reference
+                }),
                 observed_at: gofin_domain::now(),
                 proof_digest: String::new(),
             };
@@ -728,10 +839,34 @@ impl CoinbaseProfile {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_ascii_lowercase();
-        if ["pending", "processing", "created", "queued"].contains(&status.as_str()) {
+        // A status is attributable only to the original transaction identity.
+        if d.get("id").and_then(Value::as_str) != Some(txid)
+            || d.get("idem")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != submission.reference)
+        {
+            return Ok(coinbase_unknown(
+                "transaction status does not match the original withdrawal identity",
+            ));
+        }
+        if [
+            "pending",
+            "processing",
+            "created",
+            "queued",
+            "failed",
+            "canceled",
+            "cancelled",
+        ]
+        .contains(&status.as_str())
+        {
             return Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"transaction":tx}),
+                status: if ["failed", "canceled", "cancelled"].contains(&status.as_str()) {
+                    Status::Failed
+                } else {
+                    Status::Pending
+                },
+                evidence: json!({"transaction":tx,"outcome_transfer":"source_pending","reason":if ["failed","canceled","cancelled"].contains(&status.as_str()) {"Coinbase reports the withdrawal did not complete; a refund correlated to the original send has not yet been established."} else {"Waiting for Coinbase to process the original withdrawal."}}),
                 verified: None,
             });
         }
@@ -790,6 +925,13 @@ impl CoinbaseProfile {
             return Ok(coinbase_unknown(
                 "completed send identity, network, or debit arithmetic did not match the approved withdrawal",
             ));
+        }
+        if source_only {
+            return Ok(Reconciliation {
+                status: Status::Pending,
+                verified: None,
+                evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"outcome_transfer":"in_transit"}),
+            });
         }
         let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
             failure(
@@ -864,7 +1006,7 @@ impl CoinbaseProfile {
                     treatment: CostTreatment::VenueCalculatedAdditionalDebit,
                 },
             ],
-            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence}),
+            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence,"outcome_transfer":"credited"}),
             observed_at: gofin_domain::now(),
             proof_digest: String::new(),
         };

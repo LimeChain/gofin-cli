@@ -648,13 +648,6 @@ impl KrakenProfile {
             }
         );
         prepared.checks.push(gofin_domain::Check{name:"issued margin child, parent trades and full extension".into(),status:gofin_domain::CheckStatus::Passed,detail:format!("Exact native child {target} links to parent {parent_id}; {} {} parent exposure and {} {} loan are independently proved by immutable native trades and custody ledgers. Other children and the parent template remain unchanged.",proved_volume.to_decimal(36),parent.base.reference,proved_loan.to_decimal(36),if parent.buy{&parent.quote.reference}else{&parent.base.reference})});
-        if prepared
-            .valuation
-            .as_ref()
-            .is_some_and(|v| !v.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut prepared);
-        }
         Ok(prepared)
     }
 }

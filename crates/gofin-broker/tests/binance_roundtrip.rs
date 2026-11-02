@@ -1,6 +1,8 @@
 //! Synthetic end-to-end Binance SPOT transfer run. This fixture never builds a
 //! production Binance client and accepts no environment-provided endpoints.
 
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 #[path = "support/binance_spot_positive.rs"]
 mod spot_positive;
 
@@ -70,6 +72,7 @@ struct VenueState {
     history: Vec<Value>,
     deposit_history: Vec<Value>,
     withdrawal_history: Vec<Value>,
+    withdrawal_status: Option<u64>,
     requests: Vec<(BinanceEndpoint, Vec<(String, String)>)>,
     posts: usize,
     reject_request_id: Option<String>,
@@ -353,7 +356,9 @@ impl BinanceTransport for SyntheticVenue {
                     .get("address")
                     .cloned()
                     .ok_or(TransportError::InvalidResponse)?;
-                s.withdrawal_history.push(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id,"coin":"ETH","network":"ETH","address":address,"amount":net_amount,"transactionFee":fee,"status":6,"txId":hash,"transferType":0,"walletType":0,"applyTime":chrono::Utc::now().to_rfc3339()}));
+                let status = s.withdrawal_status.unwrap_or(6);
+                let hash = if status == 0 { String::new() } else { hash };
+                s.withdrawal_history.push(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id,"coin":"ETH","network":"ETH","address":address,"amount":net_amount,"transactionFee":fee,"status":status,"txId":hash,"transferType":0,"walletType":0,"applyTime":chrono::Utc::now().to_rfc3339()}));
                 Ok(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id}))
             }
             E::UniversalTransferHistory => {
@@ -1007,8 +1012,14 @@ async fn concurrent_duplicate_transfer_uses_one_approval_and_one_venue_submissio
     let first = first.result.unwrap();
     let second = second.result.unwrap();
     assert_eq!(first["id"], second["id"]);
-    assert_eq!(first["status"], "completed");
-    assert_eq!(second["status"], "completed");
+    // A concurrent repeat may observe awaiting approval while the first caller completes.
+    let observed = broker
+        .handle(BrokerRequest::Status {
+            id: first["id"].as_str().unwrap().into(),
+        })
+        .await;
+    assert!(observed.ok);
+    assert_eq!(observed.result.unwrap()["status"], "completed");
     assert_eq!(venue.state.lock().unwrap().posts, 1);
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
 }
@@ -1080,7 +1091,11 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     assert_eq!(unknown["submission"]["reference"], client_id.as_str());
     let store = Store::open(&db).unwrap();
     let held = store.reservations(unknown["id"].as_str().unwrap()).unwrap();
-    assert!(!held.is_empty());
+    assert!(
+        held.is_empty(),
+        "uncertainty retains identity without a reservation gate"
+    );
+    assert_eq!(unknown["outcome"]["replay_safe"], false);
     assert_eq!(venue.state.lock().unwrap().posts, 1);
     drop(broker);
 
@@ -1148,7 +1163,7 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
 }
 
 #[tokio::test]
-async fn permission_precision_and_stale_price_guards_block_before_any_post() {
+async fn permission_precision_guards_and_optional_stale_price_prepare_without_posts() {
     use gofin_domain::Adapter;
     let venue = Arc::new(SyntheticVenue::new());
     let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
@@ -1203,7 +1218,9 @@ async fn permission_precision_and_stale_price_guards_block_before_any_post() {
             &transfer("guard-stale", CHILD_A, MAIN, "0.005"),
         )
         .await;
-    assert!(stale.is_err() && stale.unwrap_err().code == "STALE_VALUATION");
+    let stale = stale.unwrap();
+    assert!(stale.valuation.is_none());
+    assert!(!stale.intent.debits.is_empty());
     assert_eq!(venue.state.lock().unwrap().posts, 0);
     assert_eq!(approval.0.load(Ordering::SeqCst), 0);
 }
@@ -1468,20 +1485,16 @@ impl EvmRpc for ArbitrumErc20ExecutionRpc {
                         let store = Store::open(self.durable_store_path.as_ref()?).ok()?;
                         store.list_records().ok()?.into_iter().find_map(|record| {
                             let operation_id = record["id"].as_str()?;
-                            let (plan_id, _, step_id, _) =
-                                store.financial_plan_attempt_owner(operation_id).ok()??;
-                            let plan = store.financial_plan(&plan_id).ok()??;
-                            // Plan retries retain the caller's logical ID in
-                            // their linkage; each candidate has an internal ID.
-                            let linked = plan["attempts"].as_array()?.iter().any(|attempt| {
-                                attempt["attempt_id"] == operation_id
-                                    && attempt["step_id"] == step_id
-                                    && attempt["logical_request_id"]
-                                        == "synthetic-plan-arbitrum-deposit"
-                            });
-                            linked
-                                .then(|| serde_json::from_value(record["submission"].clone()).ok())
-                                .flatten()
+                            if record["request_id"] != "synthetic-plan-arbitrum-deposit" {
+                                return None;
+                            }
+                            assert!(
+                                store
+                                    .stage_attempt_by_operation(operation_id)
+                                    .unwrap()
+                                    .is_some()
+                            );
+                            serde_json::from_value(record["submission"].clone()).ok()
                         })
                     })
                     .ok_or_else(|| {
@@ -3126,7 +3139,7 @@ async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repric
         "0x1111111111111111111111111111111111111111"
     );
     assert_eq!(transaction_binding["gas"], 25_200);
-    let initial_authorization = gofin_domain::authorization_binding(&approved);
+    let initial_authorization = gofin_domain::native_authorization_binding(&approved);
     let old_publication = approved.valuation.as_ref().unwrap().prices[0]
         .source
         .clone();
@@ -3153,13 +3166,13 @@ async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repric
         old_unit_price,
         "the fresh valuation must contain the repriced ETH/USD quote"
     );
-    assert_eq!(
+    assert_ne!(
         refreshed.valuation.as_ref().unwrap().movement_usd_micros,
         approved.valuation.as_ref().unwrap().movement_usd_micros,
-        "the carried approval valuation remains the immutable cent-rounded ceiling"
+        "reporting valuation may change within the same native authority"
     );
     assert_eq!(
-        gofin_domain::authorization_binding(&refreshed),
+        gofin_domain::native_authorization_binding(&refreshed),
         initial_authorization,
         "repricing and source publication time must not alter the approved binding"
     );
@@ -3168,13 +3181,16 @@ async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repric
         "gas, principal, and destination remain exactly frozen"
     );
 
-    // A materially higher price crosses the cent-rounded approved USD ceiling.
+    // A higher reporting price leaves native authority unchanged.
     usd.update(2_100_000_000);
-    let over_ceiling = composite.revalidate(&approved).await.unwrap_err();
-    assert_eq!(over_ceiling.code, "VALUE_BOUND_EXCEEDED");
+    let higher = composite.revalidate(&approved).await.unwrap();
+    assert_eq!(
+        gofin_domain::native_authorization_binding(&higher),
+        initial_authorization
+    );
     assert_eq!(rpc.accepted.load(Ordering::SeqCst), 0);
 
-    // Return within the approved ceiling with another fresh source timestamp;
+    // Refresh reporting once more;
     // actual submission still uses precisely the originally approved fields.
     usd.update(2_000_500_000);
     let submission = composite.submit(&approved, journal.clone()).await.unwrap();
@@ -3311,7 +3327,7 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
 }
 
 #[test]
-fn named_arbitrum_deposit_recovers_orphan_approval_and_retains_authority_across_restart() {
+fn standalone_arbitrum_deposit_recovers_orphan_and_preserves_original_approval() {
     // Match Tokio's production worker budget. A current-thread test hides the
     // debug-build stack overflow in progress-observed HTTP revalidation.
     tokio::runtime::Builder::new_multi_thread()
@@ -3321,7 +3337,7 @@ fn named_arbitrum_deposit_recovers_orphan_approval_and_retains_authority_across_
         .build()
         .unwrap()
         .block_on(async {
-            tokio::spawn(named_arbitrum_deposit_workflow())
+            tokio::spawn(standalone_arbitrum_deposit_workflow())
                 .await
                 .unwrap();
         });
@@ -3424,6 +3440,7 @@ async fn streamed_deposit_request(
         stages,
         vec![
             Stage::Preparing,
+            Stage::AwaitingApproval,
             Stage::Revalidating,
             Stage::Submitting,
             Stage::Verifying
@@ -3432,8 +3449,7 @@ async fn streamed_deposit_request(
     result
 }
 
-async fn named_arbitrum_deposit_workflow() {
-    use gofin_domain::financial_plans::FinancialPlanAuthorizationRequest;
+async fn standalone_arbitrum_deposit_workflow() {
     let venue = Arc::new(SyntheticVenue::new());
     let binance = subaccount_only_adapter(venue.clone());
     let token = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
@@ -3542,47 +3558,7 @@ async fn named_arbitrum_deposit_workflow() {
         .unwrap()
     };
     let broker = compose();
-    let plan = serde_json::from_value(json!({
-        "version":1,"name":"Deposit USDC into synthetic Binance",
-        "steps":[{"step_id":"deposit","operation":"binance.deposit","input":input,
-            "permitted_variations":{"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,
-                "possible_credits":[{"resource":resource(1002),"asset":target_asset}]},
-            "completion":{"operation_succeeded":true,"minimum_net_receipt":{"resource":resource(1002),"amount":{"asset":target_asset,"atoms":Quantity::from_decimal("1.25",36).unwrap()}}},
-            "funding_dependencies":[]}],
-        "aggregate_bounds":{"maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs}
-    })).unwrap();
-    let mut authorization = FinancialPlanAuthorizationRequest {
-        request_id: "synthetic-deposit-plan-approval".into(),
-        plan,
-        valid_for_seconds: Some(2700),
-        replaces_revision_id: None,
-        expected_review_hash: None,
-    };
-    let review = broker
-        .handle(BrokerRequest::PreviewPlan {
-            request: authorization.clone(),
-        })
-        .await;
-    assert!(review.ok, "{:?}", review.error);
-    authorization.expected_review_hash = Some(
-        review.result.unwrap()["review_hash"]
-            .as_str()
-            .unwrap()
-            .into(),
-    );
-    let authorized = broker
-        .handle(BrokerRequest::AuthorizePlan {
-            request: authorization,
-        })
-        .await;
-    assert!(authorized.ok, "{:?}", authorized.error);
-    let authorized = authorized.result.unwrap();
-    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
-    let expiry = authorized["revision"]["expires_at"].clone();
-    assert!(expiry.as_str().is_some_and(|value| !value.is_empty()));
-    let revision_id = authorized["revision"]["revision_id"].as_str().unwrap();
-    assert!(!revision_id.is_empty());
-    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
 
     // Reproduce the persisted legacy approval with no inspectable reservation.
     // It never acquired authority or submission identity before interruption.
@@ -3650,18 +3626,7 @@ async fn named_arbitrum_deposit_workflow() {
         .unwrap();
     assert_eq!(repaired["status"], "cancelled");
     assert!(repaired["submission"].is_null());
-    let status = broker
-        .handle(BrokerRequest::PlanStatus {
-            plan_id: plan_id.clone(),
-        })
-        .await;
-    assert!(status.ok, "{:?}", status.error);
-    let status = status.result.unwrap();
-    assert_eq!(status["revision"]["expires_at"], expiry);
-    assert_eq!(status["revision"]["revision_id"], revision_id);
-    let execute = BrokerRequest::ExecutePlanStep {
-        plan_id: plan_id.clone(),
-        step_id: "deposit".into(),
+    let execute = BrokerRequest::Execute {
         request: OperationRequest {
             request_id: "synthetic-plan-arbitrum-deposit".into(),
             operation: "binance.deposit".into(),
@@ -3690,7 +3655,7 @@ async fn named_arbitrum_deposit_workflow() {
     assert_eq!(
         approval.0.load(Ordering::SeqCst),
         1,
-        "the active plan must cover dispatch without another approval"
+        "one standalone approval covers the admitted immutable deposit"
     );
     assert_eq!(
         venue.state.lock().unwrap().usdc_balances[EMAIL_A],
@@ -3721,8 +3686,9 @@ async fn named_arbitrum_deposit_workflow() {
     assert_eq!(completed["status"], "completed", "{completed}");
     assert_eq!(completed["effects"]["evidence"]["withdrawal_locked"], true);
     assert_eq!(completed["id"], pending["id"]);
-    let record: gofin_domain::OperationRecord = serde_json::from_value(completed.clone()).unwrap();
-    assert!(record.effects.unwrap().effects.iter().any(|effect| matches!(effect,
+    let effects: gofin_domain::VerifiedEffects =
+        serde_json::from_value(completed["effects"].clone()).unwrap();
+    assert!(effects.effects.iter().any(|effect| matches!(effect,
         gofin_domain::FinancialEffect::Transfer { debit,credit,to,.. }
             if debit.asset == source_asset && debit.atoms.to_decimal(6) == "1.25"
             && credit.asset == target_asset && credit.atoms.to_decimal(36) == "1.25" && to == &resource(1002))));
@@ -3735,30 +3701,7 @@ async fn named_arbitrum_deposit_workflow() {
         "restart and retries must never rebroadcast"
     );
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
-    let final_status = broker.handle(BrokerRequest::PlanStatus { plan_id }).await;
-    assert!(final_status.ok, "{:?}", final_status.error);
-    let final_status = final_status.result.unwrap();
-    assert_eq!(final_status["revision"]["expires_at"], expiry);
-    assert_eq!(final_status["revision"]["revision_id"], revision_id);
-    assert_eq!(
-        final_status["steps"][0]["state"], "completed",
-        "{final_status}"
-    );
-    assert!(final_status["blockers"].as_array().unwrap().is_empty());
-    assert!(
-        final_status["usage"]["reservations"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        Store::open(&path)
-            .unwrap()
-            .reservation_count(completed["id"].as_str().unwrap())
-            .unwrap(),
-        0,
-        "credited status6 releases the operation's resource reservations"
-    );
+    assert_eq!(completed["outcome"]["replay_safe"], false);
     http_server.abort();
 }
 
@@ -4227,4 +4170,8 @@ async fn partial_second_consolidation_failure_preserves_success_and_allows_expli
         "failed accepted identity plus first/cleanup writes are not replayed"
     );
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
+}
+
+mod binance_email_outcome {
+    include!("support/binance_email_outcome.rs");
 }

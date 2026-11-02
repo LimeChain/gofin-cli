@@ -576,7 +576,7 @@ func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, Fi
         guard let result = safe(value, maximum: maximum) else { return (false, nil) }
         return (true, result)
     }
-    guard Set(review.keys).isSubset(of: Set(["version", "action", "service", "market", "input", "output", "other_details", "description", "step_count", "valid_for_seconds"])),
+    guard Set(review.keys).isSubset(of: Set(["version", "action", "service", "market", "input", "output", "other_details", "description", "step_count", "valid_for_seconds", "terms", "advisories"])),
           let service = safe(review["service"]) else { return .failure(.invalid) }
     if let details = review["other_details"] as? String, details.count > 200 { return .failure(.tooLong) }
     let (marketOK, market) = optionalString(review, "market")
@@ -633,6 +633,7 @@ func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, Fi
     if action == "swap" {
         guard has("input", "amount"), has("input", "asset"), has("output", "asset"), has("output", "amount") else { return .failure(.invalid) }
     }
+    if action == "approve" && !has("input", "account") { return .failure(.invalid) }
     if ["account-transfer", "bridge", "exchange-withdrawal", "exchange-deposit"].contains(action) {
         guard has("input", "account"), has("output", "account"),
               (has("input", "amount") && has("input", "asset") || has("output", "amount") && has("output", "asset")) else { return .failure(.invalid) }
@@ -699,6 +700,52 @@ func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, Fi
     }
     if action != "execute-plan" && (description != nil || (review["step_count"] != nil && !(review["step_count"] is NSNull)) || (review["valid_for_seconds"] != nil && !(review["valid_for_seconds"] is NSNull))) { return .failure(.invalid) }
     if let details = details { result += "; \(details)" }
+    if let rawTerms = review["terms"] {
+        guard let terms = rawTerms as? [[String: Any]] else { return .failure(.invalid) }
+        for term in terms {
+            guard Set(term.keys) == Set(["label", "value", "enforcement"]),
+                  safe(term["label"], maximum: 100) != nil,
+                  safe(term["value"], maximum: 200) != nil,
+                  let enforcement = term["enforcement"] as? String else { return .failure(.invalid) }
+            switch enforcement {
+            case "enforced", "estimate", "after_execution": break
+            default: return .failure(.invalid)
+            }
+        }
+    }
     guard result.count <= authenticationReasonMaximumCharacters else { return .failure(.tooLong) }
+    // These are warnings about separate actions, never additional authority.
+    // Skip malformed historical entries as a whole so damaged history cannot
+    // block the current approval or partially display an amount or identity.
+    if let advisories = review["advisories"] as? [[String: Any]] {
+        for advisory in advisories.prefix(3) {
+            guard Set(advisory.keys) == Set(["operation_id", "operation", "amounts"]),
+                  let id = safe(advisory["operation_id"], maximum: 128),
+                  let operation = safe(advisory["operation"], maximum: 128),
+                  let rows = advisory["amounts"] as? [[String: Any]], rows.count <= 4 else { continue }
+            var rendered: [String] = []
+            var valid = true
+            for row in rows {
+                guard Set(row.keys) == Set(["resource", "amount"]),
+                      let resource = safe(row["resource"], maximum: 192),
+                      let amount = row["amount"] as? [String: Any],
+                      Set(amount.keys) == Set(["asset", "atoms"]),
+                      let asset = amount["asset"] as? [String: Any],
+                      Set(asset.keys) == Set(["network", "reference", "decimals"]),
+                      let network = safe(asset["network"], maximum: 128),
+                      let reference = safe(asset["reference"], maximum: 128),
+                      let decimals = presentationInteger(asset["decimals"], minimum: 0, maximum: 255),
+                      let atoms = safe(amount["atoms"], maximum: 256),
+                      let quantity = presentationAtomicQuantity(atoms, decimals: decimals) else {
+                    valid = false
+                    break
+                }
+                rendered.append("\(quantity) \(network)/\(reference) [\(resource)]")
+            }
+            guard valid else { continue }
+            let warning = "; Other unconfirmed action \(id) (\(operation)): \(rendered.joined(separator: ", ")). This warning does not block this action."
+            if result.count + warning.count <= 4096 { result += warning }
+        }
+    }
     return .success(result)
 }

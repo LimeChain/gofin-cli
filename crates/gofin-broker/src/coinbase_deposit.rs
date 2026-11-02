@@ -693,7 +693,7 @@ impl CoinbaseEvmDepositAdapter {
             inner: inner.clone(),
             value_bounds: None,
         };
-        let mut prepared = PreparedOperation { operation: "coinbase.deposit".into(), input: value.clone(),
+        let prepared = PreparedOperation { operation: "coinbase.deposit".into(), input: value.clone(),
             binding: serde_json::to_value(binding).map_err(|_| GoFinError::validation("Deposit serialization failed."))?,
             summary: format!("Deposit {} {} ({}) from {} on {}; gas cap {} {}; credit Coinbase {}", input.amount, input.currency, token, input.wallet, network.name(), max_fee, network.gas_asset(), input.account),
             checks: vec![Check { name: "exact_evm_route".into(), status: CheckStatus::Passed,
@@ -702,7 +702,7 @@ impl CoinbaseEvmDepositAdapter {
                 "Source inclusion does not establish usable Coinbase credit. Any unexpected venue deduction retains the original pending identity.".into()],
             observed_at: inner.observed_at, expires_at: inner.expires_at, valuation: inner.valuation,
             intent, operation_version: 1, action_deadline: None };
-        gofin_domain::value_bounds::bind(&mut prepared);
+
         Ok(prepared)
     }
 }

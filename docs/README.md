@@ -5,7 +5,7 @@ Start with the guide that matches what you want to do.
 | Goal | Guide |
 | --- | --- |
 | Understand GoFin and supported workflows | [Project overview](../README.md) |
-| Find detailed provider, plan and recovery commands | [Usage reference](usage.md) |
+| Find detailed provider, outcome and continuation commands | [Usage reference](usage.md) |
 | Install GoFin and connect an account | [Installation](../README.md#installation) and [connections](usage.md#connections-and-usage) |
 | Make a first contribution without real funds | [Contributing](../CONTRIBUTING.md) |
 | Run an isolated development environment | [Development environments](testing/development-environments.md) |
@@ -29,7 +29,6 @@ verification. A passing fixture does not establish every live provider route.
 - [Solana and Jupiter verification](testing/solana-jupiter.md)
 - [Uniswap AMM verification](testing/uniswap-amm.md)
 - [Bridge verification](testing/bridge.md)
-- [Financial plan verification](testing/plans.md)
 
 Schemas and examples are also available through `gofin capabilities` and
 `gofin operations`. In the synthetic environment, use

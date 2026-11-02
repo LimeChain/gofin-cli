@@ -301,13 +301,6 @@ impl KrakenProfile {
             },
         ];
         self.compound_margin_admission(&admission).await?;
-        if current
-            .valuation
-            .as_ref()
-            .is_some_and(|v| !v.prices.is_empty())
-        {
-            gofin_domain::value_bounds::bind(&mut current);
-        }
         Ok(current)
     }
     pub(crate) async fn reconcile_derivative_unified(
@@ -330,6 +323,7 @@ impl KrakenProfile {
         let mut failed = false;
         let mut observations = vec![];
         let mut consumed = None;
+        let mut scoped_evidence = None;
         for frame in frames {
             let tags = frame["parameters"]["batchOrder"]
                 .as_array()
@@ -361,6 +355,9 @@ impl KrakenProfile {
                 }
                 Err(error) => return Err(error),
             };
+            if let Some(partition) = observed.evidence.get("newFinancialScope") {
+                scoped_evidence = Some(partition.clone());
+            }
             terminal &= observed.status.terminal();
             failed |= observed.status == Status::Failed;
             if let Some(proof) = gofin_domain::unresolved_consumption::read(&observed.evidence)? {
@@ -395,6 +392,28 @@ impl KrakenProfile {
             observations
                 .push(json!({"tags":tags,"status":observed.status,"evidence":observed.evidence}));
             if let Some(bundle) = observed.verified {
+                if *frame == binding["mutationNewWriteScope"]["binding"] {
+                    let scope_value = &binding["mutationNewWriteScope"];
+                    let scope: gofin_domain::amendments::AmendmentScope =
+                        serde_json::from_value(scope_value.clone()).map_err(|_| {
+                            error(
+                                "KRAKEN_PROOF_INVALID",
+                                "Protected new-write scope is invalid.",
+                            )
+                        })?;
+                    let financial: Vec<_> = bundle
+                        .effects
+                        .iter()
+                        .filter(|effect| !crate::unresolved_consumption::is_marker(effect))
+                        .cloned()
+                        .collect();
+                    if crate::unresolved_consumption::costs_exceed_bounds(
+                        &financial,
+                        &scope.intent.maximum_costs,
+                    )? {
+                        scoped_evidence = Some(json!({"scope":scope_value,"effects":financial}));
+                    }
+                }
                 // A proved negative child is an immutable receipt event too.
                 // It can resolve an owner's mutation while unrelated new orders
                 // remain pending without manufacturing a financial fill.
@@ -457,7 +476,7 @@ impl KrakenProfile {
                 .into_iter()
                 .filter(crate::unresolved_consumption::is_marker)
                 .collect();
-            return crate::unresolved_consumption::new_write_overrun_with_progress(
+            return crate::unresolved_consumption::unresolved_new_write_overrun_with_progress(
                 record,
                 submission,
                 &consumed.costs,
@@ -472,6 +491,10 @@ impl KrakenProfile {
                 json!({"partitions":observations}),
             ));
         }
+        let mut evidence = json!({"partitions":observations,"partialExecution":failed,"proofEvents":events.into_values().collect::<Vec<_>>()});
+        if let Some(partition) = scoped_evidence {
+            evidence["newFinancialScope"] = partition;
+        }
         proof(
             submission,
             if terminal {
@@ -484,7 +507,7 @@ impl KrakenProfile {
                 Status::Pending
             },
             effects,
-            json!({"partitions":observations,"partialExecution":failed,"proofEvents":events.into_values().collect::<Vec<_>>()}),
+            evidence,
         )
     }
 }

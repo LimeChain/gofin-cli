@@ -9,6 +9,7 @@ struct SlippageOrderApi {
     response_overrides: Mutex<BTreeMap<String, Value>>,
     token_metadata: Mutex<Value>,
     token_requests: AtomicUsize,
+    expiry_ttl_seconds: AtomicUsize,
 }
 
 #[async_trait]
@@ -45,6 +46,12 @@ impl gofin_jupiter::JupiterApi for SlippageOrderApi {
                 .as_str()
                 .ok_or_else(fixture_state_error)?;
             response["transaction"] = json!(append_opaque_provider_instruction(encoded)?);
+            let ttl = self.expiry_ttl_seconds.load(Ordering::SeqCst);
+            if ttl > 0 {
+                response["expireAt"] = json!(
+                    (chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339()
+                );
+            }
             for (key, value) in self.response_overrides.lock().unwrap().iter() {
                 response[key] = value.clone();
             }
@@ -92,6 +99,8 @@ fn append_opaque_provider_instruction(encoded: &str) -> Result<String> {
 
 struct RehearsalAuthorizer {
     calls: Arc<AtomicUsize>,
+    refresh_after_approval: Option<Arc<SlippageOrderApi>>,
+    reject_refreshed_quote: bool,
 }
 
 #[async_trait]
@@ -102,6 +111,14 @@ impl Authorizer for RehearsalAuthorizer {
     ) -> Result<ApprovalAudit> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         crate::validate_development_challenge(challenge)?;
+        if let Some(api) = &self.refresh_after_approval {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut overrides = api.response_overrides.lock().unwrap();
+            api.expiry_ttl_seconds.store(0, Ordering::SeqCst);
+            if self.reject_refreshed_quote {
+                overrides.insert("otherAmountThreshold".into(), json!("1"));
+            }
+        }
         Ok(ApprovalAudit {
             mechanism: "development-auto-approval-no-os-authentication".into(),
             source: Some(gofin_domain::AuthorizationSource::Development),
@@ -123,6 +140,13 @@ type SlippageRuntimeFixture = (
 );
 
 fn slippage_runtime(directory: &tempfile::TempDir) -> SlippageRuntimeFixture {
+    slippage_runtime_with_refresh(directory, false, false)
+}
+fn slippage_runtime_with_refresh(
+    directory: &tempfile::TempDir,
+    refresh: bool,
+    reject: bool,
+) -> SlippageRuntimeFixture {
     let (config, _, rpc, fixture_api) = applications_with_fixture().unwrap();
     let signer = Arc::new(SolanaSigner::parse(SYNTHETIC_KEYPAIR).unwrap());
     let credentials: Arc<dyn BrokerCredentialProvider> = Arc::new(FixtureCredentials {
@@ -136,6 +160,7 @@ fn slippage_runtime(directory: &tempfile::TempDir) -> SlippageRuntimeFixture {
         response_overrides: Mutex::new(BTreeMap::new()),
         token_metadata: Mutex::new(json!([])),
         token_requests: AtomicUsize::new(0),
+        expiry_ttl_seconds: AtomicUsize::new(0),
     });
     let api_transport: Arc<dyn gofin_jupiter::JupiterApi> = api.clone();
     let applications = gofin_broker::build_applications_with_network_transports(
@@ -166,6 +191,8 @@ fn slippage_runtime(directory: &tempfile::TempDir) -> SlippageRuntimeFixture {
             adapters: applications.adapters,
             authorizer: Arc::new(RehearsalAuthorizer {
                 calls: approval_calls.clone(),
+                refresh_after_approval: refresh.then(|| api.clone()),
+                reject_refreshed_quote: reject,
             }),
             valuator: applications.valuator,
             bridge: applications.bridge,
@@ -236,7 +263,7 @@ case .failure(let failure):
     }
     *api.token_metadata.lock().unwrap() =
         json!([{ "id": ore_mint, "symbol": "ORE", "decimals": 11 }]);
-    for (cap, displayed) in [(0, "0 SOL"), (5_000_000, "0.005 SOL")] {
+    for cap in [0, 5_000_000] {
         let response = runtime
             .handle(BrokerRequest::Preview {
                 operation: "jupiter.swap".into(),
@@ -304,11 +331,13 @@ case .failure(let failure):
             String::from_utf8_lossy(&output.stderr)
         );
         let reason = String::from_utf8(output.stdout).unwrap();
-        assert!(reason.contains(displayed), "{reason}");
         assert!(reason.contains("0.02 SOL"), "{reason}");
         assert!(reason.contains("for at least 1.99 ORE"), "{reason}");
         assert!(reason.contains("solana-rehearsal (Solana)"), "{reason}");
-        assert!(reason.contains("fees ≤0.00001 SOL"), "{reason}");
+        assert!(
+            !reason.to_lowercase().contains("fee") && !reason.to_lowercase().contains("funding"),
+            "{reason}"
+        );
     }
     assert_eq!(approvals.load(Ordering::SeqCst), 0);
     assert!(rpc.0.lock().unwrap().transactions.is_empty());
@@ -405,7 +434,7 @@ async fn unfunded_jupiter_quote_returns_pricing_and_blocker_then_fresh_funded_or
     assert_eq!(
         api.paths.lock().unwrap().len(),
         4,
-        "each read and execution fetches a fresh order"
+        "reads and execution fetch orders; dispatch reuses the approved order"
     );
 }
 
@@ -474,7 +503,11 @@ async fn trusted_meta_order_with_rtse_and_opaque_instruction_settles_once() {
 
     {
         let paths = api.paths.lock().unwrap();
-        assert_eq!(paths.len(), 1, "one provider RTSE order only");
+        assert_eq!(
+            paths.len(),
+            1,
+            "the approved fresh RTSE order is reused at dispatch"
+        );
         for path in paths.iter() {
             assert!(path.contains(&format!("amount={input_atoms}&taker={wallet}")));
             assert!(path.contains(&format!("inputMint={SWAP_INPUT_MINT}")));
@@ -544,10 +577,11 @@ async fn trusted_meta_order_with_rtse_and_opaque_instruction_settles_once() {
 
     // The same operation identity is idempotent: no second quote, approval,
     // or dispatch is allowed after the broker has persisted settlement.
+    let quote_count = api.paths.lock().unwrap().len();
     let duplicate = runtime.handle(request).await;
     assert!(duplicate.ok, "duplicate response: {:?}", duplicate.error);
     assert_eq!(duplicate.result.unwrap()["id"], operation_id);
-    assert_eq!(api.paths.lock().unwrap().len(), 1);
+    assert_eq!(api.paths.lock().unwrap().len(), quote_count);
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
 }
@@ -607,3 +641,96 @@ async fn order_metadata_outside_financial_limits_is_refused_before_approval_or_d
         assert!(rpc.0.lock().unwrap().transactions.is_empty(), "{field}");
     }
 }
+
+#[tokio::test]
+async fn expired_jupiter_quote_refreshes_under_original_native_approval() {
+    let _fixture = FIXTURE_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, rpc, api, approvals, _) = slippage_runtime_with_refresh(&directory, true, false);
+    api.expiry_ttl_seconds.store(2, Ordering::SeqCst);
+    let input_atoms = 20_000_000u64;
+    let expected = swap_output_amount(input_atoms, SWAP_INPUT_MINT, SWAP_OUTPUT_MINT).unwrap();
+    let request = BrokerRequest::Execute {
+        request: gofin_domain::OperationRequest {
+            request_id: "synthetic-expiring-jupiter-order".into(),
+            operation: "jupiter.swap".into(),
+            run_id: None,
+            input: json!({"wallet":"solana-rehearsal","network":"solana","cluster":"mainnet-beta","input_mint":"native","output_mint":SWAP_OUTPUT_MINT,"amount_atoms":input_atoms.to_string(),"minimum_output_atoms":(expected*9950/10000).to_string(),"maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),
+        },
+    };
+    let result = refresh_cli::execute(&runtime, request.clone(), directory.path()).await;
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        api.paths.lock().unwrap().len(),
+        2,
+        "expired order must be refreshed"
+    );
+    assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
+    assert_eq!(result["outcome"]["result"], "executed");
+    let duplicate = refresh_cli::execute(&runtime, request, directory.path()).await;
+    assert_eq!(duplicate["id"], result["id"]);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
+    save_expiry_evidence("accepted", approvals.load(Ordering::SeqCst), &rpc);
+}
+
+#[tokio::test]
+async fn expired_jupiter_quote_breaching_floor_never_dispatches() {
+    let _fixture = FIXTURE_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, rpc, api, approvals, _) = slippage_runtime_with_refresh(&directory, true, true);
+    api.expiry_ttl_seconds.store(2, Ordering::SeqCst);
+    let input_atoms = 20_000_000u64;
+    let expected = swap_output_amount(input_atoms, SWAP_INPUT_MINT, SWAP_OUTPUT_MINT).unwrap();
+    let request = BrokerRequest::Execute {
+        request: gofin_domain::OperationRequest {
+            request_id: "synthetic-expiring-jupiter-order-rejected".into(),
+            operation: "jupiter.swap".into(),
+            run_id: None,
+            input: json!({"wallet":"solana-rehearsal","network":"solana","cluster":"mainnet-beta","input_mint":"native","output_mint":SWAP_OUTPUT_MINT,"amount_atoms":input_atoms.to_string(),"minimum_output_atoms":(expected*9950/10000).to_string(),"maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),
+        },
+    };
+    let result = refresh_cli::execute(&runtime, request.clone(), directory.path()).await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert!(result["submission"].is_null());
+    assert_eq!(result["outcome"]["dispatch"], "not_dispatched");
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        api.paths.lock().unwrap().len(),
+        2,
+        "expired order must be refreshed"
+    );
+    assert_eq!(rpc.0.lock().unwrap().transactions.len(), 0);
+    let duplicate = refresh_cli::execute(&runtime, request, directory.path()).await;
+    assert_eq!(duplicate["id"], result["id"]);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(rpc.0.lock().unwrap().transactions.len(), 0);
+    save_expiry_evidence("rejected", approvals.load(Ordering::SeqCst), &rpc);
+}
+
+fn save_expiry_evidence(case: &str, approvals: usize, rpc: &FixtureRpc) {
+    let Some(path) = std::env::var_os("GOFIN_OUTCOME_EVIDENCE") else {
+        return;
+    };
+    let submissions = rpc
+        .0
+        .lock()
+        .unwrap()
+        .rpc_method_counts
+        .get("sendTransaction")
+        .copied()
+        .unwrap_or(0);
+    let path = format!("{}.{}", std::path::PathBuf::from(path).display(), case);
+    std::fs::write(
+        path,
+        serde_json::to_vec(
+            &json!({"approval_count":approvals,"external_submission_count":submissions}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[path = "refresh_cli.rs"]
+mod refresh_cli;

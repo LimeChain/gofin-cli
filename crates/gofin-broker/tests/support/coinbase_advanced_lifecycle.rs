@@ -479,4 +479,9 @@ async fn positive_coinbase_advanced_funding_trading_withdrawal_via_cli() {
     assert_eq!(venue.ledger.lock().unwrap().usdc, 0);
     assert_eq!(venue.ledger.lock().unwrap().writes, 6);
     assert_eq!(approval.0.load(Ordering::SeqCst), 7);
+    assert_eq!(done["outcome"]["phase"], "done", "{done}");
+    if let Ok(path) = std::env::var("GOFIN_EXECUTION_EVIDENCE") {
+        let evidence = json!({"scenario":"coinbase-advanced","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":venue.ledger.lock().unwrap().writes+rpc.submissions.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
 }

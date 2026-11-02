@@ -53,28 +53,30 @@ fn native_perps_request_reviews_fit() {
             p.binding["trigger_above_threshold"] = json!(true);
         }
         let reason = native_approval::assert_prepared_renders(&p);
-        for term in [
-            "SOL",
-            "Long",
-            "Size USD 100",
-            "USD fees ≤total 0.5",
-            "Funding≤0.00001 SOL",
-        ] {
+        for term in ["SOL", "Long", "Size USD 100"] {
             assert!(reason.contains(term), "{op} omitted {term}: {reason}");
         }
+        assert!(
+            !reason.to_lowercase().contains("fee") && !reason.contains("Funding≤"),
+            "{op}: {reason}"
+        );
+        let bound = gofin_domain::native_authorization_binding(&p);
+        assert_eq!(
+            bound["execution"]["maximum_protocol_fee_usd_atoms"],
+            "500000"
+        );
+        assert_eq!(
+            bound["execution"]["maximum_account_funding_lamports"],
+            "10000"
+        );
         if op == "jupiter.perps.limit.cancel" {
             assert!(reason.contains("Req 111111…1111"));
         }
         if op == "jupiter.perps.increase_market" {
-            for term in [
-                "1 USDC",
-                "pos+borrow 0.09",
-                "swap 0.01",
-                "Token fee≤0.5 USDC",
-                "Collateral≥0.9 USDC",
-            ] {
+            for term in ["1 USDC", "Collateral≥0.9 USDC"] {
                 assert!(reason.contains(term), "{op} omitted {term}: {reason}");
             }
+            assert_eq!(bound["execution"]["maximum_protocol_fee_atoms"], "500000");
         }
         if op.contains("create") {
             assert!(

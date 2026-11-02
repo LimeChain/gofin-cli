@@ -420,7 +420,7 @@ async fn permanent_portfolio_sell_buy_transfer_arbitrum_receipt_and_restart() {
     assert_eq!(v.posts.load(Ordering::SeqCst), 5);
 }
 #[tokio::test]
-async fn denied_and_finite_policy_block_spot_before_submission() {
+async fn denied_approval_blocks_spot_but_retired_limit_does_not() {
     let v = Arc::new(Venue::new());
     let a = adapter(v.clone(), Arc::new(Receipt(AtomicBool::new(false))));
     let auth = Arc::new(Approval {
@@ -434,8 +434,8 @@ async fn denied_and_finite_policy_block_spot_before_submission() {
     auth.deny.store(false, Ordering::SeqCst);
     let e = engine(Store::in_memory().unwrap(), a, auth, "1000000");
     let limited = e.execute(spot("limited", "APT")).await.unwrap();
-    assert_ne!(limited.status, Status::Completed);
-    assert_eq!(v.posts.load(Ordering::SeqCst), 0);
+    assert_eq!(limited.status, Status::Completed);
+    assert_eq!(v.posts.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
 async fn missing_or_wrong_fee_evidence_keeps_spot_unresolved_without_replay() {
@@ -557,4 +557,46 @@ async fn multifill_rounded_commissions_are_reserved_and_proved_exactly() {
     assert_eq!(settled.status, Status::Completed, "{settled:?}");
     assert_eq!(v.free("sub", "USDC"), "19.97999998");
     assert_eq!(v.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn withdrawal_email_confirmation_is_actionable_and_failure_waits_for_refund() {
+    let venue = Arc::new(Venue::new());
+    venue
+        .balances
+        .lock()
+        .unwrap()
+        .insert(("main".into(), "ETH".into()), "1".into());
+    venue.lost.store(true, Ordering::SeqCst);
+    let receipt = Arc::new(Receipt(AtomicBool::new(false)));
+    let auth = Arc::new(Approval {
+        count: AtomicUsize::new(0),
+        deny: AtomicBool::new(false),
+    });
+    let adapter = adapter(venue.clone(), receipt.clone());
+    let engine = engine(Store::in_memory().unwrap(), adapter, auth.clone(), "0");
+    let request = OperationRequest {
+        request_id: "email-confirm".into(),
+        operation: "binance.withdraw".into(),
+        run_id: None,
+        input: json!({"requestId":"email-confirm","account":"main","destination":"wallet","coin":"ETH","amount":"0.00999","network":"ARBITRUM","walletType":"SPOT","maxFee":"0.0001","minReceiveAmount":"0.00989"}),
+    };
+    let original = engine.execute(request).await.unwrap();
+    assert_eq!(original.status, Status::Pending, "{original:?}");
+    venue.withdrawal.lock().unwrap()[0]["status"] = json!(0);
+    let waiting = engine.status(&original.id, true).await.unwrap();
+    let view = engine.operation_view(&waiting).unwrap();
+    assert_eq!(view["outcome"]["phase"], "needs_you");
+    assert_eq!(view["outcome"]["attention"]["venue"], "Binance");
+    venue.withdrawal.lock().unwrap()[0]["status"] = json!(1);
+    let failed = engine.status(&original.id, true).await.unwrap();
+    assert_eq!(failed.status, Status::Failed);
+    assert_eq!(
+        engine.operation_view(&failed).unwrap()["outcome"]["transfer"],
+        "in_transit"
+    );
+    // The initial observation already established a completed source debit.
+    // A later failure without a correlated refund cannot undo that evidence.
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(auth.count.load(Ordering::SeqCst), 1);
 }

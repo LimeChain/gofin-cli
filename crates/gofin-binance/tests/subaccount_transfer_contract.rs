@@ -535,7 +535,7 @@ async fn sub_to_master_response_loss_without_receipt_stays_unknown_after_restart
 }
 
 #[tokio::test]
-async fn unresolved_sub_to_master_keeps_both_resources_reserved_against_a_new_request_identity() {
+async fn unresolved_sub_to_master_does_not_block_an_independent_request() {
     let transport = Arc::new(TransferTransport::new(PostResult::LoseResponse));
     let adapter = Arc::new(adapter(transport.clone()));
     let engine = gofin_engine::Engine::new(
@@ -561,10 +561,11 @@ async fn unresolved_sub_to_master_keeps_both_resources_reserved_against_a_new_re
         input: input("child", "child", "master", "sub-uncertain-replacement"),
         run_id: None,
     };
-    let rejected = engine.execute(replacement).await.unwrap();
-    assert_eq!(rejected.status, gofin_domain::Status::Failed);
-    assert_eq!(rejected.error.unwrap().code, "RESOURCE_RESERVED");
-    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+    let independent = engine.execute(replacement).await.unwrap();
+    assert_eq!(independent.status, gofin_domain::Status::Unknown);
+    assert_ne!(independent.id, first.id);
+    assert!(independent.submission.is_some());
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

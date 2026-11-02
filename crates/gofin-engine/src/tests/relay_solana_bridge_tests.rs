@@ -188,11 +188,22 @@ async fn verified_relay_solana_payout_passes_engine_settlement_identity() {
             .code,
         "BRIDGE_SETTLEMENT_INVALID"
     );
-    let settled = engine
-        .commit_bridge_external_settlement(settlement)
+    // This legacy fixture has no source step or saved quote identity. Even a
+    // valid destination payout cannot be attributed to this transit record.
+    assert!(
+        engine
+            .commit_bridge_external_settlement(settlement)
+            .is_err()
+    );
+    let saved = engine
+        .store
+        .lock()
+        .unwrap()
+        .bridge_transfer(&transfer_id)
+        .unwrap()
         .unwrap();
-    assert_eq!(settled.state, gofin_domain::BridgeTransferState::Completed);
-    assert!(settled.transit.is_none());
+    assert_eq!(saved.state, gofin_domain::BridgeTransferState::InTransit);
+    assert!(saved.transit.is_some());
 }
 
 #[test]
