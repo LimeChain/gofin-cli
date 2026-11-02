@@ -485,6 +485,7 @@ pub struct HttpRpc {
     write_client: reqwest::Client,
     verified: Mutex<BTreeSet<String>>,
     read_cooldowns: Mutex<BTreeMap<String, Instant>>,
+    read_permits: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
     write_identity_timeout: Duration,
     selection: Mutex<SelectionState>,
 }
@@ -510,6 +511,7 @@ const RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 // HTTP Retry-After header, so use the same conservative fallback as HTTP 429.
 const RPC_JSON_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_READS_PER_ENDPOINT: usize = 8;
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 const MAX_REVERT_DIAGNOSTIC_BYTES: usize = 4096;
@@ -770,6 +772,15 @@ impl HttpRpc {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(transport_error)?;
+        let read_permits = urls
+            .iter()
+            .map(|url| {
+                (
+                    url.clone(),
+                    Arc::new(tokio::sync::Semaphore::new(MAX_READS_PER_ENDPOINT)),
+                )
+            })
+            .collect();
         Ok(Self {
             urls,
             expected_chain_id,
@@ -777,6 +788,7 @@ impl HttpRpc {
             write_client,
             verified: Mutex::new(BTreeSet::new()),
             read_cooldowns: Mutex::new(BTreeMap::new()),
+            read_permits: Mutex::new(read_permits),
             write_identity_timeout: RPC_WRITE_IDENTITY_TIMEOUT,
             selection: Mutex::new(SelectionState::default()),
         })
@@ -826,6 +838,55 @@ impl HttpRpc {
         params: Value,
         historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
+        // Limit physical reads, including identity checks and retry attempts. A
+        // queued read must recheck cooldown after it acquires its permit.
+        let _permit = if method != "eth_sendRawTransaction" {
+            let semaphore = self
+                .read_permits
+                .lock()
+                .map_err(|_| RpcAttemptFailure {
+                    error: error(
+                        "RPC_UNAVAILABLE",
+                        "rpc",
+                        "RPC read capacity is unavailable.",
+                    ),
+                    retryable: false,
+                })?
+                .entry(url.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(MAX_READS_PER_ENDPOINT)))
+                .clone();
+            let permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| RpcAttemptFailure {
+                    error: error(
+                        "RPC_UNAVAILABLE",
+                        "rpc",
+                        "RPC read capacity is unavailable.",
+                    ),
+                    retryable: false,
+                })?;
+            if let Some(remaining) =
+                self.read_cooldown_remaining(url)
+                    .map_err(|error| RpcAttemptFailure {
+                        error,
+                        retryable: false,
+                    })?
+            {
+                return Err(RpcAttemptFailure {
+                    error: error(
+                        "RPC_RATE_LIMITED",
+                        "rpc",
+                        "RPC endpoint is temporarily cooling down.",
+                    )
+                    .with_details(json!({"retry_after_ms": remaining.as_millis()})),
+                    retryable: true,
+                });
+            }
+            Some(permit)
+        } else {
+            None
+        };
         let client = if method == "eth_sendRawTransaction" {
             &self.write_client
         } else {
@@ -854,9 +915,8 @@ impl HttpRpc {
                         error,
                         retryable: false,
                     })?;
-                if let Some(delay) = retry_after {
-                    details["retry_after_ms"] = json!(delay.as_nanos().div_ceil(1_000_000));
-                }
+                let delay = retry_after.unwrap_or(RPC_RATE_LIMIT_COOLDOWN);
+                details["retry_after_ms"] = json!(delay.as_nanos().div_ceil(1_000_000));
             }
             return Err(RpcAttemptFailure {
                 retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
@@ -3939,6 +3999,7 @@ mod http_rpc_tests {
             write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
+            read_permits: rpc.read_permits,
             write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
@@ -4006,6 +4067,7 @@ mod http_rpc_tests {
             write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
+            read_permits: rpc.read_permits,
             write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
@@ -4046,14 +4108,12 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
-    async fn rate_limited_read_retries_then_fails_over_to_backup() {
-        // Keep retry coverage deterministic: B waits until A finishes its script.
+    async fn rate_limited_read_fails_over_without_retrying_during_cooldown() {
+        // B waits until A has observed the rate limit.
         let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mut rpc, primary) = fixture_rpc_with_gate(
             vec![
                 FixtureResponse::Json(json!("0x1")),
-                FixtureResponse::Http(429),
-                FixtureResponse::Http(429),
                 FixtureResponse::Http(429),
             ],
             None,
@@ -4089,12 +4149,7 @@ mod http_rpc_tests {
         .expect("both RPC fixtures must finish their expected requests");
         assert_eq!(
             primary.join().unwrap(),
-            vec![
-                "eth_chainId",
-                "eth_getBalance",
-                "eth_getBalance",
-                "eth_getBalance"
-            ]
+            vec!["eth_chainId", "eth_getBalance"]
         );
         assert_eq!(
             backup.join().unwrap(),

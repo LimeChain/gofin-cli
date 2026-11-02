@@ -636,14 +636,9 @@ async fn retry_after_fails_over_skips_primary_and_allows_return_after_expiry() {
 }
 
 #[tokio::test]
-async fn missing_or_invalid_retry_after_retains_default_cooldown_and_retries() {
+async fn missing_or_invalid_retry_after_retains_default_cooldown_without_retry() {
     for value in [None, Some("PRIVATE_INVALID_VALUE")] {
-        let primary = Server::new(vec![
-            Reply::result("0x1"),
-            Reply::rate_limit(value),
-            Reply::rate_limit(value),
-            Reply::rate_limit(value),
-        ]);
+        let primary = Server::new(vec![Reply::result("0x1"), Reply::rate_limit(value)]);
         let rpc = primary.rpc();
         let error = rpc
             .request("eth_getBalance", balance_params())
@@ -664,7 +659,7 @@ async fn missing_or_invalid_retry_after_retains_default_cooldown_and_retries() {
             .as_u64()
             .unwrap();
         assert!((29_000..=30_000).contains(&remaining));
-        assert_eq!(primary.requests().len(), 4);
+        assert_eq!(primary.requests().len(), 2);
     }
 }
 
