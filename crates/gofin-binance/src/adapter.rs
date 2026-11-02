@@ -5208,6 +5208,9 @@ impl BinanceProfile {
                 "Funds moved and the original withdrawal was reconciled, but the verified net payout was below its approved minimum; do not retry or treat this as a no-effects failure."
             );
         }
+        if received_atoms >= minimum {
+            evidence["outcome_transfer"] = json!("available");
+        }
         let verified = make_verified(submission.clone(), effects, evidence.clone())?;
         if received_atoms < minimum {
             return Ok(Reconciliation {

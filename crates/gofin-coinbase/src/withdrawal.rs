@@ -666,7 +666,13 @@ impl CoinbaseProfile {
                 evidence_version: 1,
                 submission: submission.clone(),
                 effects: Vec::new(),
-                evidence: json!({"nativeRejection":receipt,"httpStatus":http}),
+                evidence: json!({
+                    "nativeRejection":receipt,"httpStatus":http,
+                    "outcome_dispatch":"rejected","outcome_replay_safe":true,
+                    "definitive_nonexecution":true,
+                    "source":"coinbase_captured_send_rejection",
+                    "submission_reference":submission.reference
+                }),
                 observed_at: gofin_domain::now(),
                 proof_digest: String::new(),
             };
@@ -996,7 +1002,7 @@ impl CoinbaseProfile {
                     treatment: CostTreatment::VenueCalculatedAdditionalDebit,
                 },
             ],
-            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence}),
+            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence,"outcome_transfer":"available"}),
             observed_at: gofin_domain::now(),
             proof_digest: String::new(),
         };

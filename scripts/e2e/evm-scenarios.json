@@ -620,7 +620,7 @@
     "id": "sushi-v3",
     "group": "evm",
     "environment": "anvil",
-    "description": "sushi v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "description": "Four receipt-funded Sushi v3 swaps through CLI on an owned Arbitrum fork, with restart after the second swap and existing deployed liquidity",
     "requires": [
       "anvil",
       "cargo"
@@ -652,7 +652,7 @@
     "id": "ramses-v3",
     "group": "evm",
     "environment": "anvil",
-    "description": "Ramses v3 roundtrip through CLI on owned Robinhood fork using existing deployed liquidity",
+    "description": "Four receipt-funded Ramses v3 swaps through CLI on an owned Robinhood fork, with restart after the second swap and existing deployed liquidity",
     "requires": [
       "anvil",
       "cargo"

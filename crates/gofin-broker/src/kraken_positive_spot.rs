@@ -329,3 +329,7 @@ fn positive_kraken_spot_lifecycle_via_public_cli() {
         let withdraw=json!({"requestId":"withdraw","account":"fixture-spot","asset":"USDC","key":"synthetic-ethereum","amount":"109.904","max_fee":"0.1","destination":"ethereum:1:0x1111111111111111111111111111111111111111"});let result=execute(&client,"kraken.withdraw-funds",withdraw).await;assert!(result["status"]=="pending"||result["status"]=="unknown","{result}");wire.ledger.lock().unwrap().receipt=Some(json!({"hash":format!("0x{}","aa".repeat(32)),"to":"0x1111111111111111111111111111111111111111","contract":usdc_fixture::TOKEN,"amount":"109.804","status":"0x1","chainId":1}));let id=result["id"].as_str().unwrap();let done=client.call(args(&["status",id,"--json"]),BrokerRequest::Status{id:id.into()},true).await;assert_eq!(done["status"],"completed","{done}");assert_eq!(wire.ledger.lock().unwrap().cash,0);assert_eq!(wire.ledger.lock().unwrap().writes,6);assert_eq!(approval.0.load(Ordering::SeqCst),7);
     })).unwrap().join().unwrap();
 }
+
+mod funding_v1_roundtrip {
+    include!("kraken_funding_v1_roundtrip.rs");
+}

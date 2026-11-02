@@ -1464,6 +1464,32 @@ async fn native_morpho_lifecycle_reconciles_lost_reply_after_restart_and_realize
     let rpc = Arc::new(Rpc::new());
     let approval = Arc::new(Approval::default());
     let mut client = Client::new(runtime(&path, rpc.clone(), approval.clone()), dir.path()).await;
+    let mut missing_allowance_input = vault_input("2");
+    missing_allowance_input["min_shares"] = json!("1.9999");
+    let missing_allowance = client
+        .execute(
+            "morpho.deposit",
+            missing_allowance_input,
+            "missing-allowance",
+            "",
+            "",
+            true,
+        )
+        .await;
+    assert_eq!(
+        missing_allowance["error"]["code"], "ALLOWANCE_INSUFFICIENT",
+        "{missing_allowance}"
+    );
+    let details = &missing_allowance["error"]["details"];
+    assert_eq!(details["spender"], BUNDLE);
+    assert_eq!(details["token"]["reference"], ASSET);
+    assert_eq!(details["token"]["decimals"], 6);
+    assert_eq!(details["required_allowance_atoms"], "2000000");
+    assert_eq!(details["recommended_allowance_atoms"], "2000000");
+    assert!(details["maximum_allowance_atoms"].is_null());
+    assert_eq!(details["current_allowance_atoms"], "0");
+    assert_eq!(rpc.dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
     let vaults = client.read("morpho.vaults", json!({"chain_id":1})).await;
     assert!(vaults.to_string().contains(VAULT), "{vaults}");
     let inspection = client

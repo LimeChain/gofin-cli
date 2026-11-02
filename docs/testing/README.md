@@ -31,6 +31,11 @@ explicitly identifies scenarios that remain unimplemented. An incomplete matrix
 cannot pass CI. `make test` runs the positive scenarios and the explicitly
 retained security-negative cases; it no longer runs every Rust unit test.
 
+For the current Kraken Funding API withdrawal/return flow, run
+`make test-e2e E2E_ARGS='--scenario kraken-funding-v1'`. This focused CLI
+rehearsal verifies included fees, exact ERC20 receipt, usable return credit and
+the standalone preparation-reuse contract; the legacy spot lifecycle remains separate.
+
 Each financial lifecycle must assert observable outcomes: exact balances and
 fees, settled receipts, position/debt/share changes, distinct durable submission
 identities, and release of order holds after cancellation as applicable. A
@@ -49,10 +54,10 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
 | Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
-| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each included router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
+| EVM AMMs | Seed liquidity or use a forked pool and verify bounded input/output and finalized balances; do not retest pool mathematics. Sushi/Ramses fork scenarios run four dependent A↔B swaps using verified proceeds, with restart after the second swap; API AMM fixtures retain their separate round trips. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
 | Morpho V2 | Ethereum and Base vault deposit, observe shares, partial withdrawal and redeem remainder. Verify actual assets/shares and receipts. |
-| Jupiter | Meta `/order`→`/execute` swaps in both directions; separate perpetual open/close and JLP mint/burn scenarios. |
+| Jupiter | Four dependent Meta `/order`→`/execute` swaps with only the first input funded and finalized intermediate balances verified; separate perpetual open/close and JLP mint/burn scenarios. |
 | Meteora | DLMM and DAMM v2 position open/add, swap both directions, collect fees, remove liquidity and close; verify token balances and closed position. |
 | Kamino | KLend supply/borrow/SPL transfer-and-return/repay/withdraw; separate lending-vault and liquidity-vault deposit/withdraw lifecycles. |
 | Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |

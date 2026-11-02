@@ -109,7 +109,7 @@ impl Engine {
             facts.attention = verified.attention;
             facts.duplicate_execution_excluded = true;
         }
-        if verified_hyperliquid_withdrawal_available(record) {
+        if verified_venue_withdrawal_available(record) {
             facts.transfer = Some(gofin_domain::outcome::TransferState::Available);
             facts.result = gofin_domain::outcome::OutcomeResult::Executed;
             facts.dispatch = gofin_domain::outcome::Dispatch::Dispatched;
@@ -134,6 +134,7 @@ impl Engine {
             facts.dispatch = gofin_domain::outcome::Dispatch::NotDispatched;
             facts.duplicate_execution_excluded = true;
         }
+        apply_kamino_non_dispatch_proof(record, &mut facts);
         let admission = self.current_admission_action(record)?;
         let approval_valid = admission.approval.as_ref().is_some_and(|audit| {
             let fresh = parse_time(&audit.expires_at).is_ok_and(|expiry| expiry > self.clock.now());
@@ -697,7 +698,7 @@ pub(super) fn outcome_facts(record: &OperationRecord) -> gofin_domain::outcome::
         } else {
             Reporting::Unavailable
         });
-    OutcomeFacts {
+    let mut facts = OutcomeFacts {
         dispatch,
         result,
         transfer,
@@ -714,7 +715,122 @@ pub(super) fn outcome_facts(record: &OperationRecord) -> gofin_domain::outcome::
             .and_then(Value::as_str)
             .map(str::to_owned),
         observed_at: record.updated_at.clone(),
+    };
+    apply_kamino_non_dispatch_proof(record, &mut facts);
+    facts
+}
+
+fn apply_kamino_non_dispatch_proof(
+    record: &OperationRecord,
+    facts: &mut gofin_domain::outcome::OutcomeFacts,
+) {
+    let is_kamino = matches!(
+        record.operation.as_str(),
+        "kamino.deposit"
+            | "kamino.withdraw"
+            | "kamino.lending.supply"
+            | "kamino.lending.borrow"
+            | "kamino.lending.repay"
+            | "kamino.lending.withdraw"
+    );
+    let evidence_claim = [
+        record.last_reconciliation_evidence.as_ref(),
+        record.effects.as_ref().map(|e| &e.evidence),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|e| {
+        e.get("source").and_then(Value::as_str) == Some("kamino_verified_pre_send_rejection")
+            || is_kamino && e.get("state").and_then(Value::as_str) == Some("not_dispatched")
+    });
+    let dispatch_claim = is_kamino
+        && record
+            .dispatch_evidence
+            .as_ref()
+            .is_some_and(|e| e.get("no_network_send").and_then(Value::as_bool) == Some(true));
+    if !evidence_claim && !dispatch_claim {
+        return;
     }
+    use gofin_domain::outcome::{Dispatch, OutcomeResult};
+    if verified_kamino_non_dispatch(record) {
+        facts.dispatch = Dispatch::Rejected;
+        facts.result = OutcomeResult::Failed;
+        facts.duplicate_execution_excluded = true;
+    } else {
+        // Neither unverified tags nor an older positive outcome observation may
+        // replace the original proof. Other Kamino settlement outcomes are untouched.
+        facts.dispatch = if record.submission.is_some() {
+            Dispatch::Dispatched
+        } else {
+            Dispatch::Uncertain
+        };
+        facts.duplicate_execution_excluded = false;
+    }
+}
+
+// Older Kamino records proved non-dispatch before emitting the standard outcome
+// tags. Reproject only the original empty proof and matching durable no-send
+// evidence; a missing receipt, generic failure, or changed digest proves nothing.
+fn verified_kamino_non_dispatch(record: &OperationRecord) -> bool {
+    if record.status != Status::Failed
+        || !matches!(
+            record.operation.as_str(),
+            "kamino.deposit"
+                | "kamino.withdraw"
+                | "kamino.lending.supply"
+                | "kamino.lending.borrow"
+                | "kamino.lending.repay"
+                | "kamino.lending.withdraw"
+        )
+    {
+        return false;
+    }
+    let (Some(submission), Some(verified), Some(dispatch), Some(preview)) = (
+        &record.submission,
+        &record.effects,
+        &record.dispatch_evidence,
+        &record.preview,
+    ) else {
+        return false;
+    };
+    let Some(hash) = submission
+        .data
+        .get("message_sha256")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Some(reason) = dispatch
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    submission.kind == "solana.transaction"
+        && hash.len() == 64
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && submission.reference == format!("solana:message:{hash}")
+        && preview.operation == record.operation
+        && preview
+            .binding
+            .get("message_sha256")
+            .and_then(Value::as_str)
+            == Some(hash)
+        && dispatch.get("no_network_send").and_then(Value::as_bool) == Some(true)
+        && dispatch.get("message_sha256").and_then(Value::as_str) == Some(hash)
+        && dispatch.get("chain_signature").is_none()
+        && verified.evidence_version == 1
+        && verified.submission == *submission
+        && verified.effects.is_empty()
+        && verified_effect_digest(verified).ok().as_deref() == Some(verified.proof_digest.as_str())
+        && verified.evidence.get("state").and_then(Value::as_str) == Some("not_dispatched")
+        && verified.evidence.get("reason_code").and_then(Value::as_str) == Some(reason)
+        && verified
+            .evidence
+            .get("financial_effects")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
 }
 
 fn verified_legacy_binance_whitelist_rejection(record: &OperationRecord) -> bool {
@@ -753,8 +869,12 @@ fn verified_legacy_binance_whitelist_rejection(record: &OperationRecord) -> bool
         && evidence.get("noEffects").and_then(Value::as_bool) == Some(true)
 }
 
-fn verified_hyperliquid_withdrawal_available(record: &OperationRecord) -> bool {
-    if record.operation != "hyperliquid.account.withdraw" || record.status != Status::Completed {
+fn verified_venue_withdrawal_available(record: &OperationRecord) -> bool {
+    if !matches!(
+        record.operation.as_str(),
+        "hyperliquid.account.withdraw" | "binance.withdraw" | "coinbase.withdraw"
+    ) || record.status != Status::Completed
+    {
         return false;
     }
     let (Some(submission), Some(verified), Some(preview)) =
@@ -762,7 +882,9 @@ fn verified_hyperliquid_withdrawal_available(record: &OperationRecord) -> bool {
     else {
         return false;
     };
-    if verified.submission != *submission
+    if preview.operation != record.operation
+        || verified.evidence_version != 1
+        || verified.submission != *submission
         || verified_effect_digest(verified).ok().as_deref() != Some(verified.proof_digest.as_str())
     {
         return false;
@@ -1121,6 +1243,173 @@ mod outcome_projection_tests {
         assert!(settlement_discrepancy(&both, &gain_and_loss, true));
     }
     #[test]
+    fn historical_kamino_non_dispatch_requires_original_empty_proof() {
+        let hash = "a".repeat(64);
+        let mut record: OperationRecord = serde_json::from_value(json!({
+            "id":"kamino-no-send", "request_id":"r", "fingerprint":"f", "fingerprint_version":1,
+            "operation":"kamino.lending.borrow", "input":{}, "status":"failed",
+            "created_at":"2026-11-01T00:00:00Z", "updated_at":"2026-11-01T00:00:00Z",
+            "preview":{"operation":"kamino.lending.borrow","input":{},"binding":{"message_sha256":hash},
+                "summary":"borrow","checks":[],"warnings":[],"observed_at":"2026-11-01T00:00:00Z",
+                "expires_at":"2026-11-01T00:01:00Z","operation_version":1,"intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":[]}},
+            "approval":null,
+            "submission":{"kind":"solana.transaction","reference":format!("solana:message:{hash}"),"data":{"message_sha256":hash,"chain_signature":"precomputed-wallet-signature","wallet_signature":"precomputed-wallet-signature"}},
+            "dispatch_evidence":{"no_network_send":true,"message_sha256":hash,"reason_code":"SOLANA_RPC_RATE_LIMITED"},
+            "effects":null, "last_reconciliation_evidence":null, "error":null, "run_id":null
+        })).unwrap();
+        let mut proof = VerifiedEffects {
+            evidence_version: 1,
+            submission: record.submission.clone().unwrap(),
+            effects: vec![],
+            evidence: json!({"state":"not_dispatched","reason_code":"SOLANA_RPC_RATE_LIMITED","reason":"no send","financial_effects":[]}),
+            observed_at: record.updated_at.clone(),
+            proof_digest: String::new(),
+        };
+        proof.proof_digest = verified_effect_digest(&proof).unwrap();
+        record.effects = Some(proof);
+        let facts = outcome_facts(&record);
+        assert_eq!(facts.dispatch, gofin_domain::outcome::Dispatch::Rejected);
+        assert!(facts.project(false, false).replay_safe);
+
+        // Persisted older outcome observations must not conceal the stronger
+        // original proof after upgrading; projection does not mutate or submit.
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(NoApproval),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        {
+            let mut store = engine.store.lock().unwrap();
+            store
+                .create_request(
+                    &record.id,
+                    &record.request_id,
+                    &record.fingerprint,
+                    &record.operation,
+                    None,
+                    "failed",
+                    &to_value(&record).unwrap(),
+                    &record.created_at,
+                )
+                .unwrap();
+            let mut old = outcome_facts(&record);
+            old.dispatch = gofin_domain::outcome::Dispatch::Dispatched;
+            old.duplicate_execution_excluded = false;
+            store
+                .append_outcome_observation(&record.id, &old, "adapter")
+                .unwrap();
+        }
+        let view = engine.operation_view(&record).unwrap();
+        assert_eq!(view["outcome"]["dispatch"], "rejected");
+        assert_eq!(view["outcome"]["replay_safe"], true);
+        assert_eq!(view["outcome"]["retry_approval"], "required");
+
+        // New records carry optimistic outcome tags as well as a proof. Neither
+        // those tags nor a stored positive observation can substitute for it.
+        let mut tagged = record.clone();
+        let proof = tagged.effects.as_mut().unwrap();
+        proof.evidence["outcome_dispatch"] = json!("rejected");
+        proof.evidence["outcome_replay_safe"] = json!(true);
+        proof.evidence["definitive_nonexecution"] = json!(true);
+        proof.evidence["source"] = json!("kamino_verified_pre_send_rejection");
+        proof.evidence["submission_reference"] = json!(proof.submission.reference);
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        tagged.last_reconciliation_evidence = Some(proof.evidence.clone());
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .append_outcome_observation(&record.id, &outcome_facts(&tagged), "adapter")
+            .unwrap();
+        assert_eq!(
+            engine.operation_view(&tagged).unwrap()["outcome"]["replay_safe"],
+            true
+        );
+        for (path, value) in [
+            ("/effects/proof_digest", json!("tampered")),
+            ("/effects", Value::Null),
+            ("/dispatch_evidence", Value::Null),
+            ("/preview", Value::Null),
+            ("/submission/reference", json!("other")),
+            ("/operation", json!("wallet.transfer")),
+        ] {
+            let mut changed = to_value(&tagged).unwrap();
+            *changed.pointer_mut(path).unwrap() = value;
+            let changed: OperationRecord = serde_json::from_value(changed).unwrap();
+            assert!(
+                !outcome_facts(&changed).project(false, false).replay_safe,
+                "tagged {path}"
+            );
+            let view = engine.operation_view(&changed).unwrap();
+            assert_eq!(view["outcome"]["dispatch"], "dispatched", "stored {path}");
+            assert_eq!(view["outcome"]["replay_safe"], false, "stored {path}");
+            assert_eq!(
+                view["outcome"]["next_action"]["code"], "wait_and_check",
+                "stored {path}"
+            );
+        }
+        let mut other_failure = tagged;
+        other_failure.dispatch_evidence = None;
+        other_failure.effects.as_mut().unwrap().evidence = json!({"state":"finalized_failure"});
+        let proof = other_failure.effects.as_mut().unwrap();
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        other_failure.last_reconciliation_evidence =
+            Some(json!({"source":"finalized_receipt","outcome_replay_safe":true}));
+        let other = outcome_facts(&other_failure);
+        assert_eq!(other.dispatch, gofin_domain::outcome::Dispatch::Dispatched);
+        assert!(other.project(false, false).replay_safe);
+
+        for (path, value) in [
+            ("/effects", Value::Null),
+            ("/dispatch_evidence", Value::Null),
+            ("/preview", Value::Null),
+            ("/status", json!("unknown")),
+            ("/operation", json!("wallet.transfer")),
+            ("/submission/kind", json!("other")),
+            ("/submission/reference", json!("solana:message:other")),
+            ("/dispatch_evidence/no_network_send", json!(false)),
+            ("/dispatch_evidence/message_sha256", json!("b".repeat(64))),
+            ("/dispatch_evidence/reason_code", json!("PREVIEW_EXPIRED")),
+            ("/preview/binding/message_sha256", json!("b".repeat(64))),
+            (
+                "/effects/evidence/state",
+                json!("expired_without_inclusion"),
+            ),
+            ("/effects/evidence/financial_effects", json!([{}])),
+            ("/effects/evidence_version", json!(0)),
+            (
+                "/effects/effects",
+                json!([{"kind":"cost","location":{"kind":"cash","resource":"wallet"},"amount":{"asset":{"network":"solana:mainnet-beta","reference":"native","decimals":9},"atoms":"1"},"category":"network_fee","treatment":"additional_debit"}]),
+            ),
+            (
+                "/effects/submission/reference",
+                json!("solana:message:other"),
+            ),
+        ] {
+            let mut changed = to_value(&record).unwrap();
+            *changed.pointer_mut(path).unwrap() = value;
+            let mut changed: OperationRecord = serde_json::from_value(changed).unwrap();
+            if let Some(proof) = changed.effects.as_mut() {
+                proof.proof_digest = verified_effect_digest(proof).unwrap();
+            }
+            assert!(
+                !outcome_facts(&changed).project(false, false).replay_safe,
+                "{path}"
+            );
+        }
+        let mut changed = record.clone();
+        changed.effects.as_mut().unwrap().proof_digest = "tampered".into();
+        assert!(!outcome_facts(&changed).project(false, false).replay_safe);
+        let mut changed = record.clone();
+        changed.dispatch_evidence.as_mut().unwrap()["chain_signature"] = json!("a recorded send");
+        assert!(!outcome_facts(&changed).project(false, false).replay_safe);
+        let mut changed = record;
+        changed.submission.as_mut().unwrap().data["chain_signature"] = json!("a recorded send");
+        assert!(!outcome_facts(&changed).project(false, false).replay_safe);
+    }
+    #[test]
     fn legacy_binance_whitelist_rejection_requires_exact_verified_evidence() {
         let mut record: OperationRecord = serde_json::from_value(json!({
             "id":"withdraw", "request_id":"r", "fingerprint":"f", "fingerprint_version":1,
@@ -1150,10 +1439,9 @@ mod outcome_projection_tests {
         record.effects.as_mut().unwrap().evidence["withdrawOrderId"] = json!("different");
         assert!(!outcome_facts(&record).project(false, false).replay_safe);
     }
-    #[test]
-    fn historical_hyperliquid_withdrawal_requires_correlated_verified_transfer() {
+    fn assert_historical_venue_withdrawal_projection(operation: &str) {
         let asset = json!({"network":"synthetic","reference":"USD","decimals":6});
-        let preview: PreparedOperation = serde_json::from_value(json!({"operation":"hyperliquid.account.withdraw","input":{},"binding":{},"summary":"withdraw","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","operation_version":1,"intent":{"debits":[],"locks":[],"maximum_costs":[],"expected":[{"kind":"transfer","from":"source","to":"destination","debit_asset":asset,"credit_asset":asset,"maximum_debit":"100","minimum_credit":"90"}]}})).unwrap();
+        let preview: PreparedOperation = serde_json::from_value(json!({"operation":operation,"input":{},"binding":{},"summary":"withdraw","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","operation_version":1,"intent":{"debits":[],"locks":[],"maximum_costs":[],"expected":[{"kind":"transfer","from":"source","to":"destination","debit_asset":asset,"credit_asset":asset,"maximum_debit":"100","minimum_credit":"90"}]}})).unwrap();
         let submission = Submission {
             kind: "synthetic".into(),
             reference: "original".into(),
@@ -1169,10 +1457,84 @@ mod outcome_projection_tests {
             proof_digest: String::new(),
         };
         proof.proof_digest = verified_effect_digest(&proof).unwrap();
-        let mut record: OperationRecord = serde_json::from_value(json!({"id":"withdraw","request_id":"r","fingerprint":"f","fingerprint_version":1,"operation":"hyperliquid.account.withdraw","input":{},"status":"completed","created_at":now(),"updated_at":now(),"preview":preview,"approval":null,"submission":submission,"effects":proof,"last_reconciliation_evidence":null,"error":null,"run_id":null})).unwrap();
-        assert!(verified_hyperliquid_withdrawal_available(&record));
+        let mut record: OperationRecord = serde_json::from_value(json!({"id":"withdraw","request_id":"r","fingerprint":"f","fingerprint_version":1,"operation":operation,"input":{},"status":"completed","created_at":now(),"updated_at":now(),"preview":preview,"approval":null,"submission":submission,"effects":proof,"last_reconciliation_evidence":null,"error":null,"run_id":null})).unwrap();
+        assert!(verified_venue_withdrawal_available(&record));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(NoApproval),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        {
+            let mut store = engine.store.lock().unwrap();
+            store
+                .create_request(
+                    &record.id,
+                    &record.request_id,
+                    &record.fingerprint,
+                    &record.operation,
+                    None,
+                    "completed",
+                    &to_value(&record).unwrap(),
+                    &record.created_at,
+                )
+                .unwrap();
+            let mut pending = outcome_facts(&record);
+            pending.result = gofin_domain::outcome::OutcomeResult::Pending;
+            pending.transfer = Some(gofin_domain::outcome::TransferState::SourcePending);
+            store
+                .append_outcome_observation(&record.id, &pending, "adapter")
+                .unwrap();
+            store
+                .append_outcome_observation(&record.id, &outcome_facts(&record), "adapter")
+                .unwrap();
+        }
+        let view = engine.operation_view(&record).unwrap();
+        assert_eq!(view["outcome"]["transfer"], "available");
+        assert_eq!(view["outcome"]["phase"], "done");
+        assert_eq!(view["outcome"]["replay_safe"], false);
+        for (path, value) in [
+            ("/effects/effects/0/to", json!("different-recipient")),
+            ("/effects/effects/0/credit/atoms", json!("89")),
+            (
+                "/effects/effects/0/credit/asset/reference",
+                json!("different-asset"),
+            ),
+            (
+                "/effects/submission/reference",
+                json!("different-submission"),
+            ),
+        ] {
+            let mut changed = to_value(&record).unwrap();
+            *changed.pointer_mut(path).unwrap() = value;
+            let mut changed: OperationRecord = serde_json::from_value(changed).unwrap();
+            let proof = changed.effects.as_mut().unwrap();
+            proof.proof_digest = verified_effect_digest(proof).unwrap();
+            assert!(
+                !verified_venue_withdrawal_available(&changed),
+                "{operation}: {path}"
+            );
+            assert_eq!(
+                engine.operation_view(&changed).unwrap()["outcome"]["transfer"],
+                "source_pending"
+            );
+        }
         record.effects.as_mut().unwrap().submission.reference = "different".into();
-        assert!(!verified_hyperliquid_withdrawal_available(&record));
+        assert!(!verified_venue_withdrawal_available(&record));
+        assert_eq!(
+            engine.operation_view(&record).unwrap()["outcome"]["transfer"],
+            "source_pending"
+        );
+    }
+    #[test]
+    fn historical_hyperliquid_withdrawal_requires_correlated_verified_transfer() {
+        assert_historical_venue_withdrawal_projection("hyperliquid.account.withdraw");
+        assert_historical_venue_withdrawal_projection("binance.withdraw");
+    }
+    #[test]
+    fn historical_coinbase_withdrawal_requires_correlated_verified_transfer() {
+        assert_historical_venue_withdrawal_projection("coinbase.withdraw");
     }
     #[test]
     fn expired_preparation_is_failed_and_legacy_expiry_remains_uncertain() {
