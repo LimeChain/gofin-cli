@@ -1813,6 +1813,40 @@ async fn collateral_requires_matching_event_and_inclusion_state() {
 }
 
 #[tokio::test]
+async fn wallet_approval_native_review_identifies_the_granting_wallet() {
+    for amount in ["0.002610331947374118", "0"] {
+        let a = adapter(Arc::new(Fixture::new()));
+        let mut request = input();
+        request["token"] = json!(lower_address(addr(100)));
+        request["spender"] = json!(lower_address(addr(300)));
+        request["amount"] = json!(amount);
+        let prepared = a.prepare("wallet.approve", &request).await.unwrap();
+        let review = gofin_domain::approval_review::approval_review(&prepared).unwrap();
+        let source = review.input.as_ref().unwrap().account.as_ref().unwrap();
+        assert_eq!(source.name, "synthetic");
+        assert_eq!(source.domain.as_deref(), Some("Ethereum"));
+        assert!(
+            prepared.intent.debits.is_empty(),
+            "An allowance is not a token debit"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            assert!(reason.contains("from synthetic (Ethereum)"), "{reason}");
+            assert!(
+                reason.contains(&format!("Spender: {}", lower_address(addr(300)))),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(&format!("Allowance: {amount} {}", lower_address(addr(100)))),
+                "{reason}"
+            );
+            assert!(!reason.to_lowercase().contains("fee"), "{reason}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn wallet_transfer_wrap_unwrap_and_approval_require_exact_original_effects() {
     for operation in [
         "wallet.transfer",

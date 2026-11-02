@@ -23,6 +23,14 @@ struct ApprovalPresentationTests {
             ["version":1, "kind":"financial_approval_review", "purpose":(review["action"] as? String == "execute-plan" ? "financial_plan" : "financial_write"), "execution_binding":[:], "review":review]
         }
         let asset: [String: Any] = ["name":"USDC", "identifier":["network":"ethereum:1", "reference":"native", "decimals":6]]
+        for amount in ["5", "0"] {
+            let approval: [String: Any] = ["version":2, "action":"approve", "service":"wallet", "input":["account":["name":"treasury", "domain":"Ethereum"]], "other_details":"Spender: 0xspender; Allowance: \(amount) USDC"]
+            guard case .success(let reason) = typedFinancialApprovalReason(envelope(approval)) else { fatalError("Wallet approval rejected") }
+            assert(reason.contains("from treasury (Ethereum)") && reason.contains("Spender: 0xspender") && reason.contains("Allowance: \(amount) USDC"), reason)
+            var missing = approval
+            missing["input"] = [:] as [String: Any]
+            guard case .failure(.invalid) = typedFinancialApprovalReason(envelope(missing)) else { fatalError("Approval without wallet accepted") }
+        }
         let leg: [String: Any] = ["amount":"1.25", "asset":asset, "account":["name":"wallet", "domain":"chain"]]
         let partialTransfer: [String: Any] = ["version":2, "action":"account-transfer", "service":"Example",
             "input":["asset":asset, "account":["name":"source"]],

@@ -633,6 +633,7 @@ func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, Fi
     if action == "swap" {
         guard has("input", "amount"), has("input", "asset"), has("output", "asset"), has("output", "amount") else { return .failure(.invalid) }
     }
+    if action == "approve" && !has("input", "account") { return .failure(.invalid) }
     if ["account-transfer", "bridge", "exchange-withdrawal", "exchange-deposit"].contains(action) {
         guard has("input", "account"), has("output", "account"),
               (has("input", "amount") && has("input", "asset") || has("output", "amount") && has("output", "asset")) else { return .failure(.invalid) }

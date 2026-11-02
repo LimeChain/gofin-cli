@@ -75,6 +75,47 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         .ok_or_else(|| GoFinError::validation("Approval review lacks its allowance amount."))?;
         let asset = serde_json::from_value::<crate::AssetId>(binding["token"].clone())
             .map_err(|_| GoFinError::validation("Approval review lacks its token."))?;
+        let chain = binding
+            .pointer("/transaction/chain_id")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0)
+            .ok_or_else(|| GoFinError::validation("Approval review lacks its bound network."))?;
+        let signer = binding
+            .pointer("/transaction/sender")
+            .and_then(|v| v.as_str())
+            .filter(|s| {
+                s.len() == 42
+                    && s.starts_with("0x")
+                    && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| GoFinError::validation("Approval review lacks its bound signer."))?;
+        let network = format!("ethereum:{chain}");
+        let expected_resource = format!("{network}:{}", signer.to_ascii_lowercase());
+        if asset.network != network
+            || binding
+                .get("resource")
+                .and_then(|v| v.as_str())
+                .is_none_or(|resource| !resource.eq_ignore_ascii_case(&expected_resource))
+            || (prepared.operation == "wallet.permit2.approve"
+                && binding
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .is_none_or(|owner| !owner.eq_ignore_ascii_case(signer)))
+        {
+            return Err(GoFinError::validation(
+                "Approval review signer, resource and network do not match.",
+            ));
+        }
+        review.input = Some(ApprovalLeg {
+            account: Some(ApprovalAccount {
+                name: alias
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(signer)
+                    .to_owned(),
+                domain: Some(super::display_domain(&network)),
+            }),
+            ..ApprovalLeg::default()
+        });
         let quantity = crate::Quantity::new(amount)?;
         details.push(format!(
             "Allowance: {} {}",
@@ -107,7 +148,7 @@ mod tests {
         let p = PreparedOperation {
             operation: "wallet.approve".into(),
             input: json!({"wallet":"treasury"}),
-            binding: json!({"spender":"0xspender", "units":"5000000", "token":{"network":"ethereum:1", "reference":"USDC", "decimals":6}}),
+            binding: json!({"spender":"0xspender", "units":"5000000", "token":{"network":"ethereum:1", "reference":"USDC", "decimals":6}, "resource":"ethereum:1:0x1111111111111111111111111111111111111111", "transaction":{"chain_id":1,"sender":"0x1111111111111111111111111111111111111111"}}),
             summary: String::new(),
             checks: vec![],
             warnings: vec![],
@@ -119,19 +160,51 @@ mod tests {
             action_deadline: None,
         };
         let review = approval_review(&p).unwrap();
+        let account = review.input.as_ref().unwrap().account.as_ref().unwrap();
+        assert_eq!(account.name, "treasury");
+        assert_eq!(account.domain.as_deref(), Some("Ethereum"));
         let details = review.other_details.unwrap();
         assert!(details.contains("Spender: 0xspender"));
         assert!(details.contains("Allowance: 5 USDC"));
-        let mut missing = p;
+        let mut zero = p.clone();
+        zero.binding["units"] = json!("0");
+        assert!(
+            approval_review(&zero)
+                .unwrap()
+                .other_details
+                .unwrap()
+                .contains("Allowance: 0 USDC")
+        );
+        let mut missing = p.clone();
         missing.binding["spender"] = json!(null);
         assert!(approval_review(&missing).is_err());
+        for field in ["resource", "transaction"] {
+            let mut missing = p.clone();
+            missing.binding[field] = json!(null);
+            assert!(approval_review(&missing).is_err(), "{field}");
+        }
+        let mut wrong = p.clone();
+        wrong.binding["resource"] = json!("ethereum:1:0x2222222222222222222222222222222222222222");
+        assert!(approval_review(&wrong).is_err());
+        let mut unknown_alias = p;
+        unknown_alias.input["wallet"] = json!(null);
+        assert_eq!(
+            approval_review(&unknown_alias)
+                .unwrap()
+                .input
+                .unwrap()
+                .account
+                .unwrap()
+                .name,
+            "0x1111111111111111111111111111111111111111"
+        );
     }
     #[test]
     fn permit2_uses_frozen_after_amount_and_expiration() {
         let p = PreparedOperation {
             operation: "wallet.permit2.approve".into(),
             input: json!({"wallet":"treasury", "amount":"999"}),
-            binding: json!({"spender":"0xspender", "token":{"network":"ethereum:1", "reference":"USDC", "decimals":6}, "after":{"amount":"5000000", "expiration":1700000000, "nonce":3}}),
+            binding: json!({"spender":"0xspender", "token":{"network":"ethereum:1", "reference":"USDC", "decimals":6}, "resource":"ethereum:1:0x1111111111111111111111111111111111111111", "owner":"0x1111111111111111111111111111111111111111", "transaction":{"chain_id":1,"sender":"0x1111111111111111111111111111111111111111"}, "after":{"amount":"5000000", "expiration":1700000000, "nonce":3}}),
             summary: String::new(),
             checks: vec![],
             warnings: vec![],
@@ -142,9 +215,45 @@ mod tests {
             operation_version: 1,
             action_deadline: None,
         };
-        let details = approval_review(&p).unwrap().other_details.unwrap();
+        let review = approval_review(&p).unwrap();
+        assert_eq!(
+            review
+                .input
+                .as_ref()
+                .unwrap()
+                .account
+                .as_ref()
+                .unwrap()
+                .name,
+            "treasury"
+        );
+        assert_eq!(
+            review
+                .input
+                .as_ref()
+                .unwrap()
+                .account
+                .as_ref()
+                .unwrap()
+                .domain
+                .as_deref(),
+            Some("Ethereum")
+        );
+        let details = review.other_details.unwrap();
         assert!(details.contains("Allowance: 5 USDC"));
         assert!(!details.contains("Expires"));
+        let mut zero = p.clone();
+        zero.binding["after"]["amount"] = json!("0");
+        assert!(
+            approval_review(&zero)
+                .unwrap()
+                .other_details
+                .unwrap()
+                .contains("Allowance: 0 USDC")
+        );
+        let mut wrong = p.clone();
+        wrong.binding["owner"] = json!("0x2222222222222222222222222222222222222222");
+        assert!(approval_review(&wrong).is_err());
         let mut missing = p;
         missing.binding["after"]["amount"] = json!(null);
         assert!(approval_review(&missing).is_err());

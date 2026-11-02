@@ -42,6 +42,17 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
             .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
     );
     let prepared = a.prepare("aave.borrow", &input).await.unwrap();
+    assert!(
+        prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .any(|cost| !cost.amount.atoms.is_zero())
+    );
+    assert_eq!(
+        gofin_domain::native_authorization_binding(&prepared)["financial_intent"]["maximum_costs"],
+        serde_json::to_value(&prepared.intent.maximum_costs).unwrap()
+    );
     #[cfg(target_os = "macos")]
     {
         let reason = native_approval::assert_prepared_renders(&prepared);
@@ -56,10 +67,10 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
             "Health ≥: 1.5",
             "Debt USD ≤: 100",
             "Debt/collateral bps ≤: 2000",
-            "Fee ≤:",
         ] {
             assert!(reason.contains(term), "missing {term}: {reason}");
         }
+        assert!(!reason.to_lowercase().contains("fee"), "{reason}");
     }
     a.validate_boundary_candidate(&scope.spec, &prepared)
         .unwrap();
