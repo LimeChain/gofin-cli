@@ -3017,15 +3017,14 @@ impl Engine {
             ));
         }
         let mut evidence = reconciliation.evidence.clone();
-        if let Some(verified) = &reconciliation.verified {
-            if record.submission.as_ref() != Some(&verified.submission)
+        if let Some(verified) = &reconciliation.verified
+            && (record.submission.as_ref() != Some(&verified.submission)
                 || verified.evidence_version == 0
-                || verified.proof_digest != verified_effect_digest(verified)?
-            {
-                return Err(reconciliation_error(
-                    "Observation does not match the original submission identity.",
-                ));
-            }
+                || verified.proof_digest != verified_effect_digest(verified)?)
+        {
+            return Err(reconciliation_error(
+                "Observation does not match the original submission identity.",
+            ));
         }
         if evidence.get("outcome_dispatch").and_then(Value::as_str) == Some("rejected") {
             let submission = record.submission.as_ref().ok_or_else(|| {
