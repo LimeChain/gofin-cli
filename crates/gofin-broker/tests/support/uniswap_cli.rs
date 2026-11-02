@@ -7,6 +7,9 @@ struct Client {
 }
 impl Client {
     async fn new(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path) -> Self {
+        Self::with_reporting_barrier(runtime, dir, None).await
+    }
+    async fn with_reporting_barrier(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path, barrier: Option<Arc<(AtomicBool, AtomicBool)>>) -> Self {
         use tokio::{
             io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
             net::UnixListener,
@@ -19,6 +22,7 @@ impl Client {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let runtime = handle.clone();
+                let barrier = barrier.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -36,18 +40,29 @@ impl Client {
                     let input: Value = serde_json::from_str(&line).unwrap();
                     let request: BrokerRequest =
                         serde_json::from_value(input["request"].clone()).unwrap();
-                    let response = gofin_protocol::progress::observe(
-                        reader.get_mut(),
-                        input["progress"].as_bool().unwrap_or(false),
-                        runtime.handle(request),
-                    )
-                    .await;
+                    let financial = matches!(request, BrokerRequest::Execute { .. }
+                        | BrokerRequest::ContinueOperation { .. } | BrokerRequest::ReauthorizeOperation { .. });
+                    let response = if financial {
+                        gofin_protocol::progress::observe_financial_request(
+                            reader.get_mut(), input["progress"].as_bool().unwrap_or(false), false,
+                            Box::pin(runtime.handle(request)),
+                        ).await
+                    } else {
+                        gofin_protocol::progress::observe(reader.get_mut(),
+                            input["progress"].as_bool().unwrap_or(false), runtime.handle(request)).await
+                    };
+                    if response.result.as_ref().is_some_and(|value| value["status"] == "completed")
+                        && let Some(barrier) = barrier {
+                        barrier.0.store(true, Ordering::SeqCst);
+                        while !barrier.1.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
-                    reader
+                    let _ = reader
                         .get_mut()
                         .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
+                        .await;
                 });
             }
         });

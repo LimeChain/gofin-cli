@@ -280,6 +280,20 @@ fn completed_noop_child_for_parent(
     })))
 }
 
+// The caller has correlated every observed terminal order with the immutable
+// owner, client identity, market, side and approved size.
+fn mark_replacement_terminal(
+    evidence: &mut Value,
+    replacement: bool,
+    pending: bool,
+    rejected_without_order: usize,
+    order_count: usize,
+) {
+    if replacement && !pending && rejected_without_order == 0 && order_count > 0 {
+        evidence["replacement_terminal_no_live_remainder"] = json!(true);
+    }
+}
+
 impl HyperliquidProfile {
     pub async fn reconcile_action(
         &self,
@@ -1174,6 +1188,16 @@ impl HyperliquidProfile {
             Status::Failed
         };
         let mut evidence = json!({"method":"owner-client-id-and-immutable-fill-receipts","orders":receipts,"fills":raw_fills,"dispatch_rejections":dispatch_rejections.clone(),"partial_outcome":if dispatch_rejections.is_empty(){Value::Null}else{json!({"kind":"mixed_batch","rejected_children":dispatch_rejections})}});
+        // Only owner/client-ID correlated terminal order observations prove
+        // that every replacement has no live remainder. A failed status or
+        // an absent order alone is not such evidence.
+        mark_replacement_terminal(
+            &mut evidence,
+            binding.replacement.is_some(),
+            pending,
+            dispatch_rejections.len(),
+            binding.orders.len(),
+        );
         if !discrepancies.is_empty() {
             evidence["outcome_attention"] = json!({"kind":"discrepancy","actual":discrepancies,"approved":"per-order native bounds"});
         }
@@ -1980,5 +2004,52 @@ mod nonce_invalidation_recovery_tests {
                 .unwrap()
                 .is_some()
         );
+    }
+}
+
+#[cfg(test)]
+mod replacement_terminal_tests {
+    use super::mark_replacement_terminal;
+    use gofin_domain::{Submission, VerifiedEffects, now, verified_effect_digest};
+    use serde_json::json;
+
+    #[test]
+    fn terminal_replacement_marker_is_digest_bound_and_requires_every_correlated_order() {
+        for (replacement, pending, uncorrelated_rejections, orders, expected) in [
+            (true, false, 0, 2, true),
+            (true, true, 0, 2, false),
+            (true, false, 1, 2, false),
+            (true, false, 0, 0, false),
+            (false, false, 0, 2, false),
+        ] {
+            let mut evidence = json!({"orders":[{"client_order_id":"synthetic"}]});
+            mark_replacement_terminal(
+                &mut evidence,
+                replacement,
+                pending,
+                uncorrelated_rejections,
+                orders,
+            );
+            assert_eq!(
+                evidence["replacement_terminal_no_live_remainder"] == true,
+                expected
+            );
+            let mut proof = VerifiedEffects {
+                evidence_version: 1,
+                submission: Submission {
+                    kind: "synthetic".into(),
+                    reference: "original".into(),
+                    data: json!({}),
+                },
+                effects: vec![],
+                evidence,
+                observed_at: now(),
+                proof_digest: String::new(),
+            };
+            proof.proof_digest = verified_effect_digest(&proof).unwrap();
+            let original_digest = proof.proof_digest.clone();
+            proof.evidence["replacement_terminal_no_live_remainder"] = json!(!expected);
+            assert_ne!(verified_effect_digest(&proof).unwrap(), original_digest);
+        }
     }
 }

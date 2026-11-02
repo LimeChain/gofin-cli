@@ -1,6 +1,16 @@
 //! Native fee admission for explicitly continued compound actions.
 use super::*;
 
+fn mark_unsubmitted_stage(record: &mut OperationRecord) {
+    let evidence = record
+        .last_reconciliation_evidence
+        .get_or_insert_with(|| json!({}));
+    if !evidence.is_object() {
+        *evidence = json!({"previous":evidence.clone()});
+    }
+    evidence["engine_predispatch_failure"] = json!(true);
+}
+
 pub(super) fn validate_parent_stage(
     adapter: &dyn Adapter,
     parent: &PreparedOperation,
@@ -30,32 +40,33 @@ pub(super) fn validate_stage_fee_caps(
     for stage in prior {
         let costs = match stage.status {
             Status::Completed | Status::Failed => {
-                let effects = stage.effects.as_ref().ok_or_else(|| {
-                    GoFinError::new(
-                        "STAGE_COST_EVIDENCE_MISSING",
-                        "preflight",
-                        "A previous stage has no verified cost evidence.",
-                        "Observe the original stage before continuing.",
-                    )
-                })?;
-                if effects
-                    .evidence
-                    .get("native_fee_observed")
-                    .and_then(Value::as_bool)
-                    == Some(false)
-                    && stage
-                        .preview
-                        .as_ref()
-                        .is_some_and(|p| !p.intent.maximum_costs.is_empty())
-                {
-                    return Err(GoFinError::new(
-                        "STAGE_COST_EVIDENCE_MISSING",
-                        "preflight",
-                        "A previous stage executed but its costs are not fully known.",
-                        "Observe the original stage before continuing.",
-                    ));
+                let unknown = stage.effects.as_ref().is_none_or(|effects| {
+                    effects
+                        .evidence
+                        .get("native_fee_observed")
+                        .and_then(Value::as_bool)
+                        == Some(false)
+                });
+                let mut actual = stage
+                    .effects
+                    .as_ref()
+                    .map(|effects| aggregate_costs(&effects.effects))
+                    .transpose()?
+                    .unwrap_or_default();
+                if unknown {
+                    let preview = stage.preview.as_ref().ok_or_else(|| {
+                        GoFinError::validation(
+                            "A previous stage lacks its approved native fee bounds.",
+                        )
+                    })?;
+                    for (key, maximum) in aggregate_cost_bounds(&preview.intent.maximum_costs)? {
+                        let amount = actual.entry(key).or_default();
+                        if *amount < maximum {
+                            *amount = maximum;
+                        }
+                    }
                 }
-                aggregate_costs(&effects.effects)?
+                actual
             }
             Status::Submitted | Status::Pending | Status::Unknown => {
                 let preview = stage.preview.as_ref().ok_or_else(|| {
@@ -133,7 +144,10 @@ impl Engine {
             .ok_or_else(|| internal("approval missing"))?;
         if audit.challenge_nonce != id
             || binding_hash(&gofin_domain::native_authorization_binding(
-                derived.preview.as_ref().unwrap(),
+                derived
+                    .preview
+                    .as_ref()
+                    .ok_or_else(|| internal("approved preview missing"))?,
             ))? != audit.binding_hash
         {
             return Err(internal("current approval binding mismatch"));
@@ -406,13 +420,21 @@ impl Engine {
             binding,
             summary: candidate.summary.clone(),
             nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: deadline.to_rfc3339(),
+            expires_at: deadline
+                .min(self.clock.now() + chrono::Duration::seconds(90))
+                .to_rfc3339(),
         };
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::AwaitingApproval,
         );
-        let audit = self.authorizer.authorize(&challenge).await?;
-        validate_approval(&audit, &challenge, self.clock.now())?;
+        let mut audit = self.authorizer.authorize(&challenge).await?;
+        let approved_now = self.clock.now();
+        validate_approval(&audit, &challenge, approved_now)?;
+        if adapter.is_compound_action(&candidate) {
+            promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+        } else {
+            promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+        }
         validate_financial_approval_source(&audit)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
         let mut updated = action.clone();
@@ -446,8 +468,8 @@ impl Engine {
                 &input_hash,
                 &challenge.nonce,
                 &authority,
-                &challenge.expires_at,
-                &challenge.expires_at,
+                &audit.expires_at,
+                &audit.expires_at,
                 &to_value(&action)?,
                 &to_value(&updated)?,
                 &result,
@@ -636,8 +658,6 @@ impl Engine {
             &request,
             &mut record,
             None,
-            None,
-            None,
             ExecutionRoute::Financial,
             Some(lease),
         ))
@@ -735,6 +755,18 @@ impl Engine {
                 .list_stage_attempts(id)
                 .map_err(map_store)?;
             for stage in &attempts {
+                if matches!(stage.state.as_str(), "not_dispatched" | "rejected")
+                    && let Some(operation_id) = stage.operation_id.as_deref()
+                    && self
+                        .load_record(operation_id)
+                        .is_ok_and(|r| r.submission.is_none())
+                {
+                    self.store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .release_orphaned_evm_nonce(lease, operation_id)
+                        .map_err(map_store)?;
+                }
                 if stage.state == "claimed" {
                     let (claim, _) = self
                         .store
@@ -777,6 +809,7 @@ impl Engine {
                         .and_then(|r| from_value::<OperationRecord>(r.record).ok());
                     if let Some(mut draft) = draft.clone().filter(|r| r.submission.is_none()) {
                         draft.status = Status::Failed;
+                        mark_unsubmitted_stage(&mut draft);
                         draft.updated_at = self.clock.now().to_rfc3339();
                         self.update_record(&draft)?;
                         let mut store = self
@@ -915,6 +948,7 @@ impl Engine {
                         draft.filter(|r| r.submission.is_none() && !r.status.terminal())
                     {
                         draft.status = Status::Failed;
+                        mark_unsubmitted_stage(&mut draft);
                         draft.error = Some(error.clone());
                         draft.updated_at = self.clock.now().to_rfc3339();
                         if self.update_record(&draft).is_ok()
@@ -1153,12 +1187,7 @@ impl Engine {
             }),
             approval: audit,
             authorizer: Some(self.authorizer.clone()),
-            boundary_authorization_id: None,
-            boundary_authorization_snapshot: None,
-            financial_plan_id: None,
-            financial_plan_snapshot: None,
             adapter: Some(adapter.clone()),
-            options: self.options.clone(),
             clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
@@ -1174,8 +1203,8 @@ impl Engine {
             .lock()
             .map_err(|_| internal("journal record lock poisoned"))?
             .clone();
-        drop(journal);
         if let Err(error) = result {
+            drop(journal);
             if child.submission.is_none() {
                 let _ = self
                     .store
@@ -1193,6 +1222,9 @@ impl Engine {
             } else {
                 Status::Rejected
             };
+            if child.submission.is_none() {
+                mark_unsubmitted_stage(&mut child);
+            }
             self.update_record(&child)?;
         } else if let Ok(submission) = result {
             if child.submission.as_ref() != Some(&submission) {
@@ -1203,6 +1235,13 @@ impl Engine {
                     "Observe the original stage; do not submit it again.",
                 ));
             }
+            journal.record_transport_acceptance(&submission)?;
+            child = journal
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .clone();
+            drop(journal);
             child.status = Status::Pending;
             self.update_record(&child)?;
             child = Box::pin(self.reconcile_serial(child.id.clone())).await?;
@@ -1338,12 +1377,7 @@ impl Engine {
             }),
             approval: audit,
             authorizer: Some(self.authorizer.clone()),
-            boundary_authorization_id: None,
-            boundary_authorization_snapshot: None,
-            financial_plan_id: None,
-            financial_plan_snapshot: None,
             adapter: Some(adapter.clone()),
-            options: self.options.clone(),
             clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
@@ -1359,19 +1393,27 @@ impl Engine {
             .lock()
             .map_err(|_| internal("journal record lock poisoned"))?
             .clone();
-        drop(journal);
         match result {
             Ok(submission) if child.submission.as_ref() == Some(&submission) => {
+                journal.record_transport_acceptance(&submission)?;
+                child = journal
+                    .record
+                    .lock()
+                    .map_err(|_| internal("journal record lock poisoned"))?
+                    .clone();
+                drop(journal);
                 child.status = Status::Pending;
                 self.update_record(&child)?;
                 child = Box::pin(self.reconcile_serial(child.id.clone())).await?;
             }
             Ok(_) => {
+                drop(journal);
                 return Err(GoFinError::validation(
                     "The stage response differs from its durable submission identity.",
                 ));
             }
             Err(error) => {
+                drop(journal);
                 if child.submission.is_none() {
                     let _ = self
                         .store
@@ -1386,8 +1428,11 @@ impl Engine {
                 child.status = if child.submission.is_some() {
                     Status::Unknown
                 } else {
-                    Status::Failed
+                    Status::Rejected
                 };
+                if child.submission.is_none() {
+                    mark_unsubmitted_stage(&mut child);
+                }
                 child.error = Some(error);
                 self.update_record(&child)?;
                 if child.submission.is_none()
@@ -1498,6 +1543,7 @@ impl Engine {
             let (result, transfer) = match (state, proof) {
                 ("completed", true) => (OutcomeResult::Executed, TransferState::Available),
                 ("refunded", true) => (OutcomeResult::Cancelled, TransferState::ReturnedToSource),
+                ("failed", _) => (OutcomeResult::Failed, TransferState::SourcePending),
                 ("in_transit" | "destination_pending" | "refund_pending", _) => {
                     (OutcomeResult::Pending, TransferState::InTransit)
                 }
@@ -1509,7 +1555,17 @@ impl Engine {
                 .and_then(Value::as_str)
                 .unwrap_or(&now)
                 .to_owned();
-            let mut attention = Attention::None;
+            let mut attention = if state == "needs_attention" {
+                Attention::ActionRequired {
+                    venue: "Bridge provider".into(),
+                    reason: "The original bridge needs attention.".into(),
+                    where_to_act:
+                        "Inspect the original bridge status and follow its recovery guidance."
+                            .into(),
+                }
+            } else {
+                Attention::None
+            };
             if result == OutcomeResult::Executed
                 && let (Some(approved), Some(actual)) = (
                     action.preview.as_ref().and_then(|p| {
@@ -1658,7 +1714,11 @@ impl Engine {
                 observed_at,
             };
             if matches!(result, OutcomeResult::Executed | OutcomeResult::Cancelled) {
-                action.status = Status::Completed;
+                action.status = if result == OutcomeResult::Cancelled {
+                    Status::Cancelled
+                } else {
+                    Status::Completed
+                };
                 action.last_reconciliation_evidence = Some(observation.clone());
                 action.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&action)?;
@@ -1854,6 +1914,11 @@ mod tests {
         }))
         .unwrap();
         pending.preview = Some(prepared(6, "A"));
+        assert!(validate_stage_fee_caps(&parent, &prepared(4, "A"), &[pending.clone()]).is_ok());
+        assert!(validate_stage_fee_caps(&parent, &prepared(5, "A"), &[pending.clone()]).is_err());
+        // Inclusion can be proven before the actual native fee is available.
+        // Reserve its approved maximum until the correlated fee is observed.
+        pending.status = Status::Completed;
         assert!(validate_stage_fee_caps(&parent, &prepared(4, "A"), &[pending.clone()]).is_ok());
         assert!(validate_stage_fee_caps(&parent, &prepared(5, "A"), &[pending]).is_err());
     }

@@ -1406,6 +1406,13 @@ fn render_outcome(value: &Value) -> Option<String> {
     let headline = match phase {
         "done" if outcome["result"] == "cancelled" => "Cancelled",
         "done" => "Executed",
+        _ if matches!(
+            outcome["dispatch"].as_str(),
+            Some("not_dispatched" | "rejected")
+        ) =>
+        {
+            "Not submitted"
+        }
         "failed" => "Failed",
         "needs_you" => "Needs your attention",
         "unconfirmed" => "Unconfirmed",
@@ -1413,6 +1420,22 @@ fn render_outcome(value: &Value) -> Option<String> {
         _ => "In progress",
     };
     let mut output = format!("{operation}: {headline}.\n");
+    if matches!(
+        outcome["dispatch"].as_str(),
+        Some("not_dispatched" | "rejected")
+    ) {
+        line(&mut output, 0, "Nothing was submitted.");
+        if let Some(reason) = value["error"]["message"].as_str() {
+            line(&mut output, 0, &safe_text(reason));
+        }
+        if outcome["replay_safe"] == true && outcome["retry_approval"] == "covered" {
+            line(
+                &mut output,
+                0,
+                "A fresh in-scope candidate can use the current approval.",
+            );
+        }
+    }
     if let Some(transfer) = outcome["transfer"].as_str() {
         let text = match transfer {
             "source_pending" => "Waiting for source confirmation or a verified refund.",
@@ -2881,6 +2904,24 @@ mod tests {
             bridge_provider_name(Some("cctp"), Some(42161)),
             Some("Circle CCTP V2")
         );
+    }
+
+    #[test]
+    fn rejected_candidate_reports_reason_and_only_proven_approval_reuse() {
+        let mut value = json!({"id":"original","operation":"swap.execute","status":"failed",
+            "error":{"message":"Fresh quote exceeds the approved fee cap."},
+            "outcome":{"version":1,"phase":"failed","dispatch":"rejected","result":"failed",
+                "replay_safe":true,"retry_approval":"covered","attention":{"kind":"none"},
+                "next_action":{"code":"continue","message":"Continue the original action."}}});
+        let output = render_human("status", &value, false);
+        assert!(output.contains("Nothing was submitted"));
+        assert!(output.contains("Fresh quote exceeds the approved fee cap"));
+        assert!(output.contains("current approval"));
+        assert!(!output.contains(": Failed"));
+        value["outcome"]["retry_approval"] = json!("required");
+        assert!(!render_human("status", &value, false).contains("current approval"));
+        value["outcome"]["dispatch"] = json!("uncertain");
+        assert!(!render_human("status", &value, false).contains("Nothing was submitted"));
     }
 
     #[test]

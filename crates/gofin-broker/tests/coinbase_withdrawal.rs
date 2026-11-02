@@ -513,13 +513,33 @@ async fn build_native_candidates(
         .prepare("coinbase.withdraw", &withdraw_input)
         .await
         .unwrap();
+    assert!(withdrawal.intent.maximum_costs.iter().any(|bound| {
+        bound.treatment == CostTreatment::VenueCalculatedAdditionalDebit
+            && bound.amount.asset.reference == "USDC"
+            && bound.amount.atoms.to_decimal(bound.amount.asset.decimals) == "0.1"
+    }));
+    assert_eq!(
+        gofin_domain::native_authorization_binding(&withdrawal)["financial_intent"],
+        serde_json::to_value(&withdrawal.intent).unwrap()
+    );
+    assert!(
+        gofin_domain::approval_review::approval_review(&withdrawal)
+            .unwrap()
+            .terms
+            .iter()
+            .any(|term| term.label == "Venue fee")
+    );
     venue.hbar_sold.store(false, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
     {
         native_approval::assert_prepared_renders(&sale);
         let reason = native_approval::assert_prepared_renders(&withdrawal);
         assert!(
-            reason.contains("not capped") || reason.contains("not a fee cap"),
+            !reason.to_lowercase().contains("fee") && !reason.contains("not capped"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("coinbase-dev") && reason.contains("evm-dev"),
             "{reason}"
         );
     }

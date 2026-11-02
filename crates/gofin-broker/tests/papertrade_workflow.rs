@@ -1714,7 +1714,17 @@ async fn run_named_step(
         "{operation}: {:?}",
         result.result
     );
-    result.result.unwrap()
+    let record = result.result.unwrap();
+    assert_eq!(
+        record["outcome"]["result"], "executed",
+        "{operation}: {record}"
+    );
+    assert_eq!(record["outcome"]["phase"], "done", "{operation}: {record}");
+    assert_eq!(
+        record["outcome"]["replay_safe"], false,
+        "{operation}: {record}"
+    );
+    record
 }
 
 fn make_runtime(
@@ -3373,8 +3383,9 @@ fn papertrade_adapter_previews_render_through_native_helper() {
 fn papertrade_cli_funded_liquidation_award_stake_claim_lifecycle() {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let dir = tempfile::tempdir().unwrap();
+        let approval=Arc::new(Approval(AtomicUsize::new(0)));
         let (broker, adapter, runtime) = make_runtime_with_movement_cap(
-            &dir.path().join("papertrade-combined.sqlite"), Arc::new(Approval(AtomicUsize::new(0))), "200000000");
+            &dir.path().join("papertrade-combined.sqlite"), approval.clone(), "200000000");
         broker.attach_development_configuration_authorizer(Arc::new(ConfigApproval)).unwrap();
         broker.engine.recover_interrupted().unwrap();
         let client = SocketClient::new_cli(broker, dir.path()).await;
@@ -3426,6 +3437,10 @@ fn papertrade_cli_funded_liquidation_award_stake_claim_lifecycle() {
         assert_eq!(claimed["effects"]["effects"][0]["delta"], "2000000000000000000");
         assert_eq!(*runtime.pending_reward.lock().unwrap(), 0);
         assert_eq!(*runtime.trading_cash.lock().unwrap(), Some(2_000_000_000_000_000_000));
+        if let Ok(path)=std::env::var("GOFIN_VENUE_EVIDENCE") {
+            let submissions=runtime.dispatches.load(Ordering::SeqCst)+runtime.funding_dispatches.load(Ordering::SeqCst)+runtime.registration_dispatches.load(Ordering::SeqCst);
+            std::fs::write(path,serde_json::to_vec(&json!({"scenario":"papertrade-liquidation-stake-claim","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":submissions,"registration_submissions":runtime.registration_dispatches.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+        }
     });
 }
 
@@ -3438,9 +3453,10 @@ fn papertrade_cli_positive_long_close() {
         .unwrap()
         .block_on(async {
             let dir = tempfile::tempdir().unwrap();
+            let approval=Arc::new(Approval(AtomicUsize::new(0)));
             let (broker, adapter, runtime) = make_runtime_with_movement_cap(
                 &dir.path().join("papertrade-positive-close.sqlite"),
-                Arc::new(Approval(AtomicUsize::new(0))),
+                approval.clone(),
                 "200000000",
             );
             broker.engine.recover_interrupted().unwrap();
@@ -3506,5 +3522,9 @@ fn papertrade_cli_positive_long_close() {
             )
             .await;
             assert!(runtime.positions.lock().unwrap().is_empty());
+            if let Ok(path)=std::env::var("GOFIN_VENUE_EVIDENCE") {
+                let submissions=runtime.dispatches.load(Ordering::SeqCst)+runtime.funding_dispatches.load(Ordering::SeqCst)+runtime.registration_dispatches.load(Ordering::SeqCst);
+                std::fs::write(path,serde_json::to_vec(&json!({"scenario":"papertrade-long-close","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":submissions,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+            }
         });
 }

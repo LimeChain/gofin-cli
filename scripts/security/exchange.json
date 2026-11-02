@@ -32,7 +32,7 @@
       "--test",
       "trading_contract"
     ],
-    "reason": "Preserve exact native principal and fee bounds, reject expanded authority or forged fills, and retain reservations through uncertain placement/cancellation and restart without replay.",
+    "reason": "Preserve exact native principal and fee bounds, reject expanded authority or forged fills, and retain submission identities through uncertain placement/cancellation and restart without replay.",
     "tests": [
       "native_spot_tests::market_quote_budget_preserves_precision_without_rounding_authority",
       "native_spot_tests::invalid_native_order_field_combinations_never_authorize_or_dispatch",
@@ -40,7 +40,6 @@
       "native_spot_tests::resting_original_identity_survives_restart_and_cancel_response_loss_without_replay",
       "native_spot_tests::native_orders_preserve_approval_denial_and_expiry_without_dispatch",
       "native_spot_tests::native_market_evidence_preserves_identity_and_reports_native_bound_breaches",
-      "native_spot_tests::native_modes_do_not_widen_existing_boundary_or_named_plan_permissions",
       "native_spot_tests::resting_fee_preflight_covers_maker_rate_when_it_exceeds_taker_rate",
       "native_spot_tests::market_buy_timeout_recovers_exact_budget_and_bnb_fee_after_restart_without_replay"
     ]

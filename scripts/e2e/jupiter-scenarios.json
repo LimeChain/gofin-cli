@@ -11,7 +11,9 @@
       "cargo",
       "make"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-jlp-outcome.json"
+    },
     "prepare": [
       [
         "cargo",
@@ -26,7 +28,8 @@
         "--summary",
         "{artifacts}/jupiter-jlp-summary.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/jupiter-jlp-outcome.json"
   },
   {
     "id": "jupiter-perpetuals",
@@ -36,7 +39,9 @@
     "requires": [
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-perpetuals-outcome.json"
+    },
     "prepare": [
       [
         "cargo",
@@ -51,7 +56,8 @@
         "--summary",
         "{artifacts}/jupiter-perps-summary.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/jupiter-perpetuals-outcome.json"
   },
   {
     "id": "jupiter-quote-expiry-cli",
@@ -63,7 +69,8 @@
     ],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-jupiter-refresh-build",
-      "GOFIN_JUPITER_REFRESH_CLI": "{artifacts}/jupiter-refresh-cli"
+      "GOFIN_JUPITER_REFRESH_CLI": "{artifacts}/jupiter-refresh-cli",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-quote-expiry-cli-outcome.json"
     },
     "prepare": [
       [
@@ -93,8 +100,13 @@
         "expired_jupiter_quote",
         "--",
         "--nocapture"
+      ],
+      [
+        "{python}",
+        "{repo}/scripts/e2e/jupiter-expiry-evidence.py"
       ]
     ],
-    "expected_tests": 2
+    "expected_tests": 2,
+    "evidence": "{artifacts}/jupiter-quote-expiry-cli-outcome.json"
   }
 ]

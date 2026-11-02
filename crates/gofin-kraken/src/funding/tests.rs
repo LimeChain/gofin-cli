@@ -426,7 +426,9 @@ mod reconciliation {
             .unwrap();
         assert!(fixture.0.lock().unwrap().is_empty());
         assert_eq!(destination.metadata["status"], "completed");
-        assert_eq!(destination.reconciliation.unwrap().status, Status::Pending);
+        let reconciliation = destination.reconciliation.unwrap();
+        assert_eq!(reconciliation.status, Status::Pending);
+        assert_eq!(reconciliation.evidence["outcome_transfer"], "credited");
     }
 
     #[tokio::test]
@@ -602,8 +604,13 @@ mod reconciliation {
                 .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
                 .await
                 .unwrap();
-            assert_eq!(r.status, Status::Unknown, "case {case}");
-            assert!(r.verified.is_none());
+            if case == 8 {
+                assert_eq!(r.status, Status::Completed);
+                assert!(r.verified.unwrap().effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost { amount, .. } if amount.atoms == Quantity::from_decimal("0.627", 36).unwrap())));
+            } else {
+                assert_eq!(r.status, Status::Unknown, "case {case}");
+                assert!(r.verified.is_none());
+            }
         }
     }
     #[test]
@@ -1044,7 +1051,7 @@ mod reconciliation {
                 "-0.001",
                 Status::Pending,
             ),
-            (Some(vec![]), "-0.002", Status::Unknown),
+            (Some(vec![]), "-0.002", Status::Completed),
             (Some(vec![]), "-0.0006", Status::Completed),
         ] {
             let (profile, _) = profile(vec![
@@ -1072,7 +1079,7 @@ mod reconciliation {
             let reconciled=profile.reconcile_funding(&record(&submission,Some(json!({"response":{"result":[{"address":"0x1111111111111111111111111111111111111111"}]}}))),&submission).await.unwrap();
             assert_eq!(reconciled.status, expected);
             if expected == Status::Completed {
-                assert!(reconciled.verified.unwrap().effects.iter().any(|effect| matches!(effect,FinancialEffect::Cost{amount,treatment:CostTreatment::AdditionalDebit,..}if amount.atoms==Quantity::from_decimal("0.0006",36).unwrap())));
+                assert!(reconciled.verified.unwrap().effects.iter().any(|effect| matches!(effect,FinancialEffect::Cost{amount,treatment:CostTreatment::AdditionalDebit,..}if amount.atoms==Quantity::from_decimal(charged.trim_start_matches('-'),36).unwrap())));
             } else {
                 assert!(reconciled.verified.is_none());
             }

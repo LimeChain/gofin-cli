@@ -34,7 +34,7 @@ def eligible(run, repository, current_run, now):
 def jobs_passed(jobs, groups, head_sha, now):
     for group in groups:
         matches = [job for job in jobs
-                   if job['name'] == f'e2e / Positive CLI scenarios ({group})']
+                   if job['name'] == f'e2e / Positive CLI scenarios ({group}, ci)']
         if len(matches) != 1:
             return False
         job = matches[0]
@@ -100,7 +100,7 @@ def lookup(env, request=api):
     if head != env['GITHUB_SHA']:
         raise ValueError('Checkout differs from workflow source')
     tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=ROOT, text=True).strip()
-    groups = json.loads((ROOT / 'scripts/e2e/required.json').read_text()).keys()
+    groups = json.loads((ROOT / 'scripts/e2e/ci.json').read_text()).keys()
     return find_reusable(repository, int(env['GITHUB_RUN_ID']), tree, groups, request)
 
 
@@ -133,9 +133,9 @@ def main():
     if evidence:
         message = (f"Reusing [successful E2E run {evidence['run_id']}]({evidence['url']}) "
                    f"for identical Git tree `{evidence['tree']}`. Source commit: `{evidence['source_sha']}`. "
-                   'All required groups and execution steps passed within 24 hours.\n')
+                   'All required CI-profile groups and execution steps passed within 24 hours.\n')
     else:
-        message = 'No eligible identical-tree E2E result; running all positive scenarios.\n'
+        message = 'No eligible identical-tree E2E result; running the selected positive scenario profile.\n'
     print(message)
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
         summary.write(message)

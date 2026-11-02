@@ -895,6 +895,9 @@ async fn cli_relay_ethereum_solana_positive() {
         )
         .await;
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     assert_eq!(rpc.sends.load(Ordering::SeqCst), 1);
     provider.phase.store(2, Ordering::SeqCst);
     let status_input = json!({"transferId":transfer});
@@ -920,4 +923,8 @@ async fn cli_relay_ethereum_solana_positive() {
     let evidence = &complete.settlement_proofs[0].evidence;
     assert_eq!(evidence["recipient"], RECIPIENT);
     assert_eq!(evidence["net_amount_atoms"], "5000000");
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        std::fs::write(path, serde_json::to_vec(&json!({"scenario":"relay-ethereum-solana","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":rpc.sends.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }

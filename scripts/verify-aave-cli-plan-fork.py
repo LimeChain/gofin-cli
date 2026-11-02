@@ -58,8 +58,10 @@ class AaveRehearsal(AMM.Rehearsal):
 
     def settled(self, operation, payload, plan=None, step=None):
         argv=['execute',operation,'--input',json.dumps(payload),'--id',payload['request_id']]
+        self.begin_execution_evidence()
         try: record=self.cli(*argv)
         except AssertionError as failure:
+            self.unplanned_interventions += 1
             rejected=failure.args[0]
             assert isinstance(rejected,dict) and rejected.get('error',{}).get('code')=='EVIDENCE_TIMEOUT', rejected
             attempts=[r for r in self.operations() if r['request_id']==payload['request_id']]
@@ -79,6 +81,7 @@ class AaveRehearsal(AMM.Rehearsal):
             self.rpc('anvil_mine',['0x2'],'Owned local settlement advancement; no GoFin block-mining command')
             record=self.cli('status',record['id'])
         assert record['status']=='completed', record
+        assert record['outcome']['result']=='executed' and record['outcome']['phase']=='done' and record['outcome']['replay_safe'] is False, record
         duplicate=self.cli(*argv)
         assert duplicate['id']==record['id'] and duplicate['submission']==record['submission'] and duplicate['effects']==record['effects']
         return record
@@ -385,7 +388,7 @@ def main():
     rehearsal=AaveRehearsal(evidence,str(args.chain))
     rehearsal.market=args.market
     if args.pin: rehearsal.saved_pin=json.loads(args.pin.read_text())
-    try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);print('Aave public CLI standalone fork passed',args.chain,flush=True)
+    try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);rehearsal.write_execution_evidence();print('Aave public CLI standalone fork passed',args.chain,flush=True)
     finally:rehearsal.close()
 
 

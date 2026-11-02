@@ -235,18 +235,12 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             details.push(format!("{label} {amount}"));
         }
     }
-    let mut usd_fees = Vec::new();
-    for (key, label) in [
-        ("maximum_protocol_fee_usd_atoms", "total"),
-        ("position_and_borrow_fee_ceiling_usd_atoms", "pos+borrow"),
-        ("collateral_swap_fee_ceiling_usd_atoms", "swap"),
+    for key in [
+        "maximum_protocol_fee_usd_atoms",
+        "position_and_borrow_fee_ceiling_usd_atoms",
+        "collateral_swap_fee_ceiling_usd_atoms",
     ] {
-        if let Some(amount) = decimal(binding, key, 6)? {
-            usd_fees.push(format!("{label} {amount}"));
-        }
-    }
-    if !usd_fees.is_empty() {
-        details.push(format!("USD fees ≤{}", usd_fees.join("/")));
+        let _ = decimal(binding, key, 6)?;
     }
     if prepared.operation == "jupiter.perps.collateral.remove" {
         let amount = decimal(binding, "collateral_atoms", 6)?.ok_or_else(|| {
@@ -267,22 +261,13 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         details.push(if above { "Trigger ≥" } else { "Trigger ≤" }.into());
     }
     if let Some(cap) = string(binding, "maximum_protocol_fee_atoms") {
-        let decimals = binding["collateral_decimals"]
+        let _ = Quantity::new(cap)?;
+        binding["collateral_decimals"]
             .as_u64()
             .and_then(|v| u8::try_from(v).ok())
             .ok_or_else(|| GoFinError::validation("Perps token fee cap lacks decimals."))?;
-        let mint = string(binding, "collateral_mint")
+        string(binding, "collateral_mint")
             .ok_or_else(|| GoFinError::validation("Perps token fee cap lacks mint."))?;
-        let asset = crate::AssetId {
-            network: "solana:mainnet-beta".into(),
-            reference: mint,
-            decimals,
-        };
-        details.push(format!(
-            "Token fee≤{} {}",
-            Quantity::new(cap)?.to_decimal(decimals),
-            super::prepared_asset_label(prepared, &asset)
-        ));
     }
     if let Some(floor) = string(binding, "minimum_net_collateral_atoms") {
         let decimals = binding["collateral_decimals"]
@@ -349,9 +334,7 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
     if let Some(bps) = string(binding, "maximum_slippage_bps") {
         details.push(format!("Slippage≤{bps}bp"));
     }
-    if let Some(funding) = decimal(binding, "maximum_account_funding_lamports", 9)? {
-        details.push(format!("Funding≤{funding} SOL"));
-    }
+    let _ = decimal(binding, "maximum_account_funding_lamports", 9)?;
     let funding_cap = string(binding, "maximum_account_funding_lamports")
         .map(Quantity::new)
         .transpose()?;
@@ -371,26 +354,8 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             super::prepared_asset_label(prepared, &debit.amount.asset)
         ));
     }
-    if prepared.operation.starts_with("jupiter.perps.") {
-        let fee_cap = string(binding, "maximum_protocol_fee_usd_atoms")
-            .map(Quantity::new)
-            .transpose()?;
-        for cost in &prepared.intent.maximum_costs {
-            if cost.amount.asset.reference == "jupiter:margin-usd"
-                && cost.amount.asset.decimals == 6
-                && fee_cap.as_ref() == Some(&cost.amount.atoms)
-            {
-                continue;
-            }
-            details.push(format!(
-                "Fee≤{} {}",
-                cost.amount.atoms.to_decimal(cost.amount.asset.decimals),
-                super::prepared_asset_label(prepared, &cost.amount.asset)
-            ));
-        }
-        review.other_details = None;
-    } else if let Some(costs) = review.other_details.take() {
-        details.push(costs);
+    if let Some(existing) = review.other_details.take() {
+        details.push(existing);
     }
     if !details.is_empty() {
         review.other_details = Some(details.join("; "));
@@ -471,7 +436,7 @@ mod tests {
             Some("USDC")
         );
         let details = review.other_details.unwrap();
-        assert!(details.contains("Payout ≥ 9 USDC") && details.contains("pos+borrow 0.09"));
+        assert!(details.contains("Payout ≥ 9 USDC") && !details.to_lowercase().contains("fee"));
     }
     #[test]
     fn perps_review_retains_side_size_trigger_and_cost_bound() {
@@ -497,7 +462,7 @@ mod tests {
                 && details.contains("Size USD 100")
                 && details.contains("Trigger USD 120")
                 && details.contains("Trigger ≥")
-                && details.contains("USD fees ≤total 0.5")
+                && !details.to_lowercase().contains("fee")
         );
     }
     #[test]
@@ -636,9 +601,6 @@ mod tests {
         too_many.binding["minimum_net_collateral_atoms"] = json!("900000");
         too_many.binding["position_and_borrow_fee_ceiling_usd_atoms"] = json!("90000");
         too_many.binding["collateral_swap_fee_ceiling_usd_atoms"] = json!("10000");
-        assert_eq!(
-            approval_review(&too_many).unwrap_err().code,
-            "APPROVAL_REVIEW_TOO_LARGE"
-        );
+        assert!(approval_review(&too_many).is_ok());
     }
 }

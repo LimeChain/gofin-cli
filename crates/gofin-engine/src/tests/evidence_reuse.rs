@@ -33,6 +33,7 @@ struct ReuseAdapter {
     revalidations: AtomicUsize,
     pre_admission_only: bool,
     pre_admission_queries: AtomicUsize,
+    fail_first: AtomicBool,
 }
 
 impl ReuseAdapter {
@@ -49,6 +50,7 @@ impl ReuseAdapter {
             revalidations: AtomicUsize::new(0),
             pre_admission_only: false,
             pre_admission_queries: AtomicUsize::new(0),
+            fail_first: AtomicBool::new(false),
         }
     }
 }
@@ -127,6 +129,9 @@ impl Adapter for ReuseAdapter {
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         self.revalidations.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first.swap(false, Ordering::SeqCst) {
+            return Err(GoFinError::validation("Synthetic pre-dispatch rejection."));
+        }
         self.inner.revalidate(prepared).await
     }
 
@@ -146,6 +151,78 @@ impl Adapter for ReuseAdapter {
 struct AdvancingApproval {
     clock: Arc<ManualClock>,
     delay: std::time::Duration,
+}
+
+struct TouchIdApproval(Arc<ManualClock>, AtomicUsize);
+#[async_trait]
+impl Authorizer for TouchIdApproval {
+    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::TouchId),
+            yolo_provenance: None,
+            mechanism: "touch-id".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: self.0.now().to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn standalone_touch_id_revalidation_after_prompt_deadline_keeps_all_checks() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.advance_after_window = chrono::Duration::seconds(100);
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let result = engine
+        .execute(ordinary_request("approval-revalidation-100s"))
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Pending, "{:?}", result.error);
+    assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    let audit = result.approval.unwrap();
+    assert_eq!(
+        parse_time(&audit.expires_at).unwrap() - parse_time(&audit.approved_at).unwrap(),
+        chrono::Duration::minutes(30)
+    );
+}
+
+#[tokio::test]
+async fn standalone_touch_id_expiry_still_blocks_late_admission() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.advance_after_window = chrono::Duration::seconds(1800);
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let result = engine
+        .execute(ordinary_request("approval-revalidation-1800s"))
+        .await
+        .unwrap();
+    assert!(result.submission.is_none());
+    assert_eq!(result.error.unwrap().code, "APPROVAL_EXPIRED");
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
 }
 
 #[async_trait]
@@ -421,4 +498,248 @@ async fn pre_admission_opt_in_is_never_queried_for_boundary_or_plan_attempts() {
         );
     }
     assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn standalone_touch_id_promotion_rejects_invalid_short_responses() {
+    let now = Utc::now();
+    let challenge = AuthorizationChallenge {
+        review: None,
+        purpose: "financial_write".into(),
+        operation_id: "operation".into(),
+        binding: json!({}),
+        binding_hash: "binding".into(),
+        summary: "test".into(),
+        nonce: "nonce".into(),
+        expires_at: (now + chrono::Duration::seconds(90)).to_rfc3339(),
+    };
+    let audit = ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
+        mechanism: "touch-id".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.to_rfc3339(),
+        expires_at: challenge.expires_at.clone(),
+    };
+    validate_approval(&audit, &challenge, now).unwrap();
+    let mut promoted = audit.clone();
+    promote_standalone_touch_id_approval(&mut promoted, &challenge, now).unwrap();
+    assert_eq!(
+        parse_time(&promoted.expires_at).unwrap(),
+        now + chrono::Duration::minutes(30)
+    );
+    assert_eq!(promoted.binding_hash, audit.binding_hash);
+    assert_eq!(promoted.challenge_nonce, audit.challenge_nonce);
+    for invalid in [
+        "invalid".to_owned(),
+        (now + chrono::Duration::seconds(1)).to_rfc3339(),
+        (now - chrono::Duration::seconds(1)).to_rfc3339(),
+    ] {
+        let mut bad = audit.clone();
+        bad.approved_at = invalid;
+        assert!(promote_standalone_touch_id_approval(&mut bad, &challenge, now).is_err());
+    }
+    let mut late = audit.clone();
+    assert!(
+        promote_standalone_touch_id_approval(
+            &mut late,
+            &challenge,
+            now + chrono::Duration::seconds(90)
+        )
+        .is_err()
+    );
+    let mut bad = audit.clone();
+    bad.challenge_nonce = "other".into();
+    assert!(validate_approval(&bad, &challenge, now).is_err());
+    let mut non_touch = audit.clone();
+    non_touch.source = None;
+    promote_standalone_touch_id_approval(&mut non_touch, &challenge, now).unwrap();
+    assert_eq!(non_touch.expires_at, challenge.expires_at);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_continuation_after_restart_preserves_original_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    fixture.fail_first.store(true, Ordering::SeqCst);
+    let adapter = Arc::new(fixture);
+    let authorizer = Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let original = engine
+        .execute(ordinary_request("touchid-restart"))
+        .await
+        .unwrap();
+    let expiry = original.approval.as_ref().unwrap().expires_at.clone();
+    let token = engine
+        .operation_view(&original)
+        .unwrap()
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+    drop(engine);
+    clock.advance(chrono::Duration::seconds(100));
+    let engine = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let restored = engine.status(&original.id, false).await.unwrap();
+    assert_eq!(restored.approval.unwrap().expires_at, expiry);
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let continued = invocation
+        .scope(engine.continue_operation(&original.id, &token))
+        .await
+        .unwrap();
+    assert!(continued["stage"]["submission"].is_object(), "{continued}");
+    assert_eq!(authorizer.1.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_explicit_reauthorization_gets_fresh_window_once() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = None;
+    fixture.candidate_lifetime = Some(chrono::Duration::hours(1));
+    fixture.fail_first.store(true, Ordering::SeqCst);
+    let adapter = Arc::new(fixture);
+    let authorizer = Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    let original = engine
+        .execute(ordinary_request("touchid-reauthorize"))
+        .await
+        .unwrap();
+    let original_expiry = original.approval.as_ref().unwrap().expires_at.clone();
+    let token = engine
+        .operation_view(&original)
+        .unwrap()
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+    clock.advance(chrono::Duration::seconds(100));
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let result = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result["reauthorization"], "approved");
+    let updated = engine.status(&original.id, false).await.unwrap();
+    let audit = updated.approval.unwrap();
+    assert_eq!(
+        parse_time(&audit.expires_at).unwrap() - parse_time(&audit.approved_at).unwrap(),
+        chrono::Duration::minutes(30)
+    );
+    assert!(parse_time(&audit.expires_at).unwrap() > parse_time(&original_expiry).unwrap());
+    let duplicate = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, original.input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(duplicate, result);
+    assert_eq!(authorizer.1.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standalone_touch_id_does_not_extend_candidate_expiry() {
+    let clock = Arc::new(ManualClock::new());
+    let mut fixture = ReuseAdapter::new(clock.clone());
+    fixture.window = Some(std::time::Duration::from_secs(300));
+    fixture.advance_after_window = chrono::Duration::seconds(100);
+    fixture.candidate_lifetime = Some(chrono::Duration::seconds(90));
+    let adapter = Arc::new(fixture);
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        Arc::new(TouchIdApproval(clock.clone(), AtomicUsize::new(0))),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let result = engine
+        .execute(ordinary_request("touchid-candidate-expired"))
+        .await
+        .unwrap();
+    assert!(result.submission.is_none());
+    assert_eq!(result.error.unwrap().code, "PREVIEW_EXPIRED");
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response() {
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::hours(2);
+    let challenge = AuthorizationChallenge {
+        review: None,
+        purpose: "financial_write".into(),
+        operation_id: "compound".into(),
+        binding: json!({"actionDeadline": deadline.to_rfc3339()}),
+        binding_hash: "binding".into(),
+        summary: "test".into(),
+        nonce: "nonce".into(),
+        expires_at: (now + chrono::Duration::seconds(90))
+            .min(deadline)
+            .to_rfc3339(),
+    };
+    for source in [
+        Some(gofin_domain::AuthorizationSource::TouchId),
+        Some(gofin_domain::AuthorizationSource::Development),
+        Some(gofin_domain::AuthorizationSource::Yolo),
+        None,
+    ] {
+        let mut audit = ApprovalAudit {
+            source,
+            yolo_provenance: None,
+            mechanism: "test".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: now.to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        };
+        validate_approval(&audit, &challenge, now).unwrap();
+        promote_compound_approval(&mut audit, &challenge, now, deadline).unwrap();
+        assert_eq!(parse_time(&audit.expires_at).unwrap(), deadline);
+    }
+    let audit = ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
+        mechanism: "test".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.to_rfc3339(),
+        expires_at: challenge.expires_at.clone(),
+    };
+    assert!(validate_approval(&audit, &challenge, now + chrono::Duration::seconds(90)).is_err());
+    assert!(promote_compound_approval(&mut audit.clone(), &challenge, deadline, deadline).is_err());
+    let mut changed = audit.clone();
+    changed.expires_at = deadline.to_rfc3339();
+    assert!(promote_compound_approval(&mut changed, &challenge, now, deadline).is_err());
+    let mut retired = audit;
+    retired.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
+    assert!(promote_compound_approval(&mut retired, &challenge, now, deadline).is_err());
 }

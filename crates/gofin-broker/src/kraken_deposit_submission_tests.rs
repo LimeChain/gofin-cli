@@ -431,7 +431,7 @@ async fn fresh_outer_candidate_reuses_immutable_nested_preview_without_more_read
     assert_eq!(venue.requests.lock().unwrap().len(), venue_reads);
     assert_eq!(
         venue.rpc.calls.lock().unwrap().as_slice(),
-        ["eth_getTransactionCount", "eth_sendRawTransaction"]
+        ["eth_getTransactionCount", "eth_blockNumber", "eth_sendRawTransaction"]
     );
     assert_eq!(journal.saved.lock().unwrap().len(), 1);
     assert_eq!(journal.candidates.load(Ordering::SeqCst), 1);

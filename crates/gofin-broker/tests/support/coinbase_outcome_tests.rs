@@ -1,5 +1,7 @@
 //! Provider-documented send states. No fabricated refund or UI approval fields.
 use super::*;
+#[path = "outcome_evidence.rs"]
+mod outcome_evidence;
 const OTHER_PORTFOLIO: &str = "00000000-0000-4000-8000-000000000099";
 fn runtime(
     path: &std::path::Path,
@@ -76,7 +78,15 @@ async fn failed_send_remains_open_without_inventing_refund_and_other_accounts_pr
         dir.path(),
     )
     .await;
+    let counters = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            venue.writes.load(Ordering::SeqCst) + other.writes.load(Ordering::SeqCst),
+        )
+    };
+    let before_action = counters();
     let first = client.execute(input(), true).await;
+    let after_action = counters();
     let id = first["id"].as_str().unwrap();
     let observed = client.status(id).await;
     assert_eq!(observed["outcome"]["result"], "failed", "{observed}");
@@ -97,10 +107,17 @@ async fn failed_send_remains_open_without_inventing_refund_and_other_accounts_pr
         )
         .await;
     assert!(open.as_array().unwrap().iter().any(|v| v["id"] == id));
-    for (request, account, wire) in [
-        ("same-account", "coinbase-dev", &venue),
-        ("different-account", "coinbase-other", &other),
+    let mut probes = Vec::new();
+    for (scope, request, account, wire) in [
+        ("same_account", "same-account", "coinbase-dev", &venue),
+        (
+            "different_account",
+            "different-account",
+            "coinbase-other",
+            &other,
+        ),
     ] {
+        let before = counters();
         wire.hbar_funding.store(true, Ordering::SeqCst);
         let mut i = hbar_sale_input();
         i["account"] = json!(account);
@@ -129,6 +146,12 @@ async fn failed_send_remains_open_without_inventing_refund_and_other_accounts_pr
             )
             .await;
         assert!(order["submission"].is_object(), "{order}");
+        probes.push(outcome_evidence::admission_probe(
+            scope,
+            before,
+            counters(),
+            &order,
+        ));
     }
     let id = id.to_owned();
     drop(client);
@@ -144,11 +167,8 @@ async fn failed_send_remains_open_without_inventing_refund_and_other_accounts_pr
     assert_eq!(other.writes.load(Ordering::SeqCst), 1);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
         assert!(std::env::var_os("GOFIN_COINBASE_PLAN_CLI").is_some());
-        std::fs::write(path, serde_json::to_vec_pretty(&json!({
-            "scenario":"outcome.coinbase-unresolved", "approval_count":1,
-            "external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,
-            "intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,
-            "qualification":"Failed send retained; provider-correlated refund and send-specific human-action evidence unavailable. The user-approved Coinbase fallback advises consulting the Coinbase App."
-        })).unwrap()).unwrap();
+        let mut evidence = json!({"scenario":"outcome.coinbase-unresolved", "approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":true,"qualification":"Failed send retained; provider-correlated refund and send-specific human-action evidence unavailable."});
+        outcome_evidence::attach_probes(&mut evidence, &probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }

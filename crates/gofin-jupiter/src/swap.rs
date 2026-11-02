@@ -218,7 +218,7 @@ pub fn validate_meta_quote(
     let threshold = exact_atoms(&response.other_amount_threshold)?;
     let relative_floor = ((out_amount as u128
         * (10_000u128.saturating_sub(intent.maximum_slippage_bps as u128)))
-        / 10_000) as u64;
+    .div_ceil(10_000)) as u64;
     if out_amount < minimum_output
         || threshold < minimum_output
         || threshold < relative_floor
@@ -531,6 +531,16 @@ mod tests {
             validate(fresh).unwrap_err().code,
             "JUPITER_MINIMUM_OUTPUT_UNMET"
         );
+        // 101 * 99% = 99.99 atoms; rounding down would admit 99.
+        let mut fractional = response();
+        fractional["outAmount"] = json!("101");
+        fractional["otherAmountThreshold"] = json!("99");
+        assert_eq!(
+            validate(fractional.clone()).unwrap_err().code,
+            "JUPITER_MINIMUM_OUTPUT_UNMET"
+        );
+        fractional["otherAmountThreshold"] = json!("100");
+        assert!(validate(fractional).is_ok());
         let mut below_hard_floor = response();
         below_hard_floor["outAmount"] = json!("89");
         below_hard_floor["otherAmountThreshold"] = json!("89");

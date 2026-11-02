@@ -108,6 +108,7 @@ def rehearse(fixture: str, *, positive_only: bool = False) -> dict:
                     assert state()["posts"] == posts, "Recovery dispatched another order"
                     records[label + "-recovered"] = result
                 assert result.get("status") == "completed", result
+                assert result.get("outcome", {}).get("phase") == "done", result
                 assert result.get("run_id") is None, result
                 assert result.get("effects", {}).get("proof_digest"), "Completion omitted durable proof"
                 assert result.get("approval", {}).get("mechanism", "").startswith("development"), result
@@ -241,6 +242,13 @@ def rehearse(fixture: str, *, positive_only: bool = False) -> dict:
                     assert not still_unknown.get("effects")
                     assert state()["posts"] == posts and reservations() > 0
                 uncertain_case = {"status":"unknown", "reason":"native transfer response lost; no durable tranId", "native_transfer_rows":5, "new_posts_after_restart":0, "reservation_retained":True, "synthetic_futures_usdt":"1"}
+            if positive_only and (evidence_path := os.environ.get("GOFIN_EXECUTION_EVIDENCE")):
+                scenario = "binance-usdm-subaccount" if standalone_subaccount else "binance-usdm-main"
+                approvals = {r["approval"]["challenge_nonce"] for r in records.values() if r.get("approval")}
+                evidence = {"scenario": scenario, "approval_count": len(approvals),
+                            "external_submission_count": state()["posts"], "intervention_count": 0,
+                            "remaining_external_uncertainty": False, "blocked_unrelated_activity": None}
+                Path(evidence_path).write_text(json.dumps(evidence, indent=2))
             return {
                 "evidence_class": "public_cli_synthetic", "live_network": False,
                 "authorization": "development automatic approval", "build_id": startup.get("buildId"),

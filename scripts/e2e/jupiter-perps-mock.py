@@ -20,7 +20,18 @@ def main():
         state=Path(tmp)/'state';name='perps-positive'
         env=dict(os.environ,GOFIN_DEV_STATE_HOME=str(state),GOFIN_DEV_SOLANA_FIXTURE_STATE=str(state/'ledger.json'),GOFIN_DEV_SOLANA_PERPS_REHEARSAL='1')
         started=False
-        def call(*argv): return h.call(name,list(argv),env)
+        approvals=[]
+        def call(*argv):
+            result=h.call(name,list(argv),env)
+            if argv and argv[0]=='execute':
+                audit=result.get('approval') or {}
+                nonce=audit.get('challenge_nonce')
+                if audit.get('source')!='development' or not isinstance(nonce,str) or not nonce:
+                    raise AssertionError('Missing isolated development approval audit')
+                approvals.append(nonce)
+                if not (result.get('outcome') or {}).get('phase'):
+                    raise AssertionError('Missing structured operation outcome')
+            return result
         def execute(op,request,identity):
             result=call('execute',op,'--input',json.dumps(request),'--id',identity,'--json')
             if result.get('status')!='completed' or not (result.get('effects') or {}).get('proof_digest'):
@@ -78,6 +89,12 @@ def main():
             final_positions=call('read','--input',json.dumps(scope),'jupiter.perps.positions','--json')
             if final_positions.get('positions') or any(r.get('request')==request for r in final_positions.get('pending_requests',[])): raise AssertionError('Cancelled request or open position remains')
             summary.update(resting={'request':request,'placement':h.summary(placed),'cancel':h.summary(cancelled),'parent':h.summary(parent)},final_usdc_atoms=str(h.wallet_token_amount(final,h.USDC_MINT)),status='passed')
+            if output := os.environ.get('GOFIN_OUTCOME_EVIDENCE'):
+                ledger=json.loads((state/'ledger.json').read_text())
+                submissions=(ledger.get('rpc_method_counts') or {}).get('sendTransaction',0)
+                if len(approvals)!=len(set(approvals)) or submissions < len(approvals):
+                    raise AssertionError('Missing distinct approval or provider submission counter')
+                Path(output).write_text(json.dumps({'scenario':'jupiter-perpetuals','approval_count':len(approvals),'external_submission_count':submissions,'intervention_count':0,'remaining_external_uncertainty':False,'blocked_unrelated_activity':None,'counter_basis':'distinct development approval audits and fixture submit calls'},indent=2)+'\n')
             if args.summary: args.summary.parent.mkdir(parents=True,exist_ok=True);args.summary.write_text(json.dumps(summary,indent=2)+'\n')
             print(json.dumps(summary))
         finally:

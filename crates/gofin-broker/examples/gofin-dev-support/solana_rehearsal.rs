@@ -1156,6 +1156,17 @@ impl FixtureRpc {
     }
 
     fn submit(&self, encoded: &str) -> Result<String> {
+        {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| GoFinError::validation("Fixture RPC lock poisoned."))?;
+            *state
+                .rpc_method_counts
+                .entry("sendTransaction".into())
+                .or_default() += 1;
+            self.persist_state(&state)?;
+        }
         if let Some(signature) = meteora_rehearsal::submit(self, encoded)? {
             return Ok(signature);
         }

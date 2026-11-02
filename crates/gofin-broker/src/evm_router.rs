@@ -263,6 +263,7 @@ impl Adapter for EvmNetworkRouter {
             .as_ref()
             .and_then(|prepared| self.prepared(prepared).ok())
             .and_then(|adapter| adapter.observation_horizon(record))
+            .or(Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)))
     }
 
     async fn evm_nonce_scope(

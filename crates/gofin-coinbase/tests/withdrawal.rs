@@ -868,10 +868,9 @@ async fn destination_side_uses_original_venue_observation_without_coinbase_calls
         .unwrap();
     assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), before);
     assert_eq!(destination.metadata["status"], "completed");
-    assert_eq!(
-        destination.reconciliation.unwrap().status,
-        gofin_domain::Status::Pending
-    );
+    let observation = destination.reconciliation.unwrap();
+    assert_eq!(observation.status, gofin_domain::Status::Pending);
+    assert_eq!(observation.evidence["outcome_transfer"], "credited");
 }
 
 #[tokio::test]
@@ -892,9 +891,14 @@ async fn all_networks_recover_original_unknown_submission_and_reject_cross_netwo
             route.network,
             result.evidence
         );
-        assert_eq!(result.evidence["outcome_transfer"], "available");
+        assert_eq!(result.evidence["outcome_transfer"], "credited");
         let effects = result.verified.unwrap();
         assert_eq!(&effects.submission, submission);
+        assert_eq!(effects.evidence["outcome_transfer"], "credited");
+        assert_eq!(
+            effects.proof_digest,
+            gofin_domain::verified_effect_digest(&effects).unwrap()
+        );
         assert!(effects.effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Transfer { credit, .. } if credit.asset.network == route.asset_network() && credit.asset.reference == route.usdc)));
         *api.network.lock().unwrap() = if route.network == "base" {
             "ethereum"

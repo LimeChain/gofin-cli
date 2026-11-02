@@ -2663,8 +2663,11 @@ impl KrakenProfile {
                 evidence["ledgerBefore"] = json!(claim.ledger_before);
                 if charged > claim.fee {
                     evidence["proofEvents"] = json!([{"eventId":format!("kraken:address-setup:{}",rows[0].0),"addressId":id,"assignedAddress":assigned,"ledgerId":rows[0].0,"entry":row}]);
-                    return crate::unresolved_consumption::cost_overrun(
-                        submission, &effects, evidence,
+                    return crate::unresolved_consumption::proven_cost_overrun(
+                        submission,
+                        Status::Completed,
+                        &effects,
+                        evidence,
                     );
                 }
             }
@@ -2805,7 +2808,11 @@ impl KrakenProfile {
         let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount});
         let mut evidence = source.clone();
         evidence["destination_observation"] = metadata.clone();
-        evidence["outcome_transfer"] = json!("in_transit");
+        evidence["outcome_transfer"] = json!(if receipt.status == Status::Completed {
+            "credited"
+        } else {
+            "in_transit"
+        });
         Ok(gofin_domain::TransferSideObservation {
             metadata,
             reconciliation: Some(Reconciliation {
@@ -2855,7 +2862,6 @@ impl KrakenProfile {
                 "The supplied venue reference differs from the original durable withdrawal identity; no matching by amount or recipient is permitted.",
             ));
         }
-        let mut dispatch_fee_cap = b.fee.clone();
         let (status, tx_hash, row) = if b.api_version == "legacy-v0" {
             let mut query =
                 json!({"asset":b.venue_asset_code,"method":b.method_id,"aclass":b.asset_class});
@@ -2962,7 +2968,7 @@ impl KrakenProfile {
                 "amount",
                 b.asset.decimals,
             )?;
-            dispatch_fee_cap = qty(
+            let dispatch_fee_cap = qty(
                 &response["fee"]["asset_amount"],
                 "amount",
                 b.fee_asset.decimals,
@@ -3141,25 +3147,31 @@ impl KrakenProfile {
                 )?)?
             };
             if charged > b.fee {
-                let costs = vec![FinancialEffect::Cost {
-                    location: AccountingLocation::Cash {
+                let effects = vec![
+                    FinancialEffect::CashDebit {
                         resource: b.source.clone(),
+                        amount: Amount {
+                            asset: b.fee_asset.clone(),
+                            atoms: charged.clone(),
+                        },
                     },
-                    amount: Amount {
-                        asset: b.fee_asset.clone(),
-                        atoms: charged,
+                    FinancialEffect::Cost {
+                        location: AccountingLocation::Cash {
+                            resource: b.source.clone(),
+                        },
+                        amount: Amount {
+                            asset: b.fee_asset.clone(),
+                            atoms: charged.clone(),
+                        },
+                        category: "kraken_failed_withdrawal_fee".into(),
+                        treatment: CostTreatment::IncludedInDebit,
                     },
-                    category: "kraken_failed_withdrawal_fee".into(),
-                    treatment: if b.fee_asset == b.asset {
-                        CostTreatment::IncludedInDebit
-                    } else {
-                        CostTreatment::AdditionalDebit
-                    },
-                }];
-                return crate::unresolved_consumption::cost_overrun(
+                ];
+                return crate::unresolved_consumption::proven_cost_overrun(
                     submission,
-                    &costs,
-                    json!({"withdrawal":row,"proofEvents":[{"eventId":format!("kraken:withdrawal-fee:{}",reference),"withdrawalId":reference,"principalLedger":correlated,"feeLedger":separate_fee,"principalReturned":true}]}),
+                    Status::Failed,
+                    &effects,
+                    json!({"withdrawal":row,"ledger":correlated,"feeLedger":separate_fee,"returnedPrincipal":b.net,"chargedFee":charged,"outcome_transfer":"returned_to_source","proofEvents":[{"eventId":format!("kraken:withdrawal-fee:{}",reference),"withdrawalId":reference,"principalLedger":correlated,"feeLedger":separate_fee,"principalReturned":true}]}),
                 );
             }
             let effects = if charged.is_zero() {
@@ -3199,75 +3211,9 @@ impl KrakenProfile {
             ));
         }
         let (ledger_id, debit) = matched[0];
-        if signed(text(debit, "amount")?, b.asset.decimals)? == SignedQuantity::negative(&b.net)
-            && reported_fee > b.fee
-        {
-            let (observed, fee_row) = if let Some(fees) = &separate_fee {
-                let rows = fees
-                    .as_object()
-                    .expect("validated ledger")
-                    .iter()
-                    .filter(|(_, v)| {
-                        v["refid"] == reference
-                            && v["asset"] == b.fee_asset.reference
-                            && v["type"] == "withdrawal"
-                    })
-                    .collect::<Vec<_>>();
-                if rows.len() != 1 || !qty(debit, "fee", b.asset.decimals)?.is_zero() {
-                    return Ok(unknown(
-                        "Withdrawal fee overrun lacks one exact independent fee-asset ledger leg.",
-                    ));
-                }
-                let paid = signed(text(rows[0].1, "amount")?, 36)?;
-                if !paid.is_negative() {
-                    return Ok(unknown("Withdrawal fee overrun lacks a native fee debit."));
-                }
-                (
-                    paid.magnitude().checked_add(&qty(rows[0].1, "fee", 36)?)?,
-                    json!({"id":rows[0].0,"entry":rows[0].1}),
-                )
-            } else {
-                (qty(debit, "fee", b.asset.decimals)?, Value::Null)
-            };
-            if observed != reported_fee {
-                return Ok(unknown(
-                    "Withdrawal history and exact correlated ledger fee disagree; no fee overrun is inferred.",
-                ));
-            }
-            let costs = vec![FinancialEffect::Cost {
-                location: AccountingLocation::Cash {
-                    resource: b.source.clone(),
-                },
-                amount: Amount {
-                    asset: b.fee_asset.clone(),
-                    atoms: observed,
-                },
-                category: "kraken_withdrawal_fee".into(),
-                treatment: if b.fee_asset == b.asset {
-                    CostTreatment::IncludedInDebit
-                } else {
-                    CostTreatment::AdditionalDebit
-                },
-            }];
-            return crate::unresolved_consumption::cost_overrun(
-                submission,
-                &costs,
-                json!({"withdrawal":row,"proofEvents":[{"eventId":format!("kraken:withdrawal-fee:{}:{}",reference,ledger_id),"withdrawalId":reference,"ledgerId":ledger_id,"sourceLedger":debit,"feeLedger":fee_row}]}),
-            );
-        }
-        if b.api_version == "legacy-v0" && reported_fee != b.fee {
-            return Ok(unknown(
-                "The final legacy fee differs from its frozen exact quote; no settlement is inferred.",
-            ));
-        }
-        if (b.quoted_fee.is_none() && reported_fee > dispatch_fee_cap)
-            || reported_fee > b.fee
-            || actual_gross > b.gross
-        {
-            return Ok(unknown(
-                "The final native fee or gross debit exceeds its immutable submitted accounting; no settlement is inferred.",
-            ));
-        }
+        // A proven fee excess does not erase a correlated source debit or
+        // destination receipt. Record the actual native effects and let the
+        // engine report the approved-bound discrepancy.
         let principal_signed = signed(text(debit, "amount")?, b.asset.decimals)?;
         if principal_signed != SignedQuantity::negative(&b.net)
             || qty(debit, "fee", b.asset.decimals)?
@@ -3402,6 +3348,7 @@ impl KrakenProfile {
             }
             evidence["verification"] =
                 json!({"level":"destination_receipt","destinationReceipt":receipt.evidence});
+            evidence["outcome_transfer"] = json!("credited");
         }
         terminal(submission, Status::Completed, effects, evidence)
     }
@@ -3570,7 +3517,6 @@ impl KrakenProfile {
             ));
         }
         let aggregate_overrun = source_fee.checked_add(&target_fee)? > b.max_fee;
-        let origin_overrun = source_fee > b.max_fee || target_fee > b.max_fee;
         let position = format!("kraken:earn:{}", b.strategy);
         let (position_change, cash_credit, position_fee, cash_fee) = if b.allocate {
             (
@@ -3714,18 +3660,15 @@ impl KrakenProfile {
         if aggregate_overrun {
             let mut evidence = evidence;
             evidence["proofEvents"] = json!([{"eventId":format!("kraken:earn:{}:{}:{}",b.strategy,negative.0,positive.0),"strategy":b.strategy,"ledgerReference":reference,"ledgerRows":rows,"allocation":row,"lastRequest":r}]);
-            let mut reconciliation =
-                crate::unresolved_consumption::cost_overrun(submission, &effects, evidence)?;
-            if !origin_overrun {
-                use gofin_domain::unresolved_consumption::{ConsumptionReason, KEY, digest, read};
-                let mut proof = read(&reconciliation.evidence)?.expect("fresh typed cost proof");
-                proof.reason = ConsumptionReason::ProvenUnsettledCost;
-                proof.proof_digest = digest(&proof)?;
-                reconciliation.evidence[KEY] = serde_json::to_value(proof).map_err(|_| {
-                    GoFinError::validation("Earn cost observation serialization failed.")
-                })?;
-            }
-            return Ok(reconciliation);
+            let fees: Vec<_> = effects.iter().filter(|effect| matches!(effect, FinancialEffect::Cost { category, .. } if category == "kraken_earn_fee")).cloned().collect();
+            evidence["earnFeeScope"] =
+                json!({"binding":submission.data["binding"]["earn"],"effects":fees});
+            return crate::unresolved_consumption::proven_cost_overrun(
+                submission,
+                Status::Completed,
+                &effects,
+                evidence,
+            );
         }
         terminal(submission, Status::Completed, effects, evidence)
     }

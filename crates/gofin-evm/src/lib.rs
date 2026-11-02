@@ -2517,12 +2517,22 @@ impl EvmRuntime {
             validated.assert_fresh()?;
         }
         journal.assert_authorized()?;
+        // A best-effort chain height narrows any later finalized replacement
+        // search. Failure to obtain it never prevents admission or dispatch.
+        let dispatch_block = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            self.rpc.request("eth_blockNumber", json!([])),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|v| rpc_u64(&v).ok());
         let raw = signer.sign_prepared(transaction).await?;
         let tx_hash = verify_signed_envelope(transaction, &raw)?;
         let submission = Submission {
             kind: "ethereum".into(),
             reference: format!("{tx_hash:#x}"),
-            data: json!({"transaction":transaction,"metadata":metadata}),
+            data: json!({"transaction":transaction,"metadata":metadata,"dispatch_block":dispatch_block}),
         };
         if let Some(validated) = validated {
             validated.assert_fresh()?;
@@ -2634,7 +2644,22 @@ impl EvmRuntime {
         }
         // Locate the first canonical block whose post-state has consumed the
         // nonce. Exact historical state and a full block are both required.
-        let (mut low, mut high) = (0u64, height);
+        let lower = submission
+            .data
+            .get("dispatch_block")
+            .and_then(Value::as_u64)
+            .filter(|block| *block < height);
+        let (mut low, mut high) = if let Some(block) = lower {
+            // Only use this bound if its canonical post-state has not yet
+            // consumed the nonce; otherwise the replacement may predate it.
+            if nonce_at(block).await? <= transaction.nonce {
+                (block + 1, height)
+            } else {
+                (0, height)
+            }
+        } else {
+            (0, height)
+        };
         while low < high {
             let middle = low + (high - low) / 2;
             if nonce_at(middle).await? > transaction.nonce {
@@ -3498,6 +3523,7 @@ mod http_rpc_tests {
     struct ReplacementRpc {
         consumed: bool,
         replacement_is_original: bool,
+        minimum_history: u64,
     }
     #[async_trait]
     impl EvmRpc for ReplacementRpc {
@@ -3507,6 +3533,9 @@ mod http_rpc_tests {
                 "eth_chainId" => json!("0x1"),
                 "eth_getTransactionCount" => {
                     let height = rpc_u64(&params[1])?;
+                    if height < self.minimum_history {
+                        return Err(GoFinError::validation("historical state unavailable"));
+                    }
                     json!(if self.consumed && height >= 2 {
                         "0x1"
                     } else {
@@ -3535,6 +3564,42 @@ mod http_rpc_tests {
         }
     }
     #[tokio::test]
+    async fn replacement_search_uses_correlated_dispatch_height_without_archive_history() {
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: "0x4444444444444444444444444444444444444444".into(),
+            to: "0x5555555555555555555555555555555555555555".into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: format!("0x{}", "11".repeat(32)),
+            data: json!({"transaction":transaction,"dispatch_block":1}),
+        };
+        let runtime = EvmRuntime::new(
+            Arc::new(ReplacementRpc {
+                consumed: true,
+                replacement_is_original: false,
+                minimum_history: 1,
+            }),
+            1,
+            None,
+        );
+        let proof = runtime
+            .finalized_nonce_replacement(&submission, &transaction)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.evidence["block_number"], 2);
+    }
+
+    #[tokio::test]
     async fn replacement_requires_a_different_transaction_in_finalized_canonical_block() {
         let transaction = FrozenTransaction {
             chain_id: 1,
@@ -3562,6 +3627,7 @@ mod http_rpc_tests {
                 Arc::new(ReplacementRpc {
                     consumed,
                     replacement_is_original,
+                    minimum_history: 0,
                 }),
                 1,
                 None,

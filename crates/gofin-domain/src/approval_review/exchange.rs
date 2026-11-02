@@ -266,7 +266,6 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                 ("trigger kind", "trigger_kind"),
                 ("group", "grouping"),
                 ("max notional", "max_notional_usdc"),
-                ("max fee", "max_fee_usdc"),
                 ("max loss", "max_realized_loss_usdc"),
             ] {
                 if let Some(value) = text(input, &[key]) {
@@ -286,7 +285,7 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                     .ok_or_else(|| {
                         GoFinError::validation("A builder fee requires a rate in the review.")
                     })?;
-                order_details.push_str(&format!(" builder {address} {rate}/10bps"));
+                let _ = (address, rate);
             }
             if input.get("reduce_only").and_then(Value::as_bool) == Some(true) {
                 order_details.push_str(" reduce-only");
@@ -667,6 +666,32 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         });
         if let Some(value) = value {
             details.push(format!("{label}: {value}"));
+            if label == "Limit" {
+                review.terms.push(super::ApprovalTerm {
+                    label: "Limit price".into(),
+                    value: value.into(),
+                    enforcement: super::ApprovalTermEnforcement::Enforced,
+                });
+            }
+        }
+    }
+    if service == "hyperliquid"
+        && let Some(orders) = binding.get("orders").and_then(Value::as_array)
+    {
+        for (index, order) in orders.iter().enumerate() {
+            let input = &order["input"];
+            for (field, label) in [
+                ("max_notional_usdc", "Maximum notional"),
+                ("max_realized_loss_usdc", "Maximum realized loss"),
+            ] {
+                if let Some(value) = input[field].as_str().filter(|v| !v.is_empty()) {
+                    review.terms.push(super::ApprovalTerm {
+                        label: format!("{label} {}", index + 1),
+                        value: format!("{value} USDC"),
+                        enforcement: super::ApprovalTermEnforcement::AfterExecution,
+                    });
+                }
+            }
         }
     }
     if let Some(existing) = review.other_details.take() {
@@ -792,7 +817,7 @@ mod tests {
         assert_eq!(review.input.unwrap().account.unwrap().name, "desk");
         let details = review.other_details.unwrap();
         assert!(details.contains("buy 0.01 BTC/USDC limit 80000–90000"));
-        assert!(details.contains("max fee 1"));
+        assert!(!details.contains("max fee"));
         assert!(details.contains("reduce-only"));
     }
     #[test]
@@ -809,13 +834,7 @@ mod tests {
                 .unwrap()
                 .other_details
                 .unwrap();
-            for fragment in [
-                expected,
-                "or better",
-                "max notional 95",
-                "max fee 1",
-                "max loss 2",
-            ] {
+            for fragment in [expected, "or better", "max notional 95", "max loss 2"] {
                 assert!(details.contains(fragment), "{details}");
             }
             p.binding["orders"][0]["price_semantics"] = json!("unrecognized");
@@ -968,7 +987,7 @@ mod tests {
         assert_eq!(review.output.unwrap().account.unwrap().name, "vault");
         let details = review.other_details.unwrap();
         assert!(details.contains("Address: 0x123"));
-        assert!(details.contains("Venue fee not capped; reserve: 1 USDC"));
+        assert!(!details.to_lowercase().contains("fee"));
         assert!(!details.contains("Maximum cost"));
     }
     #[test]

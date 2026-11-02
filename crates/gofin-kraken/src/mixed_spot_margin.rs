@@ -455,8 +455,15 @@ impl KrakenProfile {
                     .unwrap_or_default()
             });
         if crate::unresolved_consumption::costs_exceed_bounds(&effects, &bounds)? {
-            return crate::unresolved_consumption::cost_overrun(
+            return crate::unresolved_consumption::proven_cost_overrun(
                 submission,
+                if statuses.contains(&Status::Pending) {
+                    Status::Pending
+                } else if statuses.contains(&Status::Failed) {
+                    Status::Failed
+                } else {
+                    Status::Completed
+                },
                 &effects,
                 json!({"code":"KRAKEN_MIXED_COST_BOUND_EXCEEDED","families":observations,"proofEvents":events.into_values().collect::<Vec<_>>()}),
             );

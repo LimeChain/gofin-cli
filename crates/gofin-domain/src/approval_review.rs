@@ -6,7 +6,7 @@ mod onchain;
 mod papertrade;
 mod swap;
 mod wallet;
-use crate::{EffectConstraint, GoFinError, PreparedOperation, ResourceId, Result};
+use crate::{EffectConstraint, GoFinError, PreparedOperation, Quantity, ResourceId, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -608,31 +608,6 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
             _ => {}
         }
     }
-    let costs = prepared
-        .intent
-        .maximum_costs
-        .iter()
-        .map(|c| {
-            let label = match c.treatment {
-                crate::CostTreatment::VenueCalculatedAdditionalDebit => {
-                    "Venue fee not capped; reserve"
-                }
-                crate::CostTreatment::IncludedInDebit => "Incl. cost ≤",
-                crate::CostTreatment::DeductedFromCredit => "Deducted cost ≤",
-                crate::CostTreatment::AdditionalDebit => "Fee ≤",
-            };
-            format!(
-                "{label}: {} {}",
-                c.amount.atoms.to_decimal(c.amount.asset.decimals),
-                prepared_asset_label(prepared, &c.amount.asset)
-            )
-        })
-        .collect::<Vec<_>>();
-    let details = if costs.is_empty() {
-        None
-    } else {
-        Some(costs.join("; "))
-    };
     let mut review = ApprovalReview {
         version: 2,
         action,
@@ -640,7 +615,7 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         market: None,
         input,
         output,
-        other_details: details,
+        other_details: None,
         description: None,
         step_count: None,
         valid_for_seconds: None,
@@ -691,6 +666,57 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
             };
         }
     }
+    // USD is reporting information, not authority over native quantities.
+    review.terms.push(ApprovalTerm {
+        label: "Expected USD value".into(),
+        value: prepared
+            .valuation
+            .as_ref()
+            .map(|v| format!("${}", v.movement_usd_micros.to_decimal(6)))
+            .unwrap_or_else(|| "Unavailable".into()),
+        enforcement: ApprovalTermEnforcement::Estimate,
+    });
+    if matches!(
+        review.action,
+        ApprovalAction::Bridge
+            | ApprovalAction::ExchangeWithdrawal
+            | ApprovalAction::AccountTransfer
+    ) && let Some(account) = review.output.as_ref().and_then(|l| l.account.as_ref())
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Recipient".into(),
+            value: account.name.clone(),
+            enforcement: if matches!(review.action, ApprovalAction::Bridge) {
+                ApprovalTermEnforcement::AfterExecution
+            } else {
+                ApprovalTermEnforcement::Enforced
+            },
+        });
+    }
+    if let Some(deadline) = &prepared.action_deadline {
+        review.terms.push(ApprovalTerm {
+            label: "Deadline".into(),
+            value: format!("Unix time {}", deadline.deadline_unix_seconds),
+            enforcement: ApprovalTermEnforcement::Enforced,
+        });
+    }
+    if let Some(bps) = prepared.input["maximum_slippage_bps"]
+        .as_u64()
+        .or_else(|| prepared.input["slippage_bps"].as_u64())
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Maximum quoted slippage".into(),
+            value: format!("{}%", Quantity::from_u64(bps).to_decimal(2)),
+            enforcement: ApprovalTermEnforcement::Enforced,
+        });
+    }
+    if let Some(bps) = prepared.input["max_price_impact_bps"].as_u64() {
+        review.terms.push(ApprovalTerm {
+            label: "Maximum quoted price impact".into(),
+            value: format!("{}%", Quantity::from_u64(bps).to_decimal(2)),
+            enforcement: ApprovalTermEnforcement::Enforced,
+        });
+    }
     // These classifications are deliberately conservative: the result and
     // provider fee may only be established from execution evidence.
     if let Some(leg) = &review.input
@@ -699,7 +725,13 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         review.terms.push(ApprovalTerm {
             label: "Input amount".into(),
             value: amount.clone(),
-            enforcement: ApprovalTermEnforcement::Enforced,
+            enforcement: if prepared.operation == "jupiter.swap"
+                || prepared.binding["provider"] == "uniswap_api_v1"
+            {
+                ApprovalTermEnforcement::AfterExecution
+            } else {
+                ApprovalTermEnforcement::Enforced
+            },
         });
     }
     if let Some(leg) = &review.output
@@ -710,7 +742,10 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
             value: amount.clone(),
             // The locally constructed Uniswap router calldata contains
             // amountOutMinimum; provider-trusted variants need separate review.
-            enforcement: if prepared.operation == "uniswap.swap" && prepared.operation_version == 1
+            enforcement: if matches!(
+                prepared.operation.as_str(),
+                "uniswap.swap" | "pancakeswap.swap" | "sushi.swap" | "ramses.swap" | "swap.execute"
+            ) && prepared.binding["provider"] != "uniswap_api_v1"
             {
                 ApprovalTermEnforcement::Enforced
             } else {
@@ -737,7 +772,9 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         });
     }
     for cost in &prepared.intent.maximum_costs {
-        if cost.treatment != crate::CostTreatment::VenueCalculatedAdditionalDebit {
+        if !cost.amount.atoms.is_zero()
+            && cost.treatment != crate::CostTreatment::VenueCalculatedAdditionalDebit
+        {
             review.terms.push(ApprovalTerm {
                 label: "Fee amount".into(),
                 value: format!(
@@ -747,7 +784,16 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
                 ),
                 // Historical cost envelopes are accounting limits, not proof
                 // of a provider-enforced fee cap.
-                enforcement: ApprovalTermEnforcement::AfterExecution,
+                enforcement: if prepared
+                    .binding
+                    .pointer("/transaction/max_fee_per_gas")
+                    .is_some()
+                    && cost.amount.asset.reference == "native"
+                {
+                    ApprovalTermEnforcement::Enforced
+                } else {
+                    ApprovalTermEnforcement::AfterExecution
+                },
             });
         }
     }
@@ -857,9 +903,9 @@ mod tests {
             amount: debit.amount,
             treatment: crate::CostTreatment::IncludedInDebit,
         }];
-        let details = approval_review(&p).unwrap().other_details.unwrap();
-        assert!(details.contains("Incl. cost ≤: 1.2345 USDC"), "{details}");
-        assert!(!details.contains("Fee"), "{details}");
+        let review = approval_review(&p).unwrap();
+        assert!(review.other_details.is_none());
+        assert_eq!(p.intent.maximum_costs.len(), 1);
     }
     #[test]
     fn derives_review_from_typed_intent_and_binds_it() {

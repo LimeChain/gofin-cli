@@ -1,4 +1,6 @@
 // Provider-correlated principal refund, exercised through the public CLI.
+#[path = "outcome_evidence.rs"]
+mod outcome_evidence;
 struct RefundVenue {
     main: Arc<Venue>,
     other: Arc<Venue>,
@@ -124,7 +126,10 @@ async fn failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_o
         "failed-withdrawal",
         "--json",
     ]);
+    let counters = || (approval.0.load(Ordering::SeqCst),venue.main.writes.load(Ordering::SeqCst)+venue.other.writes.load(Ordering::SeqCst));
+    let before_action = counters();
     let failed = client.call(argv.clone(), request.clone(), true).await;
+    let after_action = counters();
     assert_eq!(failed["status"], "failed", "{failed}");
     assert_eq!(failed["outcome"]["transfer"], "source_pending", "{failed}");
     assert_eq!(failed["outcome"]["replay_safe"], false);
@@ -137,10 +142,12 @@ async fn failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_o
         )
         .await;
     assert!(open.to_string().contains(id), "{open}");
-    for (probe, account) in [
-        ("same-account", "synthetic-spot"),
-        ("other-account", "synthetic-other"),
+    let mut probes=Vec::new();
+    for (scope, probe, account) in [
+        ("same_account", "same-account", "synthetic-spot"),
+        ("different_account", "other-account", "synthetic-other"),
     ] {
+        let before=counters();
         let input = json!({"requestId":probe,"account":account,"pair":"ETHUSDC","type":"buy","ordertype":"limit","volume":"0.006","price":"2000","maximumFees":{"XETH":"0.00003","USDC":"0.05"},"minimumReceive":"0.00597","timeinforce":"IOC"});
         let result = client
             .call(
@@ -165,6 +172,7 @@ async fn failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_o
             )
             .await;
         assert_eq!(result["status"], "completed", "{result}");
+        probes.push(outcome_evidence::admission_probe(scope,before,counters(),&result));
     }
     let repeat = client.call(argv.clone(), request.clone(), true).await;
     assert_eq!(repeat["submission"], failed["submission"]);
@@ -206,6 +214,8 @@ async fn failed_kraken_withdrawal_waits_for_correlated_refund_without_blocking_o
     assert_eq!(venue.main.writes.load(Ordering::SeqCst), 2);
     assert_eq!(venue.other.writes.load(Ordering::SeqCst), 1);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        std::fs::write(path, serde_json::to_vec_pretty(&json!({"scenario":"outcome.a15.kraken","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false,"refund_evidence":"Unique withdrawal and principal-return ledger entries share original refid; only proven fee remains spent."})).unwrap()).unwrap();
+        let mut evidence=json!({"scenario":"outcome.a15.kraken","approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":false,"refund_evidence":"Unique withdrawal and principal-return ledger entries share original refid; only proven fee remains spent."});
+        outcome_evidence::attach_probes(&mut evidence,&probes);
+        std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }

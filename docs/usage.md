@@ -48,7 +48,7 @@ use the documented preview and verification steps before submitting.
 | `gofin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
 | Application adapters: `gofin-exchange`, `gofin-binance`, `gofin-kraken`, `gofin-hyperliquid`, `gofin-ethereum`, `gofin-evm`, `gofin-bridge`, `gofin-solana`, `gofin-jupiter` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
 | `gofin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
-| `gofin-authorization` | Rust library | Enforce OS authorization and verify exact approvals or finite operation-boundary consent. Invoke the internal native helper. |
+| `gofin-authorization` | Rust library | Enforce OS authorization and verify native per-action approval and in-scope candidate refresh. Invoke the internal native helper. |
 | `gofin-credentials` + `gofin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
 | Native Touch ID helper | Compiled Swift binary: `gofin-touch-id`; human display name **GoFin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
 | `gofin-domain`, `gofin-discovery`, `gofin-protocol`, `gofin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
@@ -240,9 +240,9 @@ Unknown route information stays unknown. Error reports contain code-owned error
 codes, fixed categories and safe panic source locations, rather than raw messages
 or backtraces.
 
-Execution events include `execution_mode`: `plan`, `bounded_authorization`, or
-`standalone`, based on the selected CLI route. No plan, step or authorization ID
-is collected. Group `gofin.command_completed` events with `command=execute` by
+New execution events use `execution_mode: standalone`. Historical events may
+contain retired plan or bounded-authorization modes. No plan, step or authorization
+ID is collected. Group `gofin.command_completed` events with `command=execute` by
 this field to compare usage and outcomes. Dry runs remain previews and omit the
 field. These are invocation counts, not unique completed steps; retries may
 observe the same completed result again. The field does not identify whether
@@ -316,7 +316,7 @@ human-terminal requirement. No derivation-path or mnemonic options are exposed.
 `gofin connections list` shows enrolled connections in both human and JSON output.
 A reusable EVM wallet appears once, with its supported networks grouped under
 `details.networks`. Derived withdrawal destinations and per-chain signer records
-remain internal to plan authorization; they are not additional enrollments.
+remain internal to action authorization; they are not additional enrollments.
 
 Every reusable EVM wallet automatically exposes its Hyperliquid owner account
 using the same protected signer and address. Existing wallets receive the link
@@ -875,7 +875,9 @@ primary RPC cooldown before signing, then rechecks freshness and authorization.
 A longer cooldown fails preparation without submitting a transaction.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
-For a coherent sequence, the agent invokes logical actions. A declared compound action has one native approval and an explicit reviewed deadline. Do preparation before approval, then let the broker refresh candidates within the approved terms. Observe the original identity after interruption and use its returned continuation token for unfinished stages. Status is bounded; no background runner advances work after the invocation ends.
+The Touch ID prompt allows up to 90 seconds to respond. A successful standalone financial approval then allows submission for 30 minutes from the approval time, subject to all existing balance, allowance, nonce, simulation and financial-bound checks. Quotes and transaction candidates retain their own freshness limits. Continuing an action or restarting GoFin does not reset its approval window; previously stored approvals retain their original expiry.
+
+For a coherent sequence, the agent invokes logical actions. A declared compound action has one native approval and an explicit reviewed deadline, rather than the standalone 30-minute window. Do preparation before approval, then let the broker refresh candidates within the approved terms. Observe the original identity after interruption and use its returned continuation token for unfinished stages. Status is bounded; no background runner advances work after the invocation ends.
 
 See the [responsiveness checks and human verification steps](testing/responsiveness.md).
 

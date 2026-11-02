@@ -106,6 +106,7 @@ struct Venue {
     filters_changed: AtomicBool,
     discount: AtomicBool,
     futures_burn: AtomicBool,
+    unrelated_futures_wallet_credit: AtomicBool,
     mark_price: Mutex<String>,
     maximum_price: Mutex<String>,
     hedge: AtomicBool,
@@ -146,6 +147,7 @@ impl Venue {
             filters_changed: AtomicBool::new(false),
             discount: AtomicBool::new(false),
             futures_burn: AtomicBool::new(false),
+            unrelated_futures_wallet_credit: AtomicBool::new(false),
             mark_price: Mutex::new("2000".into()),
             maximum_price: Mutex::new("2500".into()),
             hedge: AtomicBool::new(false),
@@ -325,6 +327,9 @@ impl Venue {
                 if futures {
                     state.position += if buy { quantity } else { -quantity };
                     state.collateral += pnl;
+                    if self.unrelated_futures_wallet_credit.load(Ordering::SeqCst) {
+                        state.collateral += units("3");
+                    }
                     if fill.fee_asset == "BNB" {
                         state.futures_bnb -= fee;
                     } else {
@@ -1198,6 +1203,33 @@ async fn low_limit_futures_sell_retains_finite_venue_ceiling_without_usd_gate() 
             .movement_usd_micros
             .to_string(),
         "120000000"
+    );
+}
+
+#[tokio::test]
+async fn correlated_futures_fill_is_independent_of_unrelated_wallet_credit() {
+    let venue = Venue::new(vec![Fill::full("USDT", "0.04")]);
+    venue
+        .unrelated_futures_wallet_credit
+        .store(true, Ordering::SeqCst);
+    let engine = make_engine(
+        venue.clone(),
+        prices(),
+        approve(ApprovalMode::Accept),
+        Store::in_memory().unwrap(),
+    );
+    let record = engine
+        .execute(request(
+            input("synthetic-unrelated-credit", "BUY", true),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.status, Status::Completed, "{record:?}");
+    assert!(record.effects.is_some());
+    assert_eq!(
+        record.last_reconciliation_evidence.as_ref().unwrap()["balanceChangesVerified"],
+        false
     );
 }
 

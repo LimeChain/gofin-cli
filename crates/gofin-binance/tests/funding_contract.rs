@@ -3903,10 +3903,9 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
         "destination must not query Binance"
     );
     assert_eq!(destination.metadata["status"], "completed");
-    assert_eq!(
-        destination.reconciliation.unwrap().status,
-        gofin_domain::Status::Pending
-    );
+    let observation = destination.reconciliation.unwrap();
+    assert_eq!(observation.status, gofin_domain::Status::Pending);
+    assert_eq!(observation.evidence["outcome_transfer"], "credited");
     let result = adapter.reconcile(&order).await.unwrap();
     assert_eq!(result.status, gofin_domain::Status::Completed);
     let proof = result.verified.unwrap();

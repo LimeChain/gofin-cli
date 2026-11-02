@@ -53,7 +53,7 @@ mod reservation_overrides;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -69,6 +69,16 @@ pub enum StoreError {
     SubmissionConflict,
     #[error("execution action, authority, stage or continuation conflicts with durable state")]
     ExecutionConflict,
+    #[error("another invocation holds this action")]
+    ActionLeaseHeld,
+    #[error("approval or action deadline has expired")]
+    AuthorityExpired,
+    #[error("this attempt requires renewed approval")]
+    RenewedApprovalRequired,
+    #[error("signer nonce cannot be safely determined")]
+    NonceUnavailable,
+    #[error("another replacement is already active for this original submission")]
+    ReplacementInProgress,
     #[error("dispatch evidence cannot be changed or lacks its exact durable submission")]
     DispatchEvidenceConflict,
     #[error("resource reservation cannot be changed")]
@@ -694,6 +704,17 @@ impl Store {
                     ["operation_id", "admitted_at"].as_slice(),
                 ));
             }
+            if version >= 41 {
+                expected.push((
+                    "replacement_claims",
+                    [
+                        "parent_operation_id",
+                        "child_operation_id",
+                        "submission_json",
+                    ]
+                    .as_slice(),
+                ));
+            }
             if version >= 31 {
                 expected.push((
                     "evm_definitive_rejections",
@@ -1169,7 +1190,7 @@ impl Store {
                     record_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                  );
-                 PRAGMA user_version = 1;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 1;",
             )?;
             tx.commit()?;
         }
@@ -1193,7 +1214,7 @@ impl Store {
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(authorization_id, operation_id)
                  );
-                 PRAGMA user_version = 2;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 2;",
             )?;
             tx.commit()?;
         }
@@ -1210,7 +1231,7 @@ impl Store {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                  );
-                 PRAGMA user_version = 3;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 3;",
             )?;
             tx.commit()?;
         }
@@ -1307,7 +1328,7 @@ impl Store {
                     source_proved_at TEXT NOT NULL,
                     transfer_settled_at TEXT
                  );
-                 PRAGMA user_version = 4;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 4;",
             )?;
             tx.commit()?;
         }
@@ -1327,7 +1348,7 @@ impl Store {
                     SELECT transfer_id,step_id,operation_id,step_json FROM bridge_step_links;
                  DROP TABLE bridge_step_links;
                  ALTER TABLE bridge_step_links_new RENAME TO bridge_step_links;
-                 PRAGMA user_version = 5;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 5;",
             )?;
             tx.commit()?;
         }
@@ -1343,7 +1364,7 @@ impl Store {
                     settled_at TEXT NOT NULL,
                     PRIMARY KEY(transfer_id, proof_digest)
                  );
-                 PRAGMA user_version = 6;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 6;",
             )?;
             tx.commit()?;
         }
@@ -1359,7 +1380,7 @@ impl Store {
                     transfer_id TEXT NOT NULL REFERENCES bridge_transfers(transfer_id),
                     role TEXT NOT NULL CHECK(role IN ('source','final'))
                  );
-                 PRAGMA user_version = 7;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 7;",
             )?;
             tx.commit()?;
         }
@@ -1403,7 +1424,7 @@ impl Store {
                     PRIMARY KEY(plan_id, revision_id, step_id, operation_id)
                  );
                  CREATE INDEX IF NOT EXISTS financial_plan_attempts_active_idx ON financial_plan_attempts(plan_id, candidate_state);
-                 PRAGMA user_version = 8;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 8;",
             )?;
             tx.commit()?;
         }
@@ -1429,7 +1450,7 @@ impl Store {
                 event_id TEXT NOT NULL,
                 event_json TEXT NOT NULL,
                 PRIMARY KEY(operation_id, event_id)
-            ); PRAGMA user_version = 10;",
+            ); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 10;",
             )?;
             tx.commit()?;
         }
@@ -1449,7 +1470,7 @@ impl Store {
                 successor_reference TEXT,
                 UNIQUE(original_operation_id,revision),
                 UNIQUE(successor_kind,successor_reference)
-            ); PRAGMA user_version = 11;",
+            ); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 11;",
             )?;
             tx.commit()?;
         }
@@ -1473,7 +1494,7 @@ impl Store {
                 UNIQUE(amendment_operation_id,original_operation_id),
                 UNIQUE(original_operation_id,revision),
                 UNIQUE(successor_kind,successor_reference)
-            ); PRAGMA user_version = 12;")?;
+            ); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 12;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1482,21 +1503,21 @@ impl Store {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch("CREATE TABLE grouped_amendments(amendment_operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),original_operation_id TEXT NOT NULL REFERENCES operations(id),group_json TEXT NOT NULL);
             CREATE TABLE grouped_amendment_children(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),child_tag TEXT NOT NULL,proof_json TEXT,PRIMARY KEY(amendment_operation_id,child_tag));
-            CREATE TABLE grouped_amendment_revisions(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),revision INTEGER NOT NULL,revision_json TEXT NOT NULL,proof_json TEXT NOT NULL,PRIMARY KEY(original_operation_id,revision)); PRAGMA user_version=13;")?;
+            CREATE TABLE grouped_amendment_revisions(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),revision INTEGER NOT NULL,revision_json TEXT NOT NULL,proof_json TEXT NOT NULL,PRIMARY KEY(original_operation_id,revision)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=13;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 13 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE grouped_amendment_scopes(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),group_json TEXT NOT NULL,PRIMARY KEY(amendment_operation_id,original_operation_id)); PRAGMA user_version=14;")?;
+            tx.execute_batch("CREATE TABLE grouped_amendment_scopes(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),group_json TEXT NOT NULL,PRIMARY KEY(amendment_operation_id,original_operation_id)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=14;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 14 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE unresolved_cost_consumption(operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),proof_json TEXT NOT NULL,additional_usd_micros TEXT NOT NULL,updated_at TEXT NOT NULL); CREATE TABLE unresolved_cost_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); PRAGMA user_version=15;")?;
+            tx.execute_batch("CREATE TABLE unresolved_cost_consumption(operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),proof_json TEXT NOT NULL,additional_usd_micros TEXT NOT NULL,updated_at TEXT NOT NULL); CREATE TABLE unresolved_cost_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=15;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1506,7 +1527,7 @@ impl Store {
             tx.execute_batch("CREATE TABLE IF NOT EXISTS settlement_progress (
                 operation_id TEXT NOT NULL REFERENCES operations(id),sequence INTEGER NOT NULL,snapshot_id TEXT NOT NULL,proof_digest TEXT NOT NULL,proof_json TEXT NOT NULL,effects_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation_id,sequence),UNIQUE(operation_id,snapshot_id),UNIQUE(operation_id,proof_digest));
                 CREATE TABLE IF NOT EXISTS signer_nonces(signer_scope TEXT PRIMARY KEY NOT NULL,last_nonce INTEGER NOT NULL CHECK(last_nonce>=0));
-                CREATE TABLE IF NOT EXISTS operation_proof_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); PRAGMA user_version=16;")?;
+                CREATE TABLE IF NOT EXISTS operation_proof_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=16;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1515,7 +1536,7 @@ impl Store {
             // Mint stages and immutable message locators cannot be interpreted by
             // older executors. The marker migration preserves every existing row.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=17;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=17;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1524,7 +1545,7 @@ impl Store {
             // Cross-VM destination locators and Solana mint signatures are not
             // safe for older executors. Retain every existing journal byte.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=18;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=18;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1545,7 +1566,7 @@ impl Store {
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(plan_id, transfer_id, proof_digest)
                  );
-                 PRAGMA user_version = 19;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 19;",
             )?;
             tx.commit()?;
         }
@@ -1566,7 +1587,7 @@ impl Store {
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(plan_id, transfer_id, proof_digest)
                  );
-                 PRAGMA user_version = 20;",
+                 DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version = 20;",
             )?;
             tx.commit()?;
         }
@@ -1577,7 +1598,7 @@ impl Store {
             // that deny unknown journal fields. Preserve all rows and advance
             // the marker transactionally without rewriting durable history.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=21;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=21;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1586,7 +1607,7 @@ impl Store {
             // Configuration-only sudo authority is unknown to older binaries.
             // Preserve durable history and advance the compatibility marker atomically.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=22;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=22;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1603,7 +1624,7 @@ impl Store {
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX reservation_overrides_operation_idx ON reservation_overrides(operation_id);
-                PRAGMA user_version=23;"
+                DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=23;"
             )?;
             tx.commit()?;
         }
@@ -1622,7 +1643,7 @@ impl Store {
                     confirmation_json TEXT,
                     created_at TEXT NOT NULL
                 );
-                PRAGMA user_version=24;",
+                DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=24;",
             )?;
             tx.commit()?;
         }
@@ -1633,7 +1654,7 @@ impl Store {
             // intents. Older readers reject this enum variant, so advance the
             // compatibility marker atomically without rewriting any history.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=25;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=25;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1643,7 +1664,7 @@ impl Store {
             tx.execute_batch("CREATE TABLE outcome_observations (sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL REFERENCES operations(id), facts_json TEXT NOT NULL, source TEXT NOT NULL);
                 CREATE INDEX outcome_observations_operation ON outcome_observations(operation_id, sequence);
                 CREATE TABLE outcome_dismissals (operation_id TEXT PRIMARY KEY REFERENCES operations(id), dismissed_at TEXT NOT NULL);
-                PRAGMA user_version=26;")?;
+                DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=26;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1653,21 +1674,21 @@ impl Store {
             tx.execute_batch("CREATE TABLE logical_actions(action_id TEXT PRIMARY KEY REFERENCES operations(id), deadline TEXT NOT NULL);
                 CREATE TABLE action_authorities(action_id TEXT NOT NULL REFERENCES logical_actions(action_id), authority_id TEXT NOT NULL, authority_json TEXT NOT NULL, audit_json TEXT NOT NULL, expires_at TEXT NOT NULL, PRIMARY KEY(action_id,authority_id), UNIQUE(action_id,audit_json));
                 CREATE TABLE stage_attempts(token TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES logical_actions(action_id), stage_id TEXT NOT NULL, generation INTEGER NOT NULL, authority_id TEXT NOT NULL, operation_id TEXT UNIQUE REFERENCES operations(id), candidate_json TEXT, state TEXT NOT NULL, result_json TEXT, UNIQUE(action_id,stage_id,generation), FOREIGN KEY(action_id,authority_id) REFERENCES action_authorities(action_id,authority_id));
-                PRAGMA user_version=27;")?;
+                DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=27;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 27 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE action_continuations(token TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES logical_actions(action_id), generation INTEGER NOT NULL, stage_token TEXT REFERENCES stage_attempts(token), result_json TEXT, UNIQUE(action_id,generation)); PRAGMA user_version=28;")?;
+            tx.execute_batch("CREATE TABLE action_continuations(token TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES logical_actions(action_id), generation INTEGER NOT NULL, stage_token TEXT REFERENCES stage_attempts(token), result_json TEXT, UNIQUE(action_id,generation)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=28;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 28 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE evm_nonce_claims(signer_scope TEXT NOT NULL, nonce INTEGER NOT NULL CHECK(nonce>=0), operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id), PRIMARY KEY(signer_scope,nonce)); PRAGMA user_version=29;")?;
+            tx.execute_batch("CREATE TABLE evm_nonce_claims(signer_scope TEXT NOT NULL, nonce INTEGER NOT NULL CHECK(nonce>=0), operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id), PRIMARY KEY(signer_scope,nonce)); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=29;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1688,28 +1709,28 @@ impl Store {
                     project_evm_submission_nonce_tx(&tx, &id, &data)?;
                 }
             }
-            tx.execute_batch("PRAGMA user_version=30;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=30;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 30 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE evm_definitive_rejections(operation_id TEXT PRIMARY KEY REFERENCES operations(id),proof_json TEXT NOT NULL); PRAGMA user_version=31;")?;
+            tx.execute_batch("CREATE TABLE evm_definitive_rejections(operation_id TEXT PRIMARY KEY REFERENCES operations(id),proof_json TEXT NOT NULL); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=31;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 31 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE submission_admissions(operation_id TEXT PRIMARY KEY REFERENCES operations(id),admitted_at TEXT NOT NULL); PRAGMA user_version=32;")?;
+            tx.execute_batch("CREATE TABLE submission_admissions(operation_id TEXT PRIMARY KEY REFERENCES operations(id),admitted_at TEXT NOT NULL); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=32;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 32 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE TABLE reauthorization_claims(token TEXT PRIMARY KEY REFERENCES action_continuations(token), input_hash TEXT NOT NULL, candidate_json TEXT NOT NULL, authority_id TEXT, result_json TEXT); PRAGMA user_version=33;")?;
+            tx.execute_batch("CREATE TABLE reauthorization_claims(token TEXT PRIMARY KEY REFERENCES action_continuations(token), input_hash TEXT NOT NULL, candidate_json TEXT NOT NULL, authority_id TEXT, result_json TEXT); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=33;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1728,7 +1749,7 @@ impl Store {
                     project_verified_position_anchors_tx(&tx, &id, &value)?;
                 }
             }
-            tx.execute_batch("PRAGMA user_version=34;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=34;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1748,7 +1769,7 @@ impl Store {
             ] {
                 tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS operation_binding_{name} ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'{path}') END);"))?;
             }
-            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_recovery_parent ON operations(CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_recovery.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_recovery.parent_operation_id')) END); PRAGMA user_version=35;")?;
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_recovery_parent ON operations(CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_recovery.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_recovery.parent_operation_id')) END); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=35;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1762,14 +1783,14 @@ impl Store {
             ] {
                 tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS operation_binding_{name} ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'{path}') END);"))?;
             }
-            tx.execute_batch("PRAGMA user_version=36;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=36;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 36 {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_binding_successor_client_id ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.preview.binding.successorClientOrderId') END); PRAGMA user_version=37;")?;
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS operation_binding_successor_client_id ON operations(CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.operation') END, CASE WHEN json_valid(record_json) THEN json_extract(record_json,'$.preview.binding.successorClientOrderId') END); DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=37;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1786,7 +1807,7 @@ impl Store {
                 let token = execution_admission::preapproval_token(&id, 1)?;
                 tx.execute("INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,1)",params![token,id])?;
             }
-            tx.execute_batch("PRAGMA user_version=38;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1802,7 +1823,7 @@ impl Store {
                 let token = execution_admission::preapproval_token(&id, 1)?;
                 tx.execute("INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,1)",params![token,id])?;
             }
-            tx.execute_batch("PRAGMA user_version=39;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=39;")?;
             tx.commit()?;
         }
         let migrated_version: i64 =
@@ -1820,7 +1841,14 @@ impl Store {
                     project_verified_position_anchors_tx(&tx, &id, &value)?;
                 }
             }
-            tx.execute_batch("PRAGMA user_version=40;")?;
+            tx.execute_batch("DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=40;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 40 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE replacement_claims(parent_operation_id TEXT PRIMARY KEY REFERENCES operations(id),child_operation_id TEXT UNIQUE NOT NULL REFERENCES operations(id),submission_json TEXT NOT NULL); CREATE INDEX replacement_parent_identity ON operations(CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_replacement.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_replacement.parent_operation_id')) END); PRAGMA user_version=41;")?;
             tx.commit()?;
         }
         Ok(())
@@ -1844,19 +1872,31 @@ impl Store {
         &self,
         operation_id: &str,
     ) -> Result<Vec<gofin_domain::outcome::OutcomeObservation>> {
+        Ok(self.outcome_observations_isolated(operation_id)?.0)
+    }
+
+    /// Preserve readable evidence and report any malformed/future-version row.
+    pub fn outcome_observations_isolated(
+        &self,
+        operation_id: &str,
+    ) -> Result<(Vec<gofin_domain::outcome::OutcomeObservation>, bool)> {
         let mut statement = self.conn.prepare("SELECT facts_json,source FROM outcome_observations WHERE operation_id=?1 ORDER BY sequence")?;
         let rows = statement.query_map([operation_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
         let mut observations = Vec::new();
+        let mut incomplete = false;
         for row in rows {
-            let (facts, source) = row?;
-            observations.push(gofin_domain::outcome::OutcomeObservation {
-                facts: serde_json::from_str(&facts)?,
-                source,
-            });
+            match row {
+                Ok((facts, source)) => match serde_json::from_str(&facts) {
+                    Ok(facts) => observations
+                        .push(gofin_domain::outcome::OutcomeObservation { facts, source }),
+                    Err(_) => incomplete = true,
+                },
+                Err(_) => incomplete = true,
+            }
         }
-        Ok(observations)
+        Ok((observations, incomplete))
     }
 
     pub fn dismiss_operation(&mut self, operation_id: &str, timestamp: &str) -> Result<()> {
@@ -3269,22 +3309,6 @@ impl Store {
                         params![record.to_string(), id],
                     )?;
                     tx.execute("DELETE FROM reservations WHERE operation_id=?1", [&id])?;
-                    if let Some((plan_id, _revision_id, _step_id)) = tx.query_row(
-                        "SELECT plan_id, revision_id, step_id FROM financial_plan_attempts WHERE operation_id=?1 AND candidate_state='unresolved'",
-                        [&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-                    ).optional()? {
-                        if let Some(raw_plan) = tx.query_row("SELECT record_json FROM financial_plans WHERE plan_id=?1", [&plan_id], |row| row.get::<_, String>(0)).optional()? {
-                            let mut plan: Value = serde_json::from_str(&raw_plan)?;
-                            if plan.get("active_attempt_id").and_then(Value::as_str) == Some(id.as_str()) {
-                                plan["active_attempt_id"] = Value::Null;
-                                if let Some(reservations) = plan.pointer_mut("/usage/reservations").and_then(Value::as_array_mut) {
-                                    reservations.retain(|reservation| reservation.get("attempt_id").and_then(Value::as_str) != Some(id.as_str()));
-                                }
-                                tx.execute("UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3", params![plan.to_string(), chrono::Utc::now().to_rfc3339(), plan_id])?;
-                            }
-                        }
-                        tx.execute("UPDATE financial_plan_attempts SET candidate_state='cancelled' WHERE operation_id=?1 AND candidate_state='unresolved'", [&id])?;
-                    }
                     report.cancelled_before_submission.push(id);
                 }
                 "submitted" => {
@@ -3666,7 +3690,12 @@ impl Store {
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .is_some_and(|t| t.with_timezone(&chrono::Utc) <= chrono::Utc::now());
             let uncertain:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM outcome_observations WHERE operation_id=?1 AND CASE WHEN json_valid(facts_json) THEN json_extract(facts_json,'$.dispatch')='uncertain' ELSE 0 END)",[&id],|r|r.get(0))?;
-            if status != "unknown" && !horizon_passed && !uncertain {
+            let submitted: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if status != "unknown" && !horizon_passed && !uncertain && !submitted {
                 continue;
             }
             results.push(json!({"id":id,"operation":operation,"amounts":debits}));
@@ -8232,6 +8261,27 @@ impl Store {
         record: &Value,
         timestamp: &str,
     ) -> Result<()> {
+        self.update_record_checked(operation_id, None, record, timestamp)
+            .map(|_| ())
+    }
+
+    pub fn update_record_if_unchanged(
+        &mut self,
+        operation_id: &str,
+        expected: &Value,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<bool> {
+        self.update_record_checked(operation_id, Some(expected), record, timestamp)
+    }
+
+    fn update_record_checked(
+        &mut self,
+        operation_id: &str,
+        expected: Option<&Value>,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<bool> {
         let request_id = json_string(record, "request_id").ok_or(StoreError::OperationNotFound)?;
         let fingerprint =
             json_string(record, "fingerprint").ok_or(StoreError::OperationNotFound)?;
@@ -8253,10 +8303,24 @@ impl Store {
         if request_id != durable_request || fingerprint != durable_fingerprint {
             return Err(StoreError::RequestConflict);
         }
+        let durable_record: Value = serde_json::from_str(&durable_record)?;
+        if expected.is_some_and(|value| value != &durable_record) {
+            return Ok(false);
+        }
         if is_terminal(&durable_status) && durable_status != status {
             return Err(StoreError::AlreadySettled);
         }
-        let durable_record: Value = serde_json::from_str(&durable_record)?;
+        // Typed engine records can omit fields added by a newer writer. Keep
+        // every field that did not survive deserializing the raw snapshot;
+        // the CAS still compares the entire original value before merging.
+        let mut merged = record.clone();
+        if expected.is_some() {
+            let typed: gofin_domain::OperationRecord =
+                serde_json::from_value(durable_record.clone())?;
+            let normalized = serde_json::to_value(typed)?;
+            preserve_unknown_json_fields(&durable_record, &normalized, &mut merged);
+        }
+        let record = &merged;
         validate_dispatch_evidence_transition(&durable_record, record)?;
         let old_submission: Option<SubmissionRow> = tx
             .query_row(
@@ -8299,7 +8363,7 @@ impl Store {
             params![status, record.to_string(), timestamp, operation_id],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Latest nonconflicting verified predecessor per exact position identity.
@@ -11457,6 +11521,33 @@ fn get_record_tx(tx: &Transaction<'_>, operation_id: &str) -> Result<Option<Valu
     .map_err(StoreError::from)
 }
 
+fn preserve_unknown_json_fields(raw: &Value, normalized: &Value, updated: &mut Value) {
+    match (raw, normalized, updated) {
+        (Value::Object(raw), Value::Object(normalized), Value::Object(updated)) => {
+            for (key, value) in raw {
+                match normalized.get(key) {
+                    None => {
+                        updated.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
+                    Some(known) => {
+                        if let Some(destination) = updated.get_mut(key) {
+                            preserve_unknown_json_fields(value, known, destination);
+                        }
+                    }
+                }
+            }
+        }
+        (Value::Array(raw), Value::Array(normalized), Value::Array(updated))
+            if raw.len() == normalized.len() && raw.len() == updated.len() =>
+        {
+            for ((raw, known), dest) in raw.iter().zip(normalized).zip(updated) {
+                preserve_unknown_json_fields(raw, known, dest);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn project_verified_position_anchors_tx(
     tx: &Transaction<'_>,
     operation_id: &str,
@@ -12075,7 +12166,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        store.conn.execute_batch("DROP TABLE preapproval_continuations; DROP INDEX operation_binding_order_key; DROP INDEX operation_binding_funding_id; DROP INDEX operation_binding_resource; DROP INDEX operation_binding_client_id; DROP INDEX operation_binding_binding_client_id; DROP INDEX operation_binding_binding_resource; DROP INDEX operation_recovery_parent; PRAGMA user_version=34;").unwrap();
+        store.conn.execute_batch("DROP TABLE preapproval_continuations; DROP INDEX operation_binding_order_key; DROP INDEX operation_binding_funding_id; DROP INDEX operation_binding_resource; DROP INDEX operation_binding_client_id; DROP INDEX operation_binding_binding_client_id; DROP INDEX operation_binding_binding_resource; DROP INDEX operation_recovery_parent; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=34;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let records = store

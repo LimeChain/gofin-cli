@@ -1919,7 +1919,7 @@ pub trait Adapter: Send + Sync {
     }
     /// Advisory polling usefulness horizon, not a provider guarantee or evidence of nonexecution.
     fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
-        None
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
     }
     /// Prepare a new review for only the unresolved remainder of a persisted action.
     async fn prepare_remaining_action(

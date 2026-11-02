@@ -3044,8 +3044,13 @@ impl KrakenProfile {
                         36,
                     )?
             {
-                return crate::unresolved_consumption::cost_overrun(
+                return crate::unresolved_consumption::proven_cost_overrun(
                     submission,
+                    if all_terminal && binding["conditionalChildrenPending"] != true {
+                        Status::Completed
+                    } else {
+                        Status::Pending
+                    },
                     &effects,
                     json!({"code":"KRAKEN_FEE_BOUND_EXCEEDED","asset":code,"actualFeeAtoms":total,"orders":evidence,"proofEvents":proof_events}),
                 );

@@ -9,8 +9,6 @@ Native approval, human response and live settlement are separate observations.
 ```sh
 cargo test --locked -p gofin-broker latency -- --nocapture
 cargo test --locked -p gofin-engine latency_necessary -- --nocapture
-cargo test --locked -p gofin-binance --test trading_contract plan_permission_latency -- --nocapture
-cargo test --locked -p gofin-ethereum --lib plan_permission_latency -- --nocapture
 cargo test --locked -p gofin-ethereum --lib scoped_snapshot -- --nocapture
 cargo test --locked -p gofin-engine stalled_required -- --nocapture
 cargo test --locked -p gofin-evm read_deadline -- --nocapture
@@ -50,52 +48,18 @@ Choose an enrolled reviewed network if Base is unavailable. Check that coverage
 identifies only the selected network, native fees and related exposure. With a
 known unavailable RPC, require `complete:false` and a named observer/network in
 `pending`. While that read runs, use another Terminal to time `gofin connections
---json` and `gofin policy show --json`; they should reply promptly. Do not change
+--json` and `gofin daemon status --json`; they should reply promptly. Do not change
 RPC configuration solely for this check.
 
-The following read-only plan exercises protected plan review and Touch ID without
-submitting a financial operation. It binds a snapshot read and empty financial
-caps. Do not execute the step; approval itself should require no snapshot/RPC.
-Use a temporary public-plan file:
+Native approval timing requires an actual supported financial review. Do not
+create a retired plan or use a read as a stand-in for financial approval. Use a
+human-requested operation and record invocation-to-prompt, human response and
+submission time separately. Check that the review shows native quantities,
+destination, financial bounds and expiry. Cancellation or expiry must admit no
+submission. Status observation must require no financial approval.
 
-```sh
-cat > /tmp/gofin-responsiveness-plan.json <<'JSON'
-{
-  "version": 1,
-  "name": "GoFin responsiveness check",
-  "steps": [{
-    "step_id": "observe",
-    "operation": "gofin.snapshot",
-    "input": {"networks": ["ethereum:8453"]},
-    "permitted_variations": {
-      "mode": "exact",
-      "maximum_debits": [],
-      "maximum_costs": [],
-      "possible_credits": []
-    },
-    "completion": {"operation_succeeded": true},
-    "funding_dependencies": []
-  }],
-  "aggregate_bounds": {"maximum_debits": [], "maximum_costs": []}
-}
-JSON
-gofin plans preview --input "$(cat /tmp/gofin-responsiveness-plan.json)" --json > /tmp/gofin-responsiveness-review.json
-gofin plans authorize --input "$(cat /tmp/gofin-responsiveness-plan.json)" \
-  --id "responsiveness-check-$(date +%s)" --valid-for 10m \
-  --review-hash "$(python3 -c 'import json; print(json.load(open("/tmp/gofin-responsiveness-review.json"))["review_hash"])')" --json
-```
-
-Record command invocation to the native prompt separately from prompt-to-human
-response and total command time. Verify the native reason names the plan, ordered
-step count and duration. After acceptance, copy the returned `plan_id` and run
-`gofin plans status PLAN_ID --json`, then `gofin plans cancel PLAN_ID --json`.
-Revocation must need no Touch ID and status must show revoked authority.
-Repeat with a new request ID and decline/cancel the native prompt; require a
-structured failure and no active grant. For expiry, leave the approval prompt
-unanswered until its challenge expires, then inspect the structured error. GoFin
-must neither renew approval automatically nor execute the read or a write.
-
-Never insert a full snapshot after conversational approval.
+Complete non-time-sensitive preparation before the prompt. Revalidate only the
+required authority, binding, freshness and native conditions before dispatch.
 
 For funded end-to-end checks, follow the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md).
 Keep run evidence under ignored `.context/`; synthetic timing fixtures do not

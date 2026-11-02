@@ -915,14 +915,14 @@ async fn beneficial_sell_price_with_unexpected_fee_excess_preserves_receipt_and_
         run_id: None,
     };
     let record = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(record.status, Status::Unknown);
+    assert_eq!(record.status, Status::Completed);
     assert!(record.submission.is_some());
     assert!(record.dispatch_evidence.is_some());
     assert_eq!(
-        record.last_reconciliation_evidence.as_ref().unwrap()["observations"]["code"],
+        record.last_reconciliation_evidence.as_ref().unwrap()["code"],
         "KRAKEN_FEE_BOUND_EXCEEDED"
     );
-    assert!(record.effects.is_none());
+    assert!(record.effects.is_some());
     let again = engine.execute(request).await.unwrap();
     assert_eq!(again.id, record.id);
     assert_eq!(

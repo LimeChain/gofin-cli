@@ -3,6 +3,12 @@
 //! Build gofin-dev with GOFIN_DEV_BUILD_ID=synthetic-cctp-build, then set GOFIN_CCTP_CLI
 //! to its absolute path to include the public CLI and development socket transport.
 //! GOFIN_CCTP_BUILD_ID selects another explicitly built development binary identity.
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
+
 use async_trait::async_trait;
 use gofin_bridge::{BridgeBounds, FeeCap, FeeKind, cctp::*};
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
@@ -501,7 +507,10 @@ impl EvmRpc for Rpc {
                 ),
                 "eth_getTransactionCount" => json!(format!(
                     "{:#x}",
-                    s.broadcasts.get(&self.chain).copied().unwrap_or(0)
+                    s.transactions
+                        .iter()
+                        .filter(|((chain, _), (tx, _))| *chain == self.chain && tx["from"] == p[0])
+                        .count()
                 )),
                 "eth_maxPriorityFeePerGas" => json!(if self.chain == s.source_chain()
                     && s.source_large_fee_after_approval
@@ -740,10 +749,50 @@ impl UsdPriceSource for Prices {
     }
 }
 #[derive(Default)]
-struct Approvals(AtomicUsize);
+struct Approvals(
+    AtomicUsize,
+    AtomicBool,
+    Mutex<Vec<gofin_domain::approval_review::ApprovalReview>>,
+);
 #[async_trait]
 impl Authorizer for Approvals {
+    fn requires_financial_review(&self) -> bool {
+        self.1.load(Ordering::SeqCst)
+    }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        if self.requires_financial_review() {
+            let issued = now();
+            gofin_authorization::validate_challenge(c, &issued)?;
+            let native = gofin_authorization::helper_challenge(c)?;
+            self.2
+                .lock()
+                .unwrap()
+                .push(c.review.clone().expect("financial review required"));
+            #[cfg(target_os = "macos")]
+            {
+                let reason = native_approval::assert_review_renders(
+                    c.review.clone().unwrap(),
+                    &c.purpose,
+                    &c.operation_id,
+                    c.binding.clone(),
+                    &c.summary,
+                );
+                assert!(reason.contains("10"), "{reason}");
+                assert!(!reason.to_lowercase().contains("fee"), "{reason}");
+                assert!(!reason.to_lowercase().contains("deadline"), "{reason}");
+            }
+            let response = json!({
+                "version": 1,
+                "status": "accepted",
+                "nonce": c.nonce,
+                "bindingHash": native["bindingHash"],
+                "approvedAt": now(),
+                "expiresAt": c.expires_at,
+            });
+            let audit = gofin_authorization::validate_response(c, &response, &issued, &now())?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            return Ok(audit);
+        }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic".into(),
@@ -921,6 +970,8 @@ impl Harness {
             let state = chain.lock().unwrap();
             if state.owned_forks.is_some() && !state.alternate_fork_signer {
                 owned_fork::ATTESTER_KEY.to_owned()
+            } else if state.owned_forks.is_none() && state.alternate_fork_signer {
+                "22".repeat(32)
             } else {
                 "11".repeat(32)
             }
@@ -1108,7 +1159,7 @@ impl Harness {
                 .asset_id(),
                 kind: FeeKind::Gas,
                 maximum: Quantity::new("10000000000000000").unwrap(),
-                maximum_usd_micros: Some(20_000_000),
+                maximum_usd_micros: None,
             })
             .collect();
         fees.push(FeeCap {
@@ -1316,6 +1367,128 @@ impl Harness {
 mod owned_fork;
 #[path = "support/cctp_stack_refresh.rs"]
 mod stack_refresh;
+#[tokio::test]
+async fn compound_cctp_native_review_covers_all_stages_once() {
+    Box::pin(async {
+        let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
+        let (id, transfer) = h.start_compound("native-review").await;
+        assert_eq!(h.status(&transfer).await["state"], "in_transit");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        {
+            let reviews = h.approvals.2.lock().unwrap();
+            let review = &reviews[0];
+            assert_eq!(review.service, "cctp");
+            assert_eq!(review.input.as_ref().unwrap().amount.as_deref(), Some("10"));
+            assert_eq!(
+                review.output.as_ref().unwrap().amount.as_deref(),
+                Some("10")
+            );
+            assert_eq!(
+                review
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .account
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                "model-wallet"
+            );
+            assert_eq!(
+                review
+                    .output
+                    .as_ref()
+                    .unwrap()
+                    .account
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                h.wallet.to_lowercase()
+            );
+        }
+        h.chain.lock().unwrap().attestation_ready = true;
+        let waiting = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        let token = waiting
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let completed = h
+            .call(
+                args(&["operations", "continue", &id, "--token", &token, "--json"]),
+                BrokerRequest::ContinueOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                },
+            )
+            .await;
+        assert_eq!(completed["outcome"]["phase"], "done", "{completed}");
+        let replay = h
+            .call(
+                args(&["operations", "continue", &id, "--token", &token, "--json"]),
+                BrokerRequest::ContinueOperation {
+                    id: id.clone(),
+                    token,
+                },
+            )
+            .await;
+        assert_eq!(replay["id"], id, "{replay}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        let observed = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(observed["outcome"]["phase"], "done", "{observed}");
+        assert_eq!(observed["approval"]["source"], "touch_id");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(
+                observed["approval"]["expires_at"].as_str().unwrap()
+            )
+            .unwrap()
+            .timestamp(),
+            observed["input"]["actionDeadline"].as_i64().unwrap(),
+            "Compound consent must keep its reviewed action deadline"
+        );
+        let input = observed["input"].clone();
+        let repeated = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    "native-review",
+                    "--json",
+                ]),
+                BrokerRequest::Execute {
+                    request: OperationRequest {
+                        request_id: "native-review".into(),
+                        operation: "bridge.execute".into(),
+                        input,
+                        run_id: None,
+                    },
+                },
+            )
+            .await;
+        assert_eq!(repeated["id"], id, "{repeated}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
+}
+
 #[tokio::test]
 async fn known_canonical_mint_settles_without_destination_log_scan() {
     let h = Harness::new();
@@ -1912,6 +2085,7 @@ async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() 
 async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
     Box::pin(async {
         let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
         let (id, transfer) = h.start_compound("expired-action").await;
         let before = h.state.transfer(&transfer).unwrap().unwrap();
         h.clock.freeze();
@@ -1953,6 +2127,14 @@ async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
         assert_eq!(result["reauthorization"], "approved", "{result}");
         assert_eq!(h.status(&transfer).await["state"], "completed");
         assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let authorized = h.engine.status(&id, false).await.unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&authorized.approval.unwrap().expires_at)
+                .unwrap()
+                .timestamp(),
+            authorized.input["actionDeadline"].as_i64().unwrap(),
+            "Reauthorization must retain the newly reviewed compound deadline"
+        );
         let after = h.state.transfer(&transfer).unwrap().unwrap();
         assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
         assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
@@ -2311,11 +2493,17 @@ async fn cli_base_arbitrum_cctp_positive_lifecycle() {
             assert_eq!(state.destination_balance, U256::ZERO);
             state.attestation_ready = true;
         }
-        let _ = Box::pin(h.continue_compound(&id)).await;
+        let done = Box::pin(h.continue_compound(&id)).await;
+        assert_eq!(done["outcome"]["phase"],"done","{done}");
+        assert_eq!(done["outcome"]["result"],"executed");
+        assert_eq!(done["outcome"]["replay_safe"],false);
         assert_eq!(Box::pin(h.status(&transfer)).await["state"], "completed");
         let state = h.chain.lock().unwrap();
         assert_eq!(state.destination_balance, U256::from(10_000_000));
         assert_eq!(state.broadcasts, BTreeMap::from([(8453, 2), (42161, 1)]));
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+            std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"cctp-base-arbitrum","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":state.broadcasts.values().sum::<usize>(),"stage_submissions":state.broadcasts,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+        }
     })
     .await
 }
@@ -2341,11 +2529,17 @@ async fn cli_arbitrum_base_cctp_positive_lifecycle() {
             assert_eq!(state.destination_balance, U256::ZERO);
             state.attestation_ready = true;
         }
-        let _ = Box::pin(h.continue_compound(&id)).await;
+        let done = Box::pin(h.continue_compound(&id)).await;
+        assert_eq!(done["outcome"]["phase"],"done","{done}");
+        assert_eq!(done["outcome"]["result"],"executed");
+        assert_eq!(done["outcome"]["replay_safe"],false);
         assert_eq!(Box::pin(h.status(&transfer)).await["state"], "completed");
         let state = h.chain.lock().unwrap();
         assert_eq!(state.destination_balance, U256::from(10_000_000));
         assert_eq!(state.broadcasts, BTreeMap::from([(42161, 2), (8453, 1)]));
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+            std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"cctp-arbitrum-base","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":state.broadcasts.values().sum::<usize>(),"stage_submissions":state.broadcasts,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+        }
     })
     .await
 }
@@ -2385,10 +2579,21 @@ async fn cli_compound_cctp_refreshes_fee_after_allowance_without_reapproval() {
         assert!(!separate["submission"].is_null(),"{separate}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),2);
         let still=h.call(args(&["status",&id,"--json"]),BrokerRequest::Status{id:id.clone()}).await;
         assert_eq!(still["outcome"]["transfer"],"in_transit","{still}");
+        let main_counts=(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>());
+        let mut admission_probes=Vec::new();
+        let before=main_counts;
         let probe=json!({"request_id":"bridge-source-probe","wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.001"});
         let independent=h.call(args(&["execute","wallet.transfer","--input",&probe.to_string(),"--id","bridge-source-probe","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"bridge-source-probe".into(),operation:"wallet.transfer".into(),input:probe,run_id:None}}).await;
         assert!(!independent["submission"].is_null(),"{independent}");assert_eq!(h.approvals.0.load(Ordering::SeqCst),3);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let scenario=std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_default();let evidence=if scenario=="outcome.a17" {json!({"scenario":scenario,"approval_count":2,"external_submission_count":3,"probe_approval_count":1,"probe_submission_count":1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false})}else{json!({"scenario":"outcome.a18","approval_count":1,"external_submission_count":2,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false})};std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        admission_probes.push(outcome_evidence::admission_probe("same_account", before, (h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>()), &independent));
+        let original_wallet=h.wallet.clone();
+        h.chain.lock().unwrap().alternate_fork_signer=true;
+        let h=h.restart();assert_ne!(h.wallet,original_wallet);
+        let before=(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>());
+        let probe=json!({"request_id":"bridge-other-probe","wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.001"});
+        let independent=h.call(args(&["execute","wallet.transfer","--input",&probe.to_string(),"--id","bridge-other-probe","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"bridge-other-probe".into(),operation:"wallet.transfer".into(),input:probe,run_id:None}}).await;
+        admission_probes.push(outcome_evidence::admission_probe("different_account", before, (h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>()), &independent));
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let scenario=std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_default();let mut evidence=json!({"scenario":if scenario=="outcome.a17" {"outcome.a17"}else{"outcome.a18"},"approval_count":main_counts.0,"external_submission_count":main_counts.1,"intervention_count":0,"remaining_external_uncertainty":true});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
     }).await
 }
 
@@ -2471,6 +2676,8 @@ async fn owned_fork_cli_cctp_fee_refresh_and_remaining_reauthorization() {
         forks[&1].fund_usdc(&usdc_asset(1).unwrap().token.unwrap()).await.unwrap();
         let other=lower_address(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap().address());
         forks[&1].mutate("anvil_setBalance",json!([other,"0x56bc75e2d63100000"])).await.unwrap();
+        let mut main_counts=(0,0);
+        let mut admission_probes=Vec::new();
         for large in [false,true] {
             let chain=Arc::new(Mutex::new(ChainState{owned_forks:Some(forks.clone()),source_fee_after_approval:!large,source_large_fee_after_approval:large,..Default::default()}));
             let h=Harness::build(tempfile::tempdir().unwrap(),chain.clone(),Arc::new(Approvals::default()),Arc::new(Iris::new(chain)),OffsetClock::realtime());
@@ -2493,23 +2700,25 @@ async fn owned_fork_cli_cctp_fee_refresh_and_remaining_reauthorization() {
             assert_eq!(h.chain.lock().unwrap().broadcasts.get(&1),Some(&2));
             let attempts=Store::open(h.temp.path().join("cctp.sqlite")).unwrap().list_stage_attempts(&id).unwrap();assert_eq!(attempts.len(),2);
             assert_ne!(attempts[0].candidate.as_ref().unwrap().pointer("/binding/transaction/max_priority_fee_per_gas"),attempts[1].candidate.as_ref().unwrap().pointer("/binding/transaction/max_priority_fee_per_gas"));
+            let before=(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>());main_counts.0+=before.0;main_counts.1+=before.1;
             let probe_id=format!("fork-probe-{large}-same");
             let input=json!({"request_id":probe_id,"wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.00001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.1"});
             let request=OperationRequest{request_id:probe_id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None};
             let result=h.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&probe_id,"--json"]),BrokerRequest::Execute{request}).await;
-            assert!(!result["submission"].is_null(),"{result}");
+            admission_probes.push(outcome_evidence::admission_probe("same_account",before,(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>()),&result));
             h.chain.lock().unwrap().alternate_fork_signer=true;
             let h=h.restart();assert_ne!(h.wallet,owned_fork::OWNER);
+            let before=(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>());
             let probe_id=format!("fork-probe-{large}-other");
             let input=json!({"request_id":probe_id,"wallet":"model-wallet","network":"ethereum","chain_id":1,"token":"native","amount":"0.00001","recipient":"0x1111111111111111111111111111111111111111","max_fee_eth":"0.1"});
             let request=OperationRequest{request_id:probe_id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None};
             let result=h.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&probe_id,"--json"]),BrokerRequest::Execute{request}).await;
-            assert!(!result["submission"].is_null(),"{result}");
+            admission_probes.push(outcome_evidence::admission_probe("different_account",before,(h.approvals.0.load(Ordering::SeqCst),h.chain.lock().unwrap().broadcasts.values().sum::<usize>()),&result));
             assert_eq!(h.approvals.0.load(Ordering::SeqCst),if large {4}else{3});
             assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(1,4)]));
         }
         if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-            std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"outcome.a18","approval_count":3,"external_submission_count":4,"probe_approval_count":4,"probe_submission_count":4,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"fork_scope":"guarded Ethereum and Arbitrum Anvil forks, public synthetic signer, no live writes","stage_submissions":{"allowance":2,"burn":2},"probe_scope":"same source wallet and a different synthetic wallet on the same source chain"})).unwrap()).unwrap();
+            let mut evidence=json!({"scenario":"outcome.a18","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":4,"probe_submission_count":4,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"fork_scope":"guarded Ethereum and Arbitrum Anvil forks, public synthetic signer, no live writes","stage_submissions":{"allowance":2,"burn":2},"probe_scope":"same source wallet and a different synthetic wallet on the same source chain"});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
         }
     }).await
 }

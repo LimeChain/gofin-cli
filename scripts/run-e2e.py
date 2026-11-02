@@ -39,6 +39,34 @@ def scenarios():
     return result
 
 
+def ci_profile(registered, required, document):
+    """Validate the entire checked-in profile, even for a single group run."""
+    if not isinstance(document, dict) or set(document) != set(required):
+        raise ValueError("CI profile must contain exactly the required scenario groups")
+    selected = set()
+    for group, names in document.items():
+        if not isinstance(names, list) or not names:
+            raise ValueError(f"CI profile group {group} must be nonempty")
+        for name in names:
+            if not isinstance(name, str) or name not in registered:
+                raise ValueError(f"CI profile references an unknown scenario: {name}")
+            if name in selected:
+                raise ValueError(f"CI profile contains a duplicate scenario: {name}")
+            if registered[name]["group"] != group:
+                raise ValueError(f"CI profile scenario {name} belongs to a different group")
+            selected.add(name)
+    return selected
+
+
+def unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate CI profile key: {key}")
+        value[key] = item
+    return value
+
+
 def expand(value, substitutions):
     for key, replacement in substitutions.items():
         value = value.replace("{" + key + "}", str(replacement))
@@ -60,7 +88,32 @@ def read_execution_evidence(path, scenario_id):
         raise ValueError("Execution evidence must report the unrelated-admission probe")
     if re.fullmatch(r"outcome\.a[0-9]+", scenario_id) and evidence["blocked_unrelated_activity"] is not False:
         raise ValueError("Acceptance evidence requires successful same-account and different-account admission probes")
+    if re.fullmatch(r"outcome\.a[0-9]+", scenario_id):
+        probes = execution_probes(evidence)
+        for scope in ("same_account", "different_account"):
+            if not any(probe["scope"] == scope for probe in probes):
+                raise ValueError(f"Acceptance evidence has no observed {scope} admission")
     return evidence
+
+
+def execution_probes(evidence):
+    probes = evidence.get("admission_probes", [])
+    if not isinstance(probes, list):
+        raise ValueError("Admission probes must be an array")
+    for probe in probes:
+        if not isinstance(probe, dict) or probe.get("scope") not in ("same_account", "different_account"):
+            raise ValueError("Admission probe needs an explicit account scope")
+        if probe.get("admitted") is not True or not isinstance(probe.get("operation_id"), str) or not probe["operation_id"]:
+            raise ValueError("Admission probe must identify an admitted logical action")
+        if not isinstance(probe.get("submission"), dict) or not probe["submission"]:
+            raise ValueError("Admission probe must retain its durable submission identity")
+        for field in ("approval_count", "external_submission_count"):
+            if type(probe.get(field)) is not int or probe[field] < (1 if field == "external_submission_count" else 0):
+                raise ValueError(f"Admission probe needs observed {field}")
+    result = list(probes)
+    for component in evidence.get("components", []):
+        result.extend(execution_probes(component))
+    return result
 
 
 def source_snapshot():
@@ -90,9 +143,14 @@ def run_command(command, env, substitutions, logfile, default_expected=None):
               "elapsed_seconds": round(time.monotonic() - started, 3), "log": str(logfile)}
     after = source_snapshot()
     result.update(source_before=before, source_after=after, source_changed=before != after)
+    test_argv = argv
+    if Path(test_argv[0]).name == "env":
+        test_argv = test_argv[1:]
+        while test_argv and "=" in test_argv[0]:
+            test_argv = test_argv[1:]
     if process.returncode:
         result["error"] = f"Command exited {process.returncode}"
-    elif "cargo" in Path(argv[0]).name and "test" in argv and "--no-run" not in argv:
+    elif test_argv and "cargo" in Path(test_argv[0]).name and "test" in test_argv and "--no-run" not in test_argv:
         log = logfile.read_text(errors="replace")
         passes = sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;", log))
         ignored = sum(int(n) for n in re.findall(r"test result: ok\. \d+ passed; \d+ failed; (\d+) ignored;", log))
@@ -108,6 +166,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--group", action="append", default=[])
+    parser.add_argument("--profile", choices=["full", "ci"], default="full")
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("--report", type=Path)
     parser.add_argument("--fail-fast", action="store_true")
@@ -123,17 +182,31 @@ def main():
     unknown_groups = set(args.group) - required.keys()
     if unknown or unknown_groups:
         parser.error(f"Unknown scenarios/groups: {sorted(unknown | unknown_groups)}")
+    profile_ids = set(registered)
+    if args.profile == "ci":
+        try:
+            profile_ids = ci_profile(registered, required, json.loads(
+                (MANIFESTS / "ci.json").read_text(), object_pairs_hook=unique_json_object))
+        except (OSError, ValueError, TypeError) as error:
+            parser.error(f"Invalid CI profile: {error}")
+        outside = set(args.scenario) - profile_ids
+        if outside:
+            parser.error(f"Scenarios outside CI profile: {sorted(outside)}")
     selected = [s for s in registered.values() if
+                s["id"] in profile_ids and
                 (not args.scenario or s["id"] in args.scenario) and
                 (not args.group or s["group"] in args.group)]
+    filtered = set(args.scenario) - {s["id"] for s in selected}
+    if filtered:
+        parser.error(f"Scenarios do not belong to the selected groups: {sorted(filtered)}")
     needed = {name for group, names in required.items() if not args.group or group in args.group for name in names}
-    missing = sorted(needed - registered.keys()) if not args.scenario else []
+    missing = sorted(needed - registered.keys()) if args.profile == "full" and not args.scenario else []
     if args.list:
         for scenario in selected:
             print(f"{scenario['id']}\t{scenario['group']}\t{scenario.get('environment', 'mock')}\t{scenario['description']}")
         for name in missing:
             print(f"{name}\tNOT_IMPLEMENTED\tRequired scenario has no executable registration")
-        return 0
+        return 1 if missing else 0
     if not selected and not missing:
         parser.error("No scenarios selected")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -141,7 +214,7 @@ def main():
     artifacts.mkdir(parents=True)
     report_path = args.report.resolve() if args.report else artifacts / "report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report = {"schema_version": 1, "started_at": stamp,
+    report = {"schema_version": 1, "started_at": stamp, "profile": args.profile,
               **source_snapshot(),
               "prepare_skipped": args.skip_prepare,
               "scenarios": [{"id": name, "status": "not_implemented"} for name in missing]}

@@ -32,7 +32,7 @@ class EvidenceTests(unittest.TestCase):
             steps = [{'name': 'Run required positive scenarios', 'conclusion': 'success'}]
             if group == 'core':
                 steps.append({'name': 'Verify CLI regressions are detected and restored', 'conclusion': 'success'})
-            self.jobs.append({'name': f'e2e / Positive CLI scenarios ({group})',
+            self.jobs.append({'name': f'e2e / Positive CLI scenarios ({group}, ci)',
                               'status': 'completed', 'conclusion': 'success',
                               'head_sha': SHA, 'completed_at': STAMP, 'steps': steps})
         self.tree = TREE
@@ -82,7 +82,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_missing_duplicate_skipped_failed_or_wrong_source_group_rejected(self):
         original = deepcopy(self.jobs)
-        for mutation in ('missing', 'duplicate', 'skipped', 'failed', 'source', 'old', 'step', 'mutation'):
+        for mutation in ('missing', 'duplicate', 'skipped', 'failed', 'source', 'old', 'step', 'mutation', 'profile'):
             with self.subTest(mutation=mutation):
                 self.jobs = deepcopy(original)
                 if mutation == 'missing': self.jobs.pop()
@@ -93,6 +93,7 @@ class EvidenceTests(unittest.TestCase):
                 elif mutation == 'old': self.jobs[-1]['completed_at'] = (NOW-timedelta(hours=25)).isoformat()
                 elif mutation == 'step': self.jobs[-1]['steps'][0]['conclusion'] = 'skipped'
                 elif mutation == 'mutation': self.jobs[0]['steps'][-1]['conclusion'] = 'failure'
+                elif mutation == 'profile': self.jobs[-1]['name'] = self.jobs[-1]['name'].replace(', ci)', ', full)')
                 self.assertIsNone(self.find())
 
     def test_rerun_race_does_not_reuse_old_success(self):
@@ -122,7 +123,7 @@ class EvidenceTests(unittest.TestCase):
                  patch.dict(reuse.os.environ, GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary)):
                 reuse.main()
             self.assertEqual(output.read_text(), 'run_id=\n')
-            self.assertIn('running all positive scenarios', summary.read_text())
+            self.assertIn('running the selected positive scenario profile', summary.read_text())
 
     def test_required_gate_allows_only_proven_e2e_skip(self):
         needs = {name: {'result': 'success'} for name in ('lint','tests','lifecycle','native','e2e_lookup','e2e')}

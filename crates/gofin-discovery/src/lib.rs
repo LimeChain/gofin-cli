@@ -852,9 +852,11 @@ pub fn schema<T: JsonSchema>() -> Value {
 pub fn operation_view_schema() -> Value {
     let mut record = schema::<gofin_domain::OperationRecord>();
     let mut outcome = schema::<gofin_domain::outcome::OperationOutcome>();
-    if let Some(definitions) = outcome.as_object_mut().unwrap().remove("$defs") {
-        let target = record["$defs"].as_object_mut().unwrap();
-        for (name, value) in definitions.as_object().unwrap() {
+    if let Some(Value::Object(definitions)) =
+        outcome.as_object_mut().and_then(|o| o.remove("$defs"))
+        && let Some(target) = record.get_mut("$defs").and_then(Value::as_object_mut)
+    {
+        for (name, value) in &definitions {
             if let Some(existing) = target.get(name) {
                 assert_eq!(existing, value, "shared outcome schema definition differs");
             } else {
@@ -862,13 +864,14 @@ pub fn operation_view_schema() -> Value {
             }
         }
     }
-    outcome.as_object_mut().unwrap().remove("$schema");
+    if let Some(object) = outcome.as_object_mut() {
+        object.remove("$schema");
+    }
     record["properties"]["outcome"] = outcome;
     record["properties"]["human_dismissed"] = json!({"type":"boolean","description":"Human label only; does not change financial evidence or replay safety."});
-    record["required"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("outcome"));
+    if let Some(required) = record["required"].as_array_mut() {
+        required.push(json!("outcome"));
+    }
     // Versioned observations and stage details are additive presentation fields.
     record["additionalProperties"] = json!(true);
     record["title"] = json!("OperationView");
@@ -1195,11 +1198,11 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.on",
-            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
+            "Enable agent-submitted financial actions under their native terms after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. Funds may be lost within configured caps."}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. No personal USD limits apply; each action is bounded by its submitted native terms. Funds may be lost."}),
         ),
         definition::<EmptyArgs>(
             "yolo.off",
@@ -1471,22 +1474,23 @@ pub fn operation_definitions() -> Vec<Definition> {
             "operations" => {
                 item.input_schema = schema::<OperationsInput>();
                 let mut operation = operation_view_schema();
-                let definitions = operation.as_object_mut().unwrap().remove("$defs").unwrap();
+                let definitions = operation
+                    .as_object_mut()
+                    .and_then(|o| o.remove("$defs"))
+                    .unwrap_or_else(|| json!({}));
                 item.output_schema = json!({"type":"array","items":operation,"$defs":definitions});
                 item.semantics = json!({"read_only":true,"open":"Include unfinished outcomes and unresolved transfers, excluding human-dismissed records"});
             }
             "execute" => {
-                item.semantics
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("allocation_scope");
+                if let Some(semantics) = item.semantics.as_object_mut() {
+                    semantics.remove("allocation_scope");
+                }
                 item.semantics["dry_run"] = json!({"flag":"--dry-run","financial_movement":false,"financial_authorization":false,"journal_write":false,"execution":"Remove --dry-run and supply --id to request native economic approval. The broker validates every exact candidate independently."});
             }
             "setup" => {
-                item.semantics
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("financial_limits");
+                if let Some(semantics) = item.semantics.as_object_mut() {
+                    semantics.remove("financial_limits");
+                }
             }
             "policy.show" => {
                 item.description = "Inspect retired personal policy settings.".into();
@@ -1572,7 +1576,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "public_only":false,"account_enrollment":true,"writes":true,
         "authentication":["product-specific API key and Base64 HMAC secret"],
         "administration":"gofin configure; separate protected human configuration approval, never financial plans",
-        "financial_authorization":"Protected preview/execute/status; supported finite named plans, otherwise fresh exact approval",
+        "financial_authorization":"Protected preview/execute/status; native per-action approval or explicitly enabled protected Yolo",
         "exclusions":["WebSockets/token issuance","API-level 2FA","assignment-program enrollment"],
         "financial_limitations":["Tokenized base/rebased ticker denomination unproven","Attached conditional parent amendments unavailable at venue","Issued-child principal expansion beyond original generated-credit ceiling incomplete","VIP credit-line liability coverage incomplete"],
         "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
@@ -1592,7 +1596,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "public_only":false,"account_enrollment":true,"writes":true,"authentication":["cdp_ed25519","cdp_ecdsa"],
         "scope":"Typed App/Advanced REST reads and supported Advanced spot orders; native GET routes expose closed query subsets",
         "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot"]},
-        "financial_authorization":"Exact and bounded orders and sequential named plans; protected dispatch validation",
+        "financial_authorization":"Native per-action approval or protected Yolo; independent dispatch validation",
         "funding":"Base native USDC composite deposit requires verified existing address, original source receipt and correlated usable credit",
         "financial_limitations":["Attached and scaled order accounting incomplete","Full derivatives/loans/staking snapshots incomplete","Additional write families remain under implementation"],
         "verification":"Synthetic signing, financial and CLI/broker workflow fixtures; live-read evidence only; native approval unobserved"

@@ -47,7 +47,11 @@ with native.Surfpool(state / 'execution', snapshot) as node:
             accounts[(owner,mint)] = row['address']
     native.save(state / 'initial-balances.json', balances)
     name = f'jup-swap-{run_id}'
-    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=node.url,
+    import importlib.util
+    counter_spec = importlib.util.spec_from_file_location('rpc_counter', ROOT / 'scripts/e2e/rpc-counting-proxy.py')
+    counter_module = importlib.util.module_from_spec(counter_spec); counter_spec.loader.exec_module(counter_module)
+    counter = counter_module.CountingRpcProxy(node.url)
+    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=counter.url,
                GOFIN_METEORA_VALIDATOR_WALLET_KEY=str(wallet_key), GOFIN_SURFPOOL_ADVANCE='1', GOFIN_JUPITER_VALIDATOR='swap')
     h.ACTIVE_EVIDENCE = {'run_id': run_id}
     started = False
@@ -85,8 +89,10 @@ with native.Surfpool(state / 'execution', snapshot) as node:
         if len({json.dumps(record['submission'], sort_keys=True) for record in rows['operations'].values()}) != 4:
             raise AssertionError('Dependent swaps reused a submission identity')
         rows['swap_count'] = 4
+        h.emit_outcome_evidence('jupiter-swaps', h.ACTIVE_EVIDENCE.get('approval_nonces', []), counter.count)
         rows['result'] = 'passed'
     finally:
         if started: h.stop_environment(env, name)
+        counter.close()
         native.save(state / 'evidence.json', rows)
 print(json.dumps({'result':'passed','evidence':str((state/'evidence.json').relative_to(ROOT))}))

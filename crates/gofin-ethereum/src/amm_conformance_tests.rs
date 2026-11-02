@@ -486,15 +486,21 @@ async fn hosted_uniswap_preparation_renders_and_retired_plan_is_rejected() -> Re
     input["min_output"] = json!("2.97");
     let prepared = adapter.prepare("uniswap.swap", &input).await?;
     let reason = uniswap_native_approval::assert_prepared_renders(&prepared);
-    for term in [
-        "swap 0.001",
-        "for at least 2.97",
-        "Uniswap",
-        "Slippage ≤1%",
-        "fees ≤0.0001 ETH",
-    ] {
+    for term in ["swap 0.001", "for at least 2.97", "Uniswap", "Slippage ≤1%"] {
         assert!(reason.contains(term), "missing {term}: {reason}");
     }
+    assert!(!reason.to_lowercase().contains("fee"), "{reason}");
+    assert!(
+        prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .any(|cost| !cost.amount.atoms.is_zero())
+    );
+    assert_eq!(
+        gofin_domain::native_authorization_binding(&prepared)["financial_intent"]["maximum_costs"],
+        serde_json::to_value(&prepared.intent.maximum_costs).unwrap()
+    );
     let engine = Engine::new(
         Store::in_memory().unwrap(),
         vec![adapter],

@@ -421,13 +421,10 @@ counts toward the display budget; the undisplayed identifier does not.
 
 `other_details` is optional plain text appended verbatim, never a dictionary of
 provider-specific fields. It is limited to 200 extended grapheme clusters.
-Legacy financial messages remain limited to 240 extended grapheme clusters.
-Reviews with classified native `terms` allow 1,024 extended grapheme clusters,
-matching Swift `String.count`; combining accents and joined emoji are tested
-across Rust and Swift. The suffix allowance does not guarantee that the whole
-message fits. Overlong financial reviews return `APPROVAL_REVIEW_TOO_LARGE`
-before a biometric prompt, without truncating amounts or referring to omitted
-terminal details. Invalid contracts return `APPROVAL_REVIEW_INVALID`. These are
+The core native reason is limited to 240 extended grapheme clusters, matching
+Swift `String.count`; combining accents and joined emoji are tested across Rust
+and Swift. Overlong financial reviews fail before a biometric prompt without
+truncating amounts. Invalid contracts return `APPROVAL_REVIEW_INVALID`. These are
 application limits, not a guarantee of macOS dialog layout; actual rendering
 still needs observation on the target Mac.
 
@@ -437,7 +434,7 @@ preferred; technical market and request addresses may use explicit abbreviated l
 full identities remain in the execution binding and terminal review. Unknown
 assets without matching metadata retain their exact identity as the display fallback. The helper knows actions and templates,
 not Jupiter, exchange or protocol execution schemas. For example, this internal
-review renders a swap with a minimum receipt and a literal fee suffix:
+review renders a swap with its minimum receipt:
 
 ```json
 {
@@ -464,15 +461,17 @@ review renders a swap with a minimum receipt and a literal fee suffix:
     },
     "account": { "name": "Trading wallet", "domain": "Solana" }
   },
-  "other_details": "Slippage ≤3%; fees ≤0.01 SOL."
+  "other_details": "Slippage ≤3%."
 }
 ```
 
 This object is broker-to-helper presentation, not a client-supplied execution
 request or permission to bypass the ordinary operation schema. A swap states its minimum
 receipt; a bridge shows both account domains; an exchange deposit approves the
-outgoing transfer without claiming the exchange has credited it. The optional `terms` array labels each material term as enforced, estimated or
-checked after execution. Optional broker-owned `advisories` identify up to three
+outgoing transfer without claiming the exchange has credited it. The optional
+`terms` array remains in the bound machine review and is validated, but its
+classifications are not added to the native prompt. Native fee and deadline
+bounds remain enforced independently. Optional broker-owned `advisories` identify up to three
 similar uncertain actions and their native amounts. Advisories never grant
 financial authority or block approval; malformed advisory history is omitted.
 The complete review including advisories is bounded at 4,096 grapheme clusters.
@@ -557,7 +556,7 @@ error codes and stages remain in `--verbose` and unchanged JSON errors.
 `gofin policy show` reports preserved settings as retired, with
 `personal_limits_enforced: false`. Setup no longer asks for personal USD limits,
 and `policy set` cannot activate them. Financial authority is enforced through
-native action terms, including fee caps and explicit compound deadlines.
+approved native-quantity bounds, including fee caps and explicit compound deadlines.
 Historical records remain readable; unresolved operations do not create a
 personal allocation gate for unrelated work.
 

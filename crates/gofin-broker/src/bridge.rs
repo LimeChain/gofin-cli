@@ -2812,7 +2812,7 @@ impl BridgeAdapter {
             .allowed_providers
             .iter()
             .next()
-            .expect("one provider");
+            .ok_or_else(|| GoFinError::validation("Select exactly one bridge provider."))?;
         if request.cctp.is_some() && provider != "cctp" {
             return Err(GoFinError::validation(
                 "CCTP options require the CCTP provider.",
@@ -5194,6 +5194,7 @@ impl Adapter for BridgeAdapter {
             "bridge.execute" | "bridge.transfer"
         )
         .then(|| std::time::Duration::from_secs(30 * 24 * 60 * 60))
+        .or(Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)))
     }
 
     async fn evm_nonce_scope(

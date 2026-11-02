@@ -8,7 +8,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/morpho-v2-ethereum-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "morpho-v2-ethereum"
+    },
     "prepare": [
       [
         "cargo",
@@ -24,7 +27,8 @@
         "1",
         "--positive-only"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/morpho-v2-ethereum-evidence.json"
   },
   {
     "id": "morpho-v2-base",
@@ -35,7 +39,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/morpho-v2-base-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "morpho-v2-base"
+    },
     "prepare": [
       [
         "cargo",
@@ -51,7 +58,8 @@
         "8453",
         "--positive-only"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/morpho-v2-base-evidence.json"
   },
   {
     "id": "aave-v3-ethereum-core",
@@ -62,7 +70,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-ethereum-core-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-ethereum-core"
+    },
     "prepare": [
       [
         "cargo",
@@ -80,7 +91,8 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/aave-v3-ethereum-core-evidence.json"
   },
   {
     "id": "aave-v3-base",
@@ -91,7 +103,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-base-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-base"
+    },
     "prepare": [
       [
         "cargo",
@@ -111,7 +126,8 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/8453.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/aave-v3-base-evidence.json"
   },
   {
     "id": "aave-v3-arbitrum",
@@ -122,7 +138,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-arbitrum-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-arbitrum"
+    },
     "prepare": [
       [
         "cargo",
@@ -140,7 +159,8 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/42161.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/aave-v3-arbitrum-evidence.json"
   },
   {
     "id": "papertrade-liquidation-stake-claim",
@@ -151,7 +171,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-papertrade-workflow-build",
       "GOFIN_PAPERTRADE_CLI": "{repo}/target/e2e-papertrade/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/papertrade-liquidation-stake-claim-evidence.json"
     },
     "prepare": [
       [
@@ -179,7 +200,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/papertrade-liquidation-stake-claim-evidence.json"
   },
   {
     "id": "papertrade-long-close",
@@ -190,7 +212,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-papertrade-workflow-build",
       "GOFIN_PAPERTRADE_CLI": "{repo}/target/e2e-papertrade/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/papertrade-long-close-evidence.json"
     },
     "prepare": [
       [
@@ -218,7 +241,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/papertrade-long-close-evidence.json"
   },
   {
     "id": "cctp-base-arbitrum",
@@ -230,7 +254,8 @@
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_CCTP_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_CCTP_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/cctp-base-arbitrum.json"
     },
     "prepare": [
       [
@@ -256,9 +281,22 @@
         "--",
         "--exact",
         "--ignored"
+      ],
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "cctp_lifecycle",
+        "compound_cctp_native_review_covers_all_stages_once",
+        "--",
+        "--exact"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/cctp-base-arbitrum.json"
   },
   {
     "id": "cctp-arbitrum-base",
@@ -270,7 +308,8 @@
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_CCTP_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_CCTP_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/cctp-arbitrum-base.json"
     },
     "prepare": [
       [
@@ -298,7 +337,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/cctp-arbitrum-base.json"
   },
   {
     "id": "canonical-base-ethereum",
@@ -309,7 +349,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/canonical-base-ethereum-evidence.json"
     },
     "prepare": [
       [
@@ -337,7 +378,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/canonical-base-ethereum-evidence.json"
   },
   {
     "id": "canonical-ethereum-arbitrum",
@@ -348,7 +390,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/canonical-ethereum-arbitrum-evidence.json"
     },
     "prepare": [
       [
@@ -376,7 +419,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/canonical-ethereum-arbitrum-evidence.json"
   },
   {
     "id": "canonical-ethereum-robinhood",
@@ -387,7 +431,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/canonical-ethereum-robinhood-evidence.json"
     },
     "prepare": [
       [
@@ -415,7 +460,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/canonical-ethereum-robinhood-evidence.json"
   },
   {
     "id": "relay-ethereum-solana",
@@ -426,7 +472,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/relay-ethereum-solana-evidence.json"
     },
     "prepare": [
       [
@@ -454,7 +501,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/relay-ethereum-solana-evidence.json"
   },
   {
     "id": "relay-solana-ethereum",
@@ -465,7 +513,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/relay-solana-ethereum-evidence.json"
     },
     "prepare": [
       [
@@ -493,7 +542,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/relay-solana-ethereum-evidence.json"
   },
   {
     "id": "canonical-ethereum-base",
@@ -504,7 +554,8 @@
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/canonical-ethereum-base-evidence.json"
     },
     "prepare": [
       [
@@ -532,7 +583,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/canonical-ethereum-base-evidence.json"
   },
   {
     "id": "uniswap-api-amm",
@@ -545,7 +597,8 @@
     ],
     "env": {
       "GOFIN_UNISWAP_CLI": "{repo}/target/debug/examples/gofin-dev",
-      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build"
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/uniswap-api-amm.json"
     },
     "prepare": [
       [
@@ -573,7 +626,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/uniswap-api-amm.json"
   },
   {
     "id": "uniswap-api-uniswapx",
@@ -586,7 +640,8 @@
     ],
     "env": {
       "GOFIN_UNISWAP_CLI": "{repo}/target/debug/examples/gofin-dev",
-      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build"
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build",
+      "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/uniswap-api-uniswapx.json"
     },
     "prepare": [
       [
@@ -614,7 +669,8 @@
         "--ignored"
       ]
     ],
-    "expected_tests": 1
+    "expected_tests": 1,
+    "evidence": "{artifacts}/uniswap-api-uniswapx.json"
   },
   {
     "id": "sushi-v3",
@@ -625,7 +681,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/sushi-v3-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "sushi-v3"
+    },
     "prepare": [
       [
         "cargo",
@@ -646,7 +705,8 @@
         "--fee",
         "500"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/sushi-v3-evidence.json"
   },
   {
     "id": "ramses-v3",
@@ -657,7 +717,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/ramses-v3-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "ramses-v3"
+    },
     "prepare": [
       [
         "cargo",
@@ -676,7 +739,8 @@
         "--protocol",
         "v3"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/ramses-v3-evidence.json"
   },
   {
     "id": "aave-v3-ethereum-lido",
@@ -687,7 +751,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-ethereum-lido-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-ethereum-lido"
+    },
     "prepare": [
       [
         "cargo",
@@ -707,7 +774,8 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/aave-v3-ethereum-lido-evidence.json"
   },
   {
     "id": "aave-v3-ethereum-etherfi",
@@ -718,7 +786,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-ethereum-etherfi-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-ethereum-etherfi"
+    },
     "prepare": [
       [
         "cargo",
@@ -738,7 +809,8 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
-    ]
+    ],
+    "evidence": "{artifacts}/aave-v3-ethereum-etherfi-evidence.json"
   },
   {
     "id": "aave-v3-ethereum-horizon",
@@ -749,7 +821,10 @@
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/aave-v3-ethereum-horizon-evidence.json",
+      "GOFIN_VENUE_SCENARIO": "aave-v3-ethereum-horizon"
+    },
     "prepare": [
       [
         "cargo",
@@ -769,21 +844,50 @@
         "--pin",
         "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
-    ]
-  } ,
+    ],
+    "evidence": "{artifacts}/aave-v3-ethereum-horizon-evidence.json"
+  },
   {
     "id": "cross-provider-four-actions",
     "group": "bridge",
     "environment": "mock",
     "description": "Public CLI: Hyperliquid close and withdrawal, Relay Arbitrum to Ethereum bridge, and Uniswap swap under four native approvals",
-    "requires": ["cargo"],
+    "requires": [
+      "cargo"
+    ],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
       "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
-      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider",
+      "GOFIN_VENUE_EVIDENCE": "{artifacts}/cross-provider-four-actions-evidence.json"
     },
-    "prepare": [["cargo", "build", "--locked", "-p", "gofin-cli", "--example", "gofin-dev"]],
-    "run": [["cargo", "test", "--locked", "-p", "gofin-broker", "--test", "reverse_four_actions", "reverse_close_withdraw_bridge_then_swap_via_public_cli", "--", "--exact", "--ignored"]],
-    "expected_tests": 1
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "reverse_four_actions",
+        "reverse_close_withdraw_bridge_then_swap_via_public_cli",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1,
+    "evidence": "{artifacts}/cross-provider-four-actions-evidence.json"
   }
 ]

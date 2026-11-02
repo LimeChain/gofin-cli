@@ -263,7 +263,7 @@ case .failure(let failure):
     }
     *api.token_metadata.lock().unwrap() =
         json!([{ "id": ore_mint, "symbol": "ORE", "decimals": 11 }]);
-    for (cap, displayed) in [(0, "0 SOL"), (5_000_000, "0.005 SOL")] {
+    for cap in [0, 5_000_000] {
         let response = runtime
             .handle(BrokerRequest::Preview {
                 operation: "jupiter.swap".into(),
@@ -331,11 +331,13 @@ case .failure(let failure):
             String::from_utf8_lossy(&output.stderr)
         );
         let reason = String::from_utf8(output.stdout).unwrap();
-        assert!(reason.contains(displayed), "{reason}");
         assert!(reason.contains("0.02 SOL"), "{reason}");
         assert!(reason.contains("for at least 1.99 ORE"), "{reason}");
         assert!(reason.contains("solana-rehearsal (Solana)"), "{reason}");
-        assert!(reason.contains("fees ≤0.00001 SOL"), "{reason}");
+        assert!(
+            !reason.to_lowercase().contains("fee") && !reason.to_lowercase().contains("funding"),
+            "{reason}"
+        );
     }
     assert_eq!(approvals.load(Ordering::SeqCst), 0);
     assert!(rpc.0.lock().unwrap().transactions.is_empty());
@@ -665,10 +667,12 @@ async fn expired_jupiter_quote_refreshes_under_original_native_approval() {
         "expired order must be refreshed"
     );
     assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
+    assert_eq!(result["outcome"]["result"], "executed");
     let duplicate = refresh_cli::execute(&runtime, request, directory.path()).await;
     assert_eq!(duplicate["id"], result["id"]);
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
+    save_expiry_evidence("accepted", approvals.load(Ordering::SeqCst), &rpc);
 }
 
 #[tokio::test]
@@ -690,6 +694,7 @@ async fn expired_jupiter_quote_breaching_floor_never_dispatches() {
     let result = refresh_cli::execute(&runtime, request.clone(), directory.path()).await;
     assert_eq!(result["status"], "failed", "{result}");
     assert!(result["submission"].is_null());
+    assert_eq!(result["outcome"]["dispatch"], "not_dispatched");
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     assert_eq!(
         api.paths.lock().unwrap().len(),
@@ -701,6 +706,30 @@ async fn expired_jupiter_quote_breaching_floor_never_dispatches() {
     assert_eq!(duplicate["id"], result["id"]);
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     assert_eq!(rpc.0.lock().unwrap().transactions.len(), 0);
+    save_expiry_evidence("rejected", approvals.load(Ordering::SeqCst), &rpc);
+}
+
+fn save_expiry_evidence(case: &str, approvals: usize, rpc: &FixtureRpc) {
+    let Some(path) = std::env::var_os("GOFIN_OUTCOME_EVIDENCE") else {
+        return;
+    };
+    let submissions = rpc
+        .0
+        .lock()
+        .unwrap()
+        .rpc_method_counts
+        .get("sendTransaction")
+        .copied()
+        .unwrap_or(0);
+    let path = format!("{}.{}", std::path::PathBuf::from(path).display(), case);
+    std::fs::write(
+        path,
+        serde_json::to_vec(
+            &json!({"approval_count":approvals,"external_submission_count":submissions}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[path = "refresh_cli.rs"]

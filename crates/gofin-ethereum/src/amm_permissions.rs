@@ -1359,7 +1359,7 @@ fn validate_candidate_at(
     if spec.fixed.get("quoter").is_none() {
         fixed
             .as_object_mut()
-            .expect("fixed object")
+            .ok_or_else(|| GoFinError::validation("Invalid fixed swap scope."))?
             .remove("quoter");
     }
     if let Some(raw_pools) = spec.fixed.get("approved_pools") {
@@ -1814,8 +1814,8 @@ fn validate_swap_execute_candidate_at(
 }
 
 /// Validate a refreshed single-action swap against its original native terms.
-/// Absolute user floors remain hard bounds; slippage is recomputed against the
-/// fresh quote by the shared AMM validator, rather than freezing the old quote.
+/// The displayed approved output minimum remains a hard bound, while slippage
+/// is also recomputed against the fresh quote by the shared AMM validator.
 pub(crate) fn validate_standalone_swap_candidate(
     approved: &PreparedOperation,
     candidate: &PreparedOperation,
@@ -1851,13 +1851,23 @@ pub(crate) fn validate_standalone_swap_candidate(
                 binding.max_pool_fee_ppm,
             )
         };
-    let minimum = Quantity::from_decimal(
+    let explicit_minimum = Quantity::from_decimal(
         request
             .min_output
             .as_deref()
             .ok_or_else(|| GoFinError::validation("An explicit minimum output is required."))?,
         output_asset.decimals,
     )?;
+    let approved_minimum = if super::uniswap_api::is_api(&original) {
+        super::uniswap_api::parse_binding(&original)?.minimum_output
+    } else {
+        let binding: Binding = serde_json::from_value(original.binding.clone())
+            .map_err(|_| GoFinError::validation("Approved swap binding is invalid."))?;
+        binding
+            .minimum_output
+            .ok_or_else(|| GoFinError::validation("Approved output minimum is missing."))?
+    };
+    let minimum = std::cmp::max(explicit_minimum, approved_minimum);
     if minimum.is_zero() || units.is_zero() {
         return Err(GoFinError::validation(
             "Swap input and hard output floor must be positive.",
@@ -1888,7 +1898,20 @@ pub(crate) fn validate_standalone_swap_candidate(
         maximum_costs: vec![],
         summary: String::new(),
     };
-    validate_candidate_at(&spec, &fresh, at)
+    validate_candidate_at(&spec, &fresh, at).map_err(|mut error| {
+        if error.code == "BOUNDARY_VIOLATION" {
+            error.code = "CANDIDATE_OUT_OF_SCOPE".into();
+            error.stage = "submission".into();
+            error.message = format!("{} Nothing was submitted.", error.message);
+            error.next_action = "Request a fresh quote within the current approval; review changed terms only if no in-scope candidate exists.".into();
+            if let Some(details) = error.details.as_deref_mut()
+                && let Some(violation) = details.get_mut("boundary_violation")
+            {
+                violation["reauthorization_required"] = json!(false);
+            }
+        }
+        error
+    })
 }
 
 #[cfg(test)]
@@ -2369,6 +2392,25 @@ mod tests {
         json!({"max_input":"1.5","max_fee_eth":"0.001","max_slippage_bps":100,"max_price_impact_bps":40,
             "minimum_rate":{"output_atoms":"90","input_atoms":"1000000000000000000"},"absolute_minimum_output":"0.000091",
             "allowed_fee_tiers":[3000],"max_deadline_seconds":600})
+    }
+
+    #[test]
+    fn refreshed_provider_swap_cannot_lower_displayed_approved_minimum() {
+        let deadline = u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 300;
+        let mut approved = prepared(deadline);
+        approved.input["min_output"] = json!("0.000090");
+        validate_standalone_swap_candidate(&approved, &approved, chrono::Utc::now()).unwrap();
+        let mut candidate = approved.clone();
+        candidate.binding["minimum_output"] = json!("91");
+        candidate.binding["quote_output"] = json!("92");
+        let error = validate_standalone_swap_candidate(&approved, &candidate, chrono::Utc::now())
+            .unwrap_err();
+        assert_eq!(error.code, "CANDIDATE_OUT_OF_SCOPE");
+        assert_eq!(
+            error.details.as_ref().unwrap()["boundary_violation"]["reauthorization_required"],
+            false
+        );
+        assert!(error.message.contains("minimum_output"), "{error:?}");
     }
 
     #[test]

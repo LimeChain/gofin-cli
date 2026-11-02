@@ -2,7 +2,11 @@
 
 GoFin's optional skill teaches an agent to discover the installed CLI, preview
 operations, respect protected human enrollment and per-action authorization, and
-reconcile uncertain outcomes. It does not authorize financial actions. Current
+reconcile uncertain outcomes. A clear human request is sufficient conversational
+authorization to carry out that task and its eligible continuations without a
+separate chat confirmation. If execution intent is unclear, the agent may clarify
+whether the human wants execution or exploration. The broker independently enforces
+required financial approval and renewed authority. Current
 operations, networks and provider details come from `capabilities`, `explain`
 and `schema`, rather than a second catalog in the skill.
 

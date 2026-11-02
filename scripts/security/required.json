@@ -1,9 +1,10 @@
 {
-  "cli-authority": 17,
+  "atomic-action-admission": 2,
+  "cli-authority": 15,
   "connection-recovery-guards": 4,
   "credentials": 11,
-  "dispatch-authority": 9,
-  "durable-identity": 10,
+  "dispatch-authority": 16,
+  "durable-identity": 7,
   "evm-amm-bounds": 5,
   "evm-bridge-evidence": 10,
   "evm-papertrade-authority": 6,
@@ -13,7 +14,7 @@
   "evm-signing": 3,
   "exchange-binance-authority": 2,
   "exchange-binance-funding": 2,
-  "exchange-binance-native-orders": 9,
+  "exchange-binance-native-orders": 8,
   "exchange-binance-native-requests": 1,
   "exchange-binance-native-review": 1,
   "exchange-binance-native-schema": 1,
@@ -30,6 +31,7 @@
   "meteora-intent": 4,
   "misleading-financial-output": 11,
   "native-authority": 10,
+  "outcome-dismissal": 1,
   "price-evidence": 6,
   "protocol-boundaries": 4,
   "rpc-observer-lifecycle": 3,
@@ -44,5 +46,5 @@
   "wallet-generation-development": 4,
   "wallet-generation-development-transport": 2,
   "wallet-generation-output": 2,
-  "yolo-revocation": 4
+  "yolo-revocation": 3
 }

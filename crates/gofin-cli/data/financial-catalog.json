@@ -2091,15 +2091,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -4191,15 +4197,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -6753,15 +6765,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -8992,15 +9010,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -11149,15 +11173,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -11532,15 +11562,21 @@
       "approval": "Approval binds source wallet, destination account, chain/network, exact asset, deposit address, amount, fee envelope and displayed USD ceilings.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -15870,15 +15906,21 @@
       "approval": "fresh per setting write",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "marginTypes": [
         "CROSSED",
@@ -19562,15 +19604,21 @@
       "approval": "fresh per setting write",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "marginTypes": [
         "CROSSED",
@@ -20072,15 +20120,21 @@
       "approval": "fresh per write",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "fills": "original order owns all accounting, including fills that race cancellation",
       "run": "same run as the original order",
@@ -20334,15 +20388,21 @@
       "approval": "fresh per write",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -24661,15 +24721,21 @@
       "authority": "A configured main authority uses universalTransfer and clientTranId. The literal self is accepted only for a standalone subaccount, signing its own wallet transfer with its enrolled credential.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "recovery": "The self route has no venue clientTranId: the returned tranId must be durably captured before exact history and wallet-delta reconciliation. A lost response without a receipt remains unknown and is never inferred from amount/time or replayed.",
       "walletType": "USD_M"
@@ -24967,15 +25033,21 @@
       "amount": "exact decimal string",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -25468,15 +25540,21 @@
       "approval": "fresh per write",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "fills": "original order owns all accounting, including fills that race cancellation",
       "run": "same run as the original order",
@@ -25944,15 +26022,21 @@
       "approval": "Native action approval; LIMIT IOC/FOK, GTC, maker and market modes retain their distinct venue meanings.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -26504,15 +26588,21 @@
       "authority": "For main→child or legacy main-authorized child→main, select the main account. For source-child→parent only, select the child as authority; GoFin uses subToMaster and sends no clientTranId or recipient parameter.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -26967,15 +27057,21 @@
       "amount": "Gross SPOT debit including the withdrawal fee, not the destination receipt. Use unsigned decimal strings with a whole-number digit: 0.00415, not .00415.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -27572,15 +27668,24 @@
       "agent_supplied_calldata": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "declared_stages",
+          "supported_when": "Candidate remains within the approved route, stage, fee caps and action deadline"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_fee_caps": "enforced at admission; actual fees checked after execution",
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate",
+          "provider_route_and_stage_deadline": "enforced",
+          "recipient_and_destination_receipt": "after_execution"
+        }
       },
       "command_line_example": "gofin execute bridge.execute --input JSON --json",
       "execution_input": "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting.",
@@ -29009,15 +29114,21 @@
       "agent_supplied_calldata": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "command_line_example": "gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'",
       "financial_authorization": "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages.",
@@ -29092,15 +29203,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "nativeRoute": "cancel_order",
@@ -29181,15 +29298,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "nativeRoute": "orders_batch_cancel",
@@ -29279,15 +29402,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "nativeRoute": "convert",
@@ -29688,15 +29817,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -29924,15 +30059,21 @@
       "addressCreation": "separate typed operation",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "currency": {
         "default": "USDC",
@@ -30075,15 +30216,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "nativeRoute": "order_edit_preview+order_edit",
@@ -30722,15 +30869,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "nativeRoute": "move_portfolio_funds",
@@ -34374,15 +34527,21 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "feeConsentScopes": [
@@ -34451,15 +34610,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "product": "coinbaseexchange",
@@ -34744,15 +34909,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -38562,15 +38733,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "clientVersion": "ccxt 4.5.85",
       "product": "coinbaseinternational",
@@ -38667,15 +38844,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -38796,15 +38979,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -42290,15 +42479,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -42501,15 +42696,21 @@
       "asset": "native USDC only",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cctp": "deferred",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
@@ -42604,15 +42805,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "failure": "native rejection, timeout or lost response keeps the parent unresolved and blocks another Noop; only terminal confirmed non-dispatch without any submission, effects or dispatch evidence permits a fresh approved child; never replay the parent",
@@ -42737,15 +42944,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -42847,15 +43060,21 @@
       "approval": "no financial movement; rate-limit reservation only",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "destination": "optional existing Hyperliquid user; exact userRole is verified before dispatch",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
@@ -43269,15 +43488,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -43443,15 +43668,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "destination": "closed enum",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
@@ -43563,15 +43794,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "destination": "exact address bound in approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
@@ -46027,15 +46264,21 @@
       "atomicity": "venue dependent; each outcome is reconciled",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
@@ -46133,15 +46376,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -46268,15 +46517,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -46428,15 +46683,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
@@ -46613,15 +46874,21 @@
       "atomicity": "venue dependent; each replacement is reconciled independently",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
@@ -46917,15 +47184,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
@@ -47021,15 +47294,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "unit": "milliseconds"
@@ -47210,15 +47489,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "durability": "scheduled venue-side execution continues after acceptance",
       "estimates": "GoFin reconciliation limits only; none are guaranteed by the native venue schedule",
@@ -47342,15 +47627,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "effect": "stops remaining schedule only; completed slices remain executed",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
@@ -48238,15 +48529,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -48352,15 +48649,21 @@
       "approval": "fresh per-write approval",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope."
     }
@@ -48659,15 +48962,21 @@
       "ambiguous_submission": "reconcile original durable transaction; never replay",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "fee_units": "maximum_network_fee_lamports is exact lamports",
@@ -48960,15 +49269,21 @@
       "ambiguous_submission": "reconcile original durable transaction; never replay",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "fee_units": "maximum_network_fee_lamports is exact lamports",
@@ -49129,15 +49444,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
@@ -49296,15 +49617,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
@@ -49933,15 +50260,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "createIncreasePositionMarketRequest",
@@ -50214,15 +50547,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "createDecreasePositionRequest2",
@@ -50422,15 +50761,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "keeper_event_required": true,
@@ -50649,15 +50994,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "keeper_event_required": true,
@@ -50814,15 +51165,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "closePositionRequest3",
@@ -50989,15 +51346,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "escrowed_not_filled": true,
@@ -51166,15 +51529,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "instantUpdateLimitOrder",
@@ -51695,15 +52064,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "closePositionRequest3",
@@ -51892,15 +52267,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "instantCreateTpsl",
@@ -52046,15 +52427,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "instruction": "instantUpdateTpsl",
@@ -52565,15 +52952,23 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": "after_execution",
+          "minimum_output": "after_execution",
+          "optional_usd_value": "estimate"
+        }
       },
       "cluster": "mainnet-beta",
       "integration": "meta_aggregator_order_execute",
@@ -52693,15 +53088,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "lending",
@@ -52846,15 +53247,21 @@
       "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -53398,15 +53805,21 @@
       "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -53682,15 +54095,21 @@
       "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -53832,15 +54251,21 @@
       "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -54361,15 +54786,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "lending",
@@ -58066,15 +58497,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -62206,15 +62643,20 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -66216,15 +66658,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -69900,15 +70348,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -73661,15 +74115,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -77473,15 +77933,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -81154,15 +81620,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -84867,15 +85339,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -88598,15 +89076,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -92278,15 +92762,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -95960,15 +96450,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -99676,15 +100172,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -103781,15 +104283,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -107596,15 +108104,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -108000,15 +108514,21 @@
       "addressClaim": "separately approved, never automatic",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "creditCorrelationApi": "legacy-v0",
       "discoveryApi": "funding-v1-v2",
@@ -111862,15 +112382,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -121987,15 +122513,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -125714,15 +126246,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -129696,15 +130234,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -133370,15 +133914,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -137078,15 +137628,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -141275,15 +141831,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -148730,15 +149292,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -152527,15 +153095,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -156586,15 +157160,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -160277,15 +160857,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -164193,15 +164779,21 @@
       "administrative": false,
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/requestId"
@@ -164688,15 +165280,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -164898,15 +165496,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -165104,15 +165708,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -165326,15 +165936,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -165538,15 +166154,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -166158,15 +166780,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "families": [
         "dlmm",
@@ -168221,15 +168849,21 @@
       "amounts": "Exact decimal strings and independently verified asset/share decimals.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -170465,15 +171099,21 @@
       "amounts": "Exact decimal strings and independently verified asset/share decimals.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -172635,15 +173275,21 @@
       "amounts": "Exact decimal strings and independently verified asset/share decimals.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -174956,15 +175602,21 @@
       "amounts": "Exact decimal strings and independently verified asset/share decimals.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "broker_generated_attempt_input_fields": [
         "/request_id"
@@ -177326,15 +177978,23 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": "enforced",
+          "minimum_output": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -177402,15 +178062,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177439,15 +178105,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177488,15 +178160,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177543,15 +178221,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177587,15 +178271,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999",
@@ -177634,15 +178324,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177762,15 +178458,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177900,15 +178602,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -177995,15 +178703,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -178050,15 +178764,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "chain_id": 999,
       "network": "ethereum:999"
@@ -180426,15 +181146,23 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": "enforced",
+          "minimum_output": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -182793,15 +183521,23 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": "enforced",
+          "minimum_output": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -185043,15 +185779,29 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": {
+            "local_router": "enforced",
+            "uniswap_api_v1": "after_execution"
+          },
+          "minimum_output": {
+            "local_router": "enforced",
+            "uniswap_api_v1": "after_execution"
+          },
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -187427,15 +188177,23 @@
       ],
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "within_approved_native_terms"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "fresh_quote_slippage": "enforced at candidate admission when explicitly approved",
+          "input_amount": "after_execution",
+          "minimum_output": "after_execution",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -189666,15 +190424,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "broker_generated_attempt_input_fields": [
@@ -192351,15 +193115,21 @@
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
@@ -195264,15 +196034,25 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "mode": "conditional",
+          "otherwise": "exact_binding",
+          "supported_when": "EVM wallet selected"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "amount_and_recipient": "enforced",
+          "candidate_binding_at_admission": "enforced",
+          "evm_signed_gas_envelope": "enforced",
+          "optional_usd_value": "estimate",
+          "rollup_data_fee": "after_execution"
+        }
       },
       "provider_variants": [
         {
@@ -197538,15 +198318,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "provider_variants": [
         {
@@ -199750,15 +200536,21 @@
     "semantics": {
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
+        "candidate_refresh": {
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
+        },
+        "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
         "mode": "native_action",
         "outcome_version": 1,
         "personal_usd_limits": false,
-        "terms": [
-          "enforced",
-          "estimate",
-          "after_execution"
-        ]
+        "terms": {
+          "action_identity": "enforced",
+          "actual_fees_and_effects": "after_execution",
+          "candidate_binding_at_admission": "enforced",
+          "optional_usd_value": "estimate"
+        }
       },
       "provider_variants": [
         {

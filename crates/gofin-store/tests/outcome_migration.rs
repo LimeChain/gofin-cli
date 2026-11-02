@@ -262,7 +262,7 @@ fn interrupted_schema28_transaction_restarts_without_losing_history() {
     drop(Store::open(&path).unwrap());
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE evm_nonce_claims; DROP TABLE action_continuations; PRAGMA user_version=27; BEGIN IMMEDIATE; CREATE TABLE action_continuations(token TEXT); ROLLBACK;").unwrap();
+        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE evm_nonce_claims; DROP TABLE action_continuations; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=27; BEGIN IMMEDIATE; CREATE TABLE action_continuations(token TEXT); ROLLBACK;").unwrap();
     }
     let store = Store::open(&path).unwrap();
     assert!(store.get_record("pending-withdrawal").unwrap().is_some());
@@ -337,7 +337,7 @@ fn nonce_projection_backfills_legacy_submissions_without_reading_unrelated_histo
     drop(store);
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; PRAGMA user_version=29;").unwrap();
+        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=29;").unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
@@ -545,5 +545,193 @@ fn legacy_over_limit_run_remains_observable_without_accounting_migration() {
     assert_eq!(
         store.get_run("synthetic-over-limit-run").unwrap().unwrap(),
         before
+    );
+}
+
+#[test]
+fn corrupt_retired_plan_does_not_block_or_mutate_startup_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt-plan.sqlite");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/schema25.sqlite"
+        ),
+        &path,
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT record_json FROM operations WHERE id='pending-withdrawal'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    value["id"] = serde_json::json!("interrupted-plan-child");
+    value["request_id"] = serde_json::json!("interrupted-plan-request");
+    value["fingerprint"] = serde_json::json!("interrupted-plan-fingerprint");
+    value["status"] = serde_json::json!("awaiting_approval");
+    value["submission"] = serde_json::Value::Null;
+    db.execute("INSERT INTO operations(id,request_id,fingerprint,operation,status,run_id,record_json,created_at,updated_at) VALUES ('interrupted-plan-child','interrupted-plan-request','interrupted-plan-fingerprint','exchange.withdraw','awaiting_approval',NULL,?1,'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')",[value.to_string()]).unwrap();
+    db.execute(
+        "UPDATE financial_plans SET record_json='broken-plan' WHERE plan_id='synthetic-plan'",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO financial_plan_attempts(plan_id,revision_id,step_id,operation_id,request_id,candidate_state,created_at) VALUES ('synthetic-plan','synthetic-revision','synthetic-step','interrupted-plan-child','interrupted-plan-request','unresolved','2026-11-01T00:00:00Z')",[]).unwrap();
+    drop(db);
+    let mut store = gofin_store::Store::open(&path).unwrap();
+    store.recover_interrupted().unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(path).unwrap();
+    let plan: String = db
+        .query_row(
+            "SELECT record_json FROM financial_plans WHERE plan_id='synthetic-plan'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(plan, "broken-plan");
+    let state:String=db.query_row("SELECT candidate_state FROM financial_plan_attempts WHERE operation_id='interrupted-plan-child'",[],|r|r.get(0)).unwrap();
+    assert_eq!(state, "unresolved");
+}
+
+#[test]
+fn baseline_cost_attention_preserves_approved_binding_and_correlated_receipt_on_upgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cost-attention.sqlite");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/schema25-cost-attention.sqlite"
+        ),
+        &path,
+    )
+    .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    let raw = store
+        .list_typed_records()
+        .unwrap()
+        .into_iter()
+        .find(|r| r["request_id"] == "original")
+        .unwrap();
+    let record: gofin_domain::OperationRecord = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(record.status, gofin_domain::Status::Unknown);
+    assert_eq!(
+        record.error.as_ref().unwrap().code,
+        "COST_EXCEEDS_RESERVATION"
+    );
+    assert_eq!(
+        gofin_domain::binding_hash(&gofin_domain::authorization_binding(
+            record.preview.as_ref().unwrap()
+        ))
+        .unwrap(),
+        record.approval.as_ref().unwrap().binding_hash
+    );
+    let stored = store.submission(&record.id).unwrap().unwrap();
+    let proof: gofin_domain::VerifiedEffects =
+        serde_json::from_value(raw["last_reconciliation_evidence"]["verified_effects"].clone())
+            .unwrap();
+    assert_eq!(proof.submission.reference, stored.reference);
+    assert_eq!(
+        proof.proof_digest,
+        gofin_domain::verified_effect_digest(&proof).unwrap()
+    );
+    assert_eq!(proof.effects.len(), 1);
+    let before = raw;
+    store.recover_interrupted().unwrap();
+    assert_eq!(store.get_record(&record.id).unwrap().unwrap(), before);
+}
+
+#[test]
+fn baseline_human_released_reservation_preserves_original_submission_and_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("released.sqlite");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/schema25-reservation-released.sqlite"
+        ),
+        &path,
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let before: (String, String) = db
+        .query_row(
+            "SELECT review_json,approval_json FROM reservation_overrides LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    drop(db);
+    let mut store = Store::open(&path).unwrap();
+    let record = store.get_record("original").unwrap().unwrap();
+    let operation: gofin_domain::OperationRecord = serde_json::from_value(record.clone()).unwrap();
+    assert_eq!(operation.status, gofin_domain::Status::Unknown);
+    assert!(operation.preview.is_some());
+    assert_eq!(
+        operation.submission.as_ref().unwrap().reference,
+        "immutable-identity"
+    );
+    assert_eq!(
+        store.submission("original").unwrap().unwrap().reference,
+        "immutable-identity"
+    );
+    store.recover_interrupted().unwrap();
+    assert_eq!(store.get_record("original").unwrap().unwrap(), record);
+    drop(store);
+    let db = rusqlite::Connection::open(path).unwrap();
+    let after: (String, String) = db
+        .query_row(
+            "SELECT review_json,approval_json FROM reservation_overrides LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn reconciliation_cas_preserves_unknown_forward_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("future.sqlite");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/schema25-hyperliquid-sell.sqlite"
+        ),
+        &path,
+    )
+    .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    let original = store
+        .list_typed_records()
+        .unwrap()
+        .into_iter()
+        .find(|r| r["request_id"] == "directional-close")
+        .unwrap();
+    let id = original["id"].as_str().unwrap().to_owned();
+    let mut expected = original.clone();
+    expected["future_extension"] = serde_json::json!({"retain":"exact"});
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE operations SET record_json=?1 WHERE id=?2",
+        rusqlite::params![expected.to_string(), id],
+    )
+    .unwrap();
+    drop(db);
+    let typed: gofin_domain::OperationRecord = serde_json::from_value(original).unwrap();
+    let mut updated = serde_json::to_value(typed).unwrap();
+    updated["updated_at"] = serde_json::json!("2026-11-01T00:00:10Z");
+    assert!(
+        store
+            .update_record_if_unchanged(&id, &expected, &updated, "2026-11-01T00:00:10Z")
+            .is_err()
+    );
+    assert_eq!(
+        store.get_record(&id).unwrap().unwrap()["future_extension"],
+        serde_json::json!({"retain":"exact"})
     );
 }

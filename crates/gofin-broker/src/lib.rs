@@ -343,10 +343,12 @@ pub struct BrokerPolicy {
     /// Legacy serialized setting, retained for configuration compatibility; ignored at runtime.
     #[serde(default)]
     pub require_run_for_writes: bool,
+    /// Retired audit setting; never parsed or used for admission.
     pub max_movement_usd_micros: String,
+    /// Retired audit setting; never parsed or used for admission.
     pub max_run_allocation_usd_micros: String,
     pub preview_ttl_seconds: u64,
-    /// Human-approved exception; absent legacy configuration remains disabled.
+    /// Retired pricing exception, retained only for historical configuration.
     #[serde(default)]
     pub allow_unpriced_exchange_assets: bool,
 }
@@ -441,10 +443,8 @@ impl BrokerPolicy {
     pub fn beta() -> Self {
         Self {
             require_run_for_writes: false,
-            max_movement_usd_micros: gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
-                .to_string(),
-            max_run_allocation_usd_micros: gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
-                .to_string(),
+            max_movement_usd_micros: "0".into(),
+            max_run_allocation_usd_micros: "0".into(),
             preview_ttl_seconds: 90,
             allow_unpriced_exchange_assets: false,
         }
@@ -968,19 +968,6 @@ impl BrokerConfigV2 {
                 }
             }
         }
-        for value in [
-            &self.policy.max_movement_usd_micros,
-            &self.policy.max_run_allocation_usd_micros,
-        ] {
-            if gofin_domain::policy::policy_micros(value).is_err() {
-                return Err(error(
-                    "CONFIG_POLICY_INVALID",
-                    "configuration",
-                    "Financial policy bounds must be unsigned 64-bit integer USD micros; zero means no personal limit.",
-                    "Repair policy bounds through protected human enrollment.",
-                ));
-            }
-        }
         Ok(())
     }
 }
@@ -1097,11 +1084,9 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             definition.description = "Execute one compound bridge action under native intent approval, including its declared allowance, source and destination stages.".into();
             definition.coverage = "One explicit provider, exact source amount, fixed asset/account/recipient identities, minimum receipt, native action-wide fee caps and a reviewed deadline. Known stage prerequisites are checked before approval.".into();
             definition.completion = "The original logical action completes when correlated evidence establishes destination receipt. Waiting returns durable status and broker-issued continuation arguments; completed stages never repeat.".into();
-            definition
-                .input_schema
-                .as_object_mut()
-                .unwrap()
-                .remove("anyOf");
+            if let Some(schema) = definition.input_schema.as_object_mut() {
+                schema.remove("anyOf");
+            }
             definition.input_schema["$ref"] = json!("#/$defs/BridgeExecuteIntentInput");
             definition.input_schema["description"] =
                 json!("Native intent for a foreground compound bridge action.");
@@ -1219,10 +1204,69 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
         _ => {}
     }
     if definition.kind == OperationKind::Write {
+        let refresh = match definition.name.as_str() {
+            "wallet.transfer" => {
+                json!({"mode":"conditional", "supported_when":"EVM wallet selected", "otherwise":"exact_binding"})
+            }
+            "swap.execute" | "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
+            | "jupiter.swap" | "kraken.add-order" => {
+                json!({"mode":"within_approved_native_terms"})
+            }
+            "bridge.execute" => {
+                json!({"mode":"declared_stages", "supported_when":"Candidate remains within the approved route, stage, fee caps and action deadline"})
+            }
+            _ => {
+                json!({"mode":"exact_binding", "expired_candidate":"Changed payload requires new approval"})
+            }
+        };
+        // These describe the selected operation's contract. The preview's
+        // typed review supplies the concrete bounds and provider-specific labels.
+        let mut terms = json!({
+            "action_identity":"enforced",
+            "candidate_binding_at_admission":"enforced",
+            "optional_usd_value":"estimate",
+            "actual_fees_and_effects":"after_execution"
+        });
+        match definition.name.as_str() {
+            "swap.execute" => {
+                terms["input_amount"] =
+                    json!({"local_router":"enforced","uniswap_api_v1":"after_execution"});
+                terms["minimum_output"] =
+                    json!({"local_router":"enforced","uniswap_api_v1":"after_execution"});
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "sushi.swap" | "pancakeswap.swap" | "ramses.swap" => {
+                terms["input_amount"] = json!("enforced");
+                terms["minimum_output"] = json!("enforced");
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "uniswap.swap" | "jupiter.swap" => {
+                terms["input_amount"] = json!("after_execution");
+                terms["minimum_output"] = json!("after_execution");
+                terms["fresh_quote_slippage"] =
+                    json!("enforced at candidate admission when explicitly approved");
+            }
+            "wallet.transfer" => {
+                terms["amount_and_recipient"] = json!("enforced");
+                terms["evm_signed_gas_envelope"] = json!("enforced");
+                terms["rollup_data_fee"] = json!("after_execution");
+            }
+            "bridge.execute" => {
+                terms["provider_route_and_stage_deadline"] = json!("enforced");
+                terms["action_fee_caps"] =
+                    json!("enforced at admission; actual fees checked after execution");
+                terms["recipient_and_destination_receipt"] = json!("after_execution");
+            }
+            _ => {}
+        }
         definition.semantics["authorization"] = json!({
             "mode":"native_action", "outcome_version":1,
             "candidate":"Every exact payload must remain within the original approved native terms",
-            "terms":["enforced", "estimate", "after_execution"],
+            "candidate_refresh":refresh,
+            "terms":terms,
+            "concrete_terms":"preview.review.terms labels each concrete term; provider selection can change enforcement",
             "personal_usd_limits":false,
             "continuation":"Use the original operation ID and broker-issued token; successful stages never repeat"
         });
@@ -4754,13 +4798,13 @@ impl BrokerRuntime {
                 let record = self.engine.status(&id, true).await?;
                 self.engine.operation_view(&record)
             }
-            R::Operations => self
-                .engine
-                .operations()?
-                .iter()
-                .map(|record| self.engine.operation_view(record))
-                .collect::<gofin_domain::Result<Vec<_>>>()
-                .map(Value::Array),
+            R::Operations => Ok(Value::Array(
+                self.engine
+                    .operations()?
+                    .iter()
+                    .map(|record| self.engine.operation_view_isolated(record))
+                    .collect(),
+            )),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
@@ -6692,6 +6736,33 @@ mod tests {
                     definition.semantics["authorization"]["personal_usd_limits"],
                     false
                 );
+                assert!(definition.semantics["authorization"]["terms"].is_object());
+                let refresh = &definition.semantics["authorization"]["candidate_refresh"];
+                assert!(refresh["mode"].is_string());
+                if definition.name == "jupiter.perps.open" {
+                    assert_eq!(refresh["mode"], "exact_binding");
+                }
+                if matches!(
+                    definition.name.as_str(),
+                    "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
+                ) {
+                    assert_eq!(refresh["mode"], "within_approved_native_terms");
+                    assert_eq!(
+                        definition.semantics["authorization"]["terms"]["minimum_output"],
+                        if definition.name == "uniswap.swap" {
+                            "after_execution"
+                        } else {
+                            "enforced"
+                        }
+                    );
+                }
+                if definition.name == "jupiter.swap" {
+                    assert_eq!(refresh["mode"], "within_approved_native_terms");
+                    assert_eq!(
+                        definition.semantics["authorization"]["terms"]["minimum_output"],
+                        "after_execution"
+                    );
+                }
             }
             jsonschema::options()
                 .offline()
@@ -9495,7 +9566,7 @@ mod tests {
                 .await
                 .result
                 .unwrap()["retired_settings"]["max_movement_usd_micros"],
-            "100000000"
+            "0"
         );
         let original = runtime.clone();
         let mut changed = config();

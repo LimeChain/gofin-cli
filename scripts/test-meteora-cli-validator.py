@@ -38,6 +38,23 @@ WALLET_ALIAS = "meteora-validator"
 ACTIVE_EVIDENCE: dict | None = None
 
 
+def emit_outcome_evidence(scenario: str, approvals: list[str], submissions: int) -> None:
+    path = os.environ.get("GOFIN_OUTCOME_EVIDENCE")
+    if not path:
+        return
+    if not approvals or len(approvals) != len(set(approvals)) or submissions < len(approvals):
+        raise AssertionError("Provider calls or distinct approval audits are missing")
+    Path(path).write_text(json.dumps({
+        "scenario": scenario,
+        "approval_count": len(approvals),
+        "external_submission_count": submissions,
+        "intervention_count": 0,
+        "remaining_external_uncertainty": False,
+        "blocked_unrelated_activity": None,
+        "counter_basis": "distinct development approval audit nonces and intercepted sendTransaction RPC calls",
+    }, indent=2) + "\n")
+
+
 def load_validator_helpers():
     path = ROOT / "scripts" / "verify-meteora-validator.py"
     spec = importlib.util.spec_from_file_location("meteora_validator_setup", path)
@@ -127,6 +144,11 @@ def start_validator(helper, port: int, family: str):
     snapshot = directory / "dependencies.json"
     native.save(snapshot, dict.fromkeys(addresses))
     node = native.Surfpool(directory / "execution", snapshot, rpc_port=port)
+    # The shared Surfpool helper accelerates slots to 100 ms. DAMM's real
+    # dependency preparation can exceed a 150-slot blockhash lifetime at that
+    # artificial rate, before the isolated approval even starts. Use a
+    # production-like slot cadence while retaining the actual expiry checks.
+    node.command[node.command.index("--slot-time") + 1] = "400"
     node.__enter__()
     try:
         loaded = native.validate_preload(node.rpc, addresses, programs, directory / "preload-evidence.json")
@@ -191,6 +213,12 @@ def execute(env: dict[str, str], name: str, operation: str, request: dict, label
         raise AssertionError(f"{label} omitted the human review summary or maximum costs")
     if (result.get("approval") or {}).get("source") != "development":
         raise AssertionError(f"{label} omitted its isolated development approval")
+    if (result.get("outcome") or {}).get("result") != "executed" or (result.get("outcome") or {}).get("phase") != "done":
+        raise AssertionError(f"{label} omitted its executed, settled outcome")
+    nonce = (result.get("approval") or {}).get("challenge_nonce")
+    if not isinstance(nonce, str) or not nonce:
+        raise AssertionError(f"{label} omitted its approval audit identity")
+    ACTIVE_EVIDENCE.setdefault("approval_nonces", []).append(nonce)
     slot = (result.get("last_reconciliation_evidence") or {}).get("slot")
     if not isinstance(slot, int):
         raise AssertionError(f"{label} omitted its finalized transaction slot")
@@ -319,6 +347,10 @@ def assert_liquidity_snapshot(
 def run_family(helper, family: str, port: int) -> dict:
     global ACTIVE_EVIDENCE
     node, directory, identities = start_validator(helper, port, family)
+    counter_spec = importlib.util.spec_from_file_location("rpc_counter", ROOT / "scripts/e2e/rpc-counting-proxy.py")
+    counter_module = importlib.util.module_from_spec(counter_spec)
+    counter_spec.loader.exec_module(counter_module)
+    counter = counter_module.CountingRpcProxy(node.url)
     run_id = uuid.uuid4().hex[:12]
     name = f"meteora-val-{family}-{port}-{run_id}"
     state = CLI_EVIDENCE / f"state-{family}-{port}-{run_id}"
@@ -326,7 +358,7 @@ def run_family(helper, family: str, port: int) -> dict:
     env.update({
         "GOFIN_DEV_STATE_HOME": str(state),
         "GOFIN_SURFPOOL_ADVANCE": "1",
-        "GOFIN_METEORA_VALIDATOR_RPC": f"http://127.0.0.1:{port}",
+        "GOFIN_METEORA_VALIDATOR_RPC": counter.url,
         "GOFIN_METEORA_VALIDATOR_WALLET_KEY": str((ROOT / identities["wallet"]["path"]).resolve()),
     })
     rpc_url = node.url
@@ -509,8 +541,10 @@ def run_family(helper, family: str, port: int) -> dict:
         if any(candidate.get("kind") == "liquidity" and candidate.get("anchor", {}).get("evidence", {}).get("liquidity_position", {}).get("position") == position for candidate in closed_state.get("positions", [])):
             raise AssertionError("Close snapshot retained the closed LP unit anchor")
         rows["validator_transaction_count"] = command_count(helper.rpc, rpc_url, identities["wallet"]["pubkey"])
+        emit_outcome_evidence("meteora-dlmm" if family == "dlmm" else "meteora-damm-v2", rows.get("approval_nonces", []), counter.count)
         return rows
     finally:
+        counter.close()
         if started:
             try:
                 stop_environment(env, name)
