@@ -3471,7 +3471,7 @@ fn broker_has_sensitive_input_key(value: &Value) -> bool {
 fn aave_mcp_tools_definition() -> Definition {
     Definition {
         name: "aave.mcp.tools".into(),
-        description: "Discover unverified read-only tools exposed by the official Aave MCP. This explicit read may contact upstream; the bundled catalog remains available offline.".into(),
+        description: "Discover informational tools for Aave market exploration, position inspection and estimated planning. Results are unverified; execution requires independent on-chain checks. This read contacts the official MCP; the bundled catalog remains available offline.".into(),
         kind: OperationKind::Read,
         execution_actor: ExecutionActor::AgentReadable,
         input_schema: json!({"type":"object","additionalProperties":false}),

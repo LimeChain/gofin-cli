@@ -4450,7 +4450,7 @@
   },
   {
     "name": "aave.mcp.tools",
-    "description": "Discover unverified read-only tools exposed by the official Aave MCP. This explicit read may contact upstream; the bundled catalog remains available offline.",
+    "description": "Discover informational tools for Aave market exploration, position inspection and estimated planning. Results are unverified; execution requires independent on-chain checks. This read contacts the official MCP; the bundled catalog remains available offline.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -4504,7 +4504,7 @@
   },
   {
     "name": "aave.positions",
-    "description": "Observe all supplied claims, stable/variable debt and collateral separately.",
+    "description": "Observe exact supplied claims, stable/variable debt and collateral separately through RPC. Scope tokens for selected reserves; unscoped reads scan the market. Prefer discovered aave.mcp reads for exploratory positions.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -6797,7 +6797,7 @@
   },
   {
     "name": "aave.reserves",
-    "description": "Discover all Aave reserve eligibility, limits, receipt and debt identities.",
+    "description": "Observe exact Aave reserve eligibility, limits, receipt and debt identities through RPC. Scope tokens for selected reserves; unscoped reads scan the market. Prefer discovered aave.mcp reads for exploration.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {

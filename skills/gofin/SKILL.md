@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.20.0"
+  version: "1.20.1"
   openclaw:
     requires:
       bins: [gofin]
@@ -23,6 +23,13 @@ unverified and distinguish any repository evidence.
 A catalogued interface, runtime availability, configured connection, permission,
 usable route and verified behavior are different facts. Report the evidence for
 the layer that matters to the task.
+
+For Aave exploration and estimated planning, prefer the informational MCP reads
+advertised by current discovery. Preserve unverified provenance, coverage and
+warnings; estimates and rounded aggregates are not exact balances or execution
+proof. For exact checks, scope native reads to the selected market and reserves
+using their current schemas. Let the broker independently verify execution and
+settlement; an informational preview cannot replace exact transaction simulation.
 
 ## Protect credentials and human intent
 

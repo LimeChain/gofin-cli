@@ -456,6 +456,15 @@ existing provider/revision checks, with the Pool implementation identity bound
 through preview and final revalidation. Historical reconciliation retains the
 original submission and evidence.
 
+Supply preparation and each revalidation create a separate canonical block
+snapshot for selected-reserve financial observations. Exact identical reads at
+that block share a capture-local cache; required older anchor evidence remains
+at its original block. An uncached header check rejects a changed block before
+live transaction simulation. Pool implementation identity, simulation, pending
+nonce and gas preparation retain their live reads. No cache survives approval
+or a preparation pass, and other Aave actions retain their existing observation
+paths.
+
 Synthetic tests inject MCP transport responses. Owned fork development examples
 use a deterministic builder fixture so current upstream account state cannot be
 mistaken for historical fork state; production uses only the official endpoint.
@@ -498,9 +507,14 @@ network. The same pure derivation runs on startup and protected reload so a
 broker update can expose newly shipped reviewed coverage without reenrollment.
 
 The EVM transport owns endpoint eligibility, freshness checks, read
-capability cooldowns and credential-free health observations. It races the first
-two eligible endpoints, with at most two active attempts, and replaces failed or
-missing attempts with the next configured provider. The first usable response
+capability cooldowns and credential-free health observations. It starts the first
+eligible endpoint and hedges after a short delay, with at most two active attempts;
+failed or missing attempts start the next configured provider immediately.
+Physical read requests share a per-endpoint concurrency bound, including identity
+probes and retries. Queued requests recheck cooldown after acquiring capacity,
+and HTTP rate limits without Retry-After still prevent redispatch during the
+default cooldown. Cancellation releases local capacity; it cannot cancel work
+already received by a provider. The first usable response
 that passes transport validation wins and cancels its competitors. Invalid shape
 or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
 before a winner fails the read closed. RPC reads have no overall or per-endpoint

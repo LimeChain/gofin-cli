@@ -800,10 +800,10 @@ pub fn description(operation: &str) -> &'static str {
             "List enabled Aave V3 markets and pinned deployment compatibility; unavailable networks are explicit."
         }
         "aave.reserves" => {
-            "Discover all Aave reserve eligibility, limits, receipt and debt identities."
+            "Observe exact Aave reserve eligibility, limits, receipt and debt identities through RPC. Scope tokens for selected reserves; unscoped reads scan the market. Prefer discovered aave.mcp reads for exploration."
         }
         "aave.positions" => {
-            "Observe all supplied claims, stable/variable debt and collateral separately."
+            "Observe exact supplied claims, stable/variable debt and collateral separately through RPC. Scope tokens for selected reserves; unscoped reads scan the market. Prefer discovered aave.mcp reads for exploratory positions."
         }
         "wallet.transfer" => {
             "Transfer exact native ETH or standard ERC-20 to an explicit recipient."
