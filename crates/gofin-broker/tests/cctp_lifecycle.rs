@@ -761,6 +761,9 @@ impl Authorizer for Approvals {
     }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         if self.requires_financial_review() {
+            let issued = now();
+            gofin_authorization::validate_challenge(c, &issued)?;
+            let native = gofin_authorization::helper_challenge(c)?;
             self.2
                 .lock()
                 .unwrap()
@@ -778,6 +781,17 @@ impl Authorizer for Approvals {
                 assert!(!reason.to_lowercase().contains("fee"), "{reason}");
                 assert!(!reason.to_lowercase().contains("deadline"), "{reason}");
             }
+            let response = json!({
+                "version": 1,
+                "status": "accepted",
+                "nonce": c.nonce,
+                "bindingHash": native["bindingHash"],
+                "approvedAt": now(),
+                "expiresAt": c.expires_at,
+            });
+            let audit = gofin_authorization::validate_response(c, &response, &issued, &now())?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            return Ok(audit);
         }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
@@ -1145,7 +1159,7 @@ impl Harness {
                 .asset_id(),
                 kind: FeeKind::Gas,
                 maximum: Quantity::new("10000000000000000").unwrap(),
-                maximum_usd_micros: Some(20_000_000),
+                maximum_usd_micros: None,
             })
             .collect();
         fees.push(FeeCap {
@@ -1433,6 +1447,16 @@ async fn compound_cctp_native_review_covers_all_stages_once() {
             )
             .await;
         assert_eq!(observed["outcome"]["phase"], "done", "{observed}");
+        assert_eq!(observed["approval"]["source"], "touch_id");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(
+                observed["approval"]["expires_at"].as_str().unwrap()
+            )
+            .unwrap()
+            .timestamp(),
+            observed["input"]["actionDeadline"].as_i64().unwrap(),
+            "Compound consent must keep its reviewed action deadline"
+        );
         let input = observed["input"].clone();
         let repeated = h
             .call(
@@ -2061,6 +2085,7 @@ async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() 
 async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
     Box::pin(async {
         let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
         let (id, transfer) = h.start_compound("expired-action").await;
         let before = h.state.transfer(&transfer).unwrap().unwrap();
         h.clock.freeze();
@@ -2102,6 +2127,14 @@ async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
         assert_eq!(result["reauthorization"], "approved", "{result}");
         assert_eq!(h.status(&transfer).await["state"], "completed");
         assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let authorized = h.engine.status(&id, false).await.unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&authorized.approval.unwrap().expires_at)
+                .unwrap()
+                .timestamp(),
+            authorized.input["actionDeadline"].as_i64().unwrap(),
+            "Reauthorization must retain the newly reviewed compound deadline"
+        );
         let after = h.state.transfer(&transfer).unwrap().unwrap();
         assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
         assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);

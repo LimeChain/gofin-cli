@@ -420,7 +420,9 @@ impl Engine {
             binding,
             summary: candidate.summary.clone(),
             nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: deadline.to_rfc3339(),
+            expires_at: deadline
+                .min(self.clock.now() + chrono::Duration::seconds(90))
+                .to_rfc3339(),
         };
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::AwaitingApproval,
@@ -428,7 +430,9 @@ impl Engine {
         let mut audit = self.authorizer.authorize(&challenge).await?;
         let approved_now = self.clock.now();
         validate_approval(&audit, &challenge, approved_now)?;
-        if !adapter.is_compound_action(&candidate) {
+        if adapter.is_compound_action(&candidate) {
+            promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+        } else {
             promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
         }
         validate_financial_approval_source(&audit)?;

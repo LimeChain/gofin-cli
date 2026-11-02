@@ -1833,7 +1833,7 @@ impl Engine {
         let approved_binding = gofin_domain::native_authorization_binding(&prepared);
         let approved_binding_hash = binding_hash(&approved_binding)?;
         let (audit, challenge) = {
-            let challenge_expiry = if compound_action {
+            let action_deadline = if compound_action {
                 let deadline = prepared.action_deadline.as_ref().ok_or_else(|| {
                     GoFinError::validation("A compound action requires an explicit deadline.")
                 })?;
@@ -1843,9 +1843,13 @@ impl Engine {
                     0,
                 )
                 .ok_or_else(|| GoFinError::validation("Invalid compound deadline."))?
+                .into()
             } else {
-                self.clock.now() + chrono::Duration::seconds(90)
+                None
             };
+            let prompt_deadline = self.clock.now() + chrono::Duration::seconds(90);
+            let challenge_expiry =
+                action_deadline.map_or(prompt_deadline, |deadline| deadline.min(prompt_deadline));
             let challenge = AuthorizationChallenge {
                 review: if matches!(&route, ExecutionRoute::Financial)
                     && self.authorizer.requires_financial_review()
@@ -1932,8 +1936,12 @@ impl Engine {
             };
             let approved_now = self.clock.now();
             validate_approval(&audit, &challenge, approved_now)?;
-            if matches!(&route, ExecutionRoute::Financial) && !compound_action {
-                promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+            if matches!(&route, ExecutionRoute::Financial) {
+                if let Some(deadline) = action_deadline {
+                    promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+                } else {
+                    promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+                }
             }
             (audit, Some(challenge))
         };
@@ -16356,6 +16364,36 @@ fn validate_approval(
             "Request fresh approval for the current operation.",
         ));
     }
+    Ok(())
+}
+
+/// Preserve the reviewed compound deadline after validating the short prompt.
+/// Yolo authority remains subject to its independent activation admission lease.
+fn promote_compound_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> Result<()> {
+    if !matches!(
+        audit.source,
+        None | Some(
+            gofin_domain::AuthorizationSource::TouchId
+                | gofin_domain::AuthorizationSource::Yolo
+                | gofin_domain::AuthorizationSource::Development
+        )
+    ) || parse_time(&audit.expires_at)? != parse_time(&challenge.expires_at)?
+        || instant >= deadline
+        || parse_time(&audit.approved_at)? > instant
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "Compound approval is expired or differs from its prompt.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = deadline.to_rfc3339();
     Ok(())
 }
 

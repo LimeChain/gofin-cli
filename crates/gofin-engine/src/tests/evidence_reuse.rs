@@ -570,3 +570,57 @@ async fn standalone_touch_id_does_not_extend_candidate_expiry() {
     assert_eq!(result.error.unwrap().code, "PREVIEW_EXPIRED");
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response() {
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::hours(2);
+    let challenge = AuthorizationChallenge {
+        review: None,
+        purpose: "financial_write".into(),
+        operation_id: "compound".into(),
+        binding: json!({"actionDeadline": deadline.to_rfc3339()}),
+        binding_hash: "binding".into(),
+        summary: "test".into(),
+        nonce: "nonce".into(),
+        expires_at: (now + chrono::Duration::seconds(90))
+            .min(deadline)
+            .to_rfc3339(),
+    };
+    for source in [
+        Some(gofin_domain::AuthorizationSource::TouchId),
+        Some(gofin_domain::AuthorizationSource::Development),
+        Some(gofin_domain::AuthorizationSource::Yolo),
+        None,
+    ] {
+        let mut audit = ApprovalAudit {
+            source,
+            yolo_provenance: None,
+            mechanism: "test".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: now.to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        };
+        validate_approval(&audit, &challenge, now).unwrap();
+        promote_compound_approval(&mut audit, &challenge, now, deadline).unwrap();
+        assert_eq!(parse_time(&audit.expires_at).unwrap(), deadline);
+    }
+    let audit = ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
+        mechanism: "test".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.to_rfc3339(),
+        expires_at: challenge.expires_at.clone(),
+    };
+    assert!(validate_approval(&audit, &challenge, now + chrono::Duration::seconds(90)).is_err());
+    assert!(promote_compound_approval(&mut audit.clone(), &challenge, deadline, deadline).is_err());
+    let mut changed = audit.clone();
+    changed.expires_at = deadline.to_rfc3339();
+    assert!(promote_compound_approval(&mut changed, &challenge, now, deadline).is_err());
+    let mut retired = audit;
+    retired.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
+    assert!(promote_compound_approval(&mut retired, &challenge, now, deadline).is_err());
+}

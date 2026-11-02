@@ -3,7 +3,7 @@
   "cli-authority": 15,
   "connection-recovery-guards": 4,
   "credentials": 11,
-  "dispatch-authority": 15,
+  "dispatch-authority": 16,
   "durable-identity": 7,
   "evm-amm-bounds": 5,
   "evm-bridge-evidence": 10,

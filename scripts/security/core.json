@@ -135,7 +135,8 @@
       "standalone_touch_id_promotion_rejects_invalid_short_responses",
       "standalone_touch_id_continuation_after_restart_preserves_original_expiry",
       "standalone_touch_id_explicit_reauthorization_gets_fresh_window_once",
-      "standalone_touch_id_does_not_extend_candidate_expiry"
+      "standalone_touch_id_does_not_extend_candidate_expiry",
+      "compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response"
     ]
   },
   {
