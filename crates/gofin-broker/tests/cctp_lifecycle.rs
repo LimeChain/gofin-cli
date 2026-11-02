@@ -753,6 +753,7 @@ struct Approvals(
     AtomicUsize,
     AtomicBool,
     Mutex<Vec<gofin_domain::approval_review::ApprovalReview>>,
+    AtomicBool,
 );
 #[async_trait]
 impl Authorizer for Approvals {
@@ -760,6 +761,14 @@ impl Authorizer for Approvals {
         self.1.load(Ordering::SeqCst)
     }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        if self.3.swap(false, Ordering::SeqCst) {
+            return Err(GoFinError::new(
+                "AUTHORIZATION_EXPIRED",
+                "authorization",
+                "Synthetic approval prompt expired before authorization.",
+                "Request a fresh review.",
+            ));
+        }
         if self.requires_financial_review() {
             let issued = now();
             gofin_authorization::validate_challenge(c, &issued)?;
@@ -1234,12 +1243,7 @@ impl Harness {
     async fn start_compound_mode(&self, request_id: &str, fast: bool) -> (String, String) {
         Box::pin(self.start_compound_options(request_id, fast, false)).await
     }
-    async fn start_compound_options(
-        &self,
-        request_id: &str,
-        fast: bool,
-        reverse_caps: bool,
-    ) -> (String, String) {
+    fn compound_input(&self, fast: bool, reverse_caps: bool) -> Value {
         let source = self.chain.lock().unwrap().source_chain();
         let destination = self.chain.lock().unwrap().destination_chain();
         let mut bounds = self.bounds();
@@ -1264,6 +1268,15 @@ impl Harness {
         if fast {
             input["cctp"] = json!({"transferMode":"fast"});
         }
+        input
+    }
+    async fn start_compound_options(
+        &self,
+        request_id: &str,
+        fast: bool,
+        reverse_caps: bool,
+    ) -> (String, String) {
+        let input = self.compound_input(fast, reverse_caps);
         let request = OperationRequest {
             request_id: request_id.into(),
             operation: "bridge.execute".into(),
@@ -2079,6 +2092,137 @@ async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() 
     );
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
     }).await
+}
+
+#[tokio::test]
+async fn expired_unapproved_cctp_revises_deadline_on_original_action_once() {
+    Box::pin(async {
+        let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
+        h.approvals.3.store(true, Ordering::SeqCst);
+        let original_input = h.compound_input(false, false);
+        let request = OperationRequest {
+            request_id: "expired-unapproved-cctp".into(),
+            operation: "bridge.execute".into(),
+            input: original_input.clone(),
+            run_id: None,
+        };
+        let original = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &original_input.to_string(),
+                    "--id",
+                    &request.request_id,
+                    "--json",
+                ]),
+                BrokerRequest::Execute {
+                    request: request.clone(),
+                },
+            )
+            .await;
+        let id = original["id"].as_str().unwrap().to_owned();
+        assert!(original["approval"].is_null());
+        assert!(h.chain.lock().unwrap().broadcasts.is_empty());
+        h.clock.freeze();
+        h.clock.advance(std::time::Duration::from_secs(601));
+        let h = h.restart();
+        let expired = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(
+            expired["outcome"]["dispatch"], "not_dispatched",
+            "{expired}"
+        );
+        assert_ne!(
+            expired["outcome"]["transfer"], "source_pending",
+            "{expired}"
+        );
+        assert_eq!(
+            expired["outcome"]["next_action"]["code"], "reauthorize",
+            "{expired}"
+        );
+        let token = expired["outcome"]["next_action"]["continuation_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        h.clock.unfreeze();
+        let mut input = original_input.clone();
+        input["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+        let request_args = args(&[
+            "operations",
+            "reauthorize",
+            &id,
+            "--token",
+            &token,
+            "--input",
+            &input.to_string(),
+            "--json",
+        ]);
+        let revised = h
+            .call(
+                request_args.clone(),
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                    input: input.clone(),
+                },
+            )
+            .await;
+        assert_eq!(revised["reauthorization"], "approved", "{revised}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        let duplicate = h
+            .call(
+                request_args,
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                    input: input.clone(),
+                },
+            )
+            .await;
+        assert_eq!(duplicate["id"], revised["id"]);
+        assert_eq!(duplicate["reauthorization"], "approved");
+        assert_eq!(
+            duplicate["outcome"]["dispatch"],
+            revised["outcome"]["dispatch"]
+        );
+        let replay = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &original_input.to_string(),
+                    "--id",
+                    &request.request_id,
+                    "--json",
+                ]),
+                BrokerRequest::Execute { request },
+            )
+            .await;
+        assert_eq!(replay["id"], id);
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        let mut different = input;
+        different["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 1200);
+        let _ = h.reauthorization_error(&id, &token, different).await;
+        h.chain.lock().unwrap().attestation_ready = true;
+        let completed = h.continue_compound(&id).await;
+        assert_eq!(completed["outcome"]["phase"], "done", "{completed}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
 }
 
 #[tokio::test]

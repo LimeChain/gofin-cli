@@ -53,7 +53,7 @@ mod reservation_overrides;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -654,6 +654,12 @@ impl Store {
                     ["operation_id", "kind", "reference", "data_json"].as_slice(),
                 ),
             ];
+            if version >= 42 {
+                expected.push((
+                    "preapproval_revisions",
+                    ["token", "input_json", "input_hash", "prior_record_json"].as_slice(),
+                ));
+            }
             if version >= 38 {
                 expected.push((
                     "preapproval_continuations",
@@ -1849,6 +1855,13 @@ impl Store {
         if migrated_version == 40 {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch("CREATE TABLE replacement_claims(parent_operation_id TEXT PRIMARY KEY REFERENCES operations(id),child_operation_id TEXT UNIQUE NOT NULL REFERENCES operations(id),submission_json TEXT NOT NULL); CREATE INDEX replacement_parent_identity ON operations(CASE WHEN json_valid(record_json) THEN coalesce(json_extract(record_json,'$.preview.binding.__gofin_replacement.parent_operation_id'),json_extract(record_json,'$.preview.binding.__fin_replacement.parent_operation_id')) END); PRAGMA user_version=41;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 41 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE preapproval_revisions(token TEXT PRIMARY KEY REFERENCES preapproval_continuations(token), input_json TEXT NOT NULL, input_hash TEXT NOT NULL, prior_record_json TEXT NOT NULL); PRAGMA user_version=42;")?;
             tx.commit()?;
         }
         Ok(())
@@ -12166,7 +12179,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        store.conn.execute_batch("DROP TABLE preapproval_continuations; DROP INDEX operation_binding_order_key; DROP INDEX operation_binding_funding_id; DROP INDEX operation_binding_resource; DROP INDEX operation_binding_client_id; DROP INDEX operation_binding_binding_client_id; DROP INDEX operation_binding_binding_resource; DROP INDEX operation_recovery_parent; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=34;").unwrap();
+        store.conn.execute_batch("DROP TABLE preapproval_continuations; DROP INDEX operation_binding_order_key; DROP INDEX operation_binding_funding_id; DROP INDEX operation_binding_resource; DROP INDEX operation_binding_client_id; DROP INDEX operation_binding_binding_client_id; DROP INDEX operation_binding_binding_resource; DROP INDEX operation_recovery_parent; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=34;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let records = store

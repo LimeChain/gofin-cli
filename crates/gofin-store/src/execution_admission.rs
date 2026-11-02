@@ -1713,6 +1713,101 @@ impl Store {
         tx.commit()?;
         Ok((claimed, true))
     }
+    /// Bind an explicit revised input to a preapproval token while retaining the
+    /// original request identity and a durable snapshot of the previous record.
+    pub fn claim_revised_preapproval_continuation(
+        &mut self,
+        lease: &StageInvocationLease,
+        token: &str,
+        input: &Value,
+        input_hash: &str,
+    ) -> Result<(PreapprovalContinuation, bool)> {
+        if !self.owns_action_lease(lease) || input_hash.is_empty() {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_preapproval(&tx, token)?.ok_or(StoreError::ExecutionConflict)?;
+        if current.action_id != lease.action_id {
+            return Err(StoreError::ExecutionConflict);
+        }
+        if current.input_hash.is_some() {
+            let stored: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT input_hash,input_json FROM preapproval_revisions WHERE token=?1",
+                    [token],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if stored.as_ref().is_none_or(|(hash, json)| {
+                hash != input_hash
+                    || serde_json::from_str::<Value>(json).ok().as_ref() != Some(input)
+            }) {
+                return Err(StoreError::ExecutionConflict);
+            }
+            tx.commit()?;
+            return Ok((current, false));
+        }
+        if current.generation > 1 {
+            let allowed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM preapproval_continuations WHERE action_id=?1 AND generation=?2 AND retryable=1 AND result_json IS NOT NULL)", params![current.action_id,current.generation-1], |r|r.get(0))?;
+            if !allowed {
+                return Err(StoreError::ExecutionConflict);
+            }
+        }
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [&current.action_id],
+            |r| r.get(0),
+        )?;
+        let mut record: Value = serde_json::from_str(&raw)?;
+        let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM logical_actions WHERE action_id=?1 UNION ALL SELECT 1 FROM operations WHERE id=?1 AND run_id IS NOT NULL)", [&current.action_id], |r|r.get(0))?;
+        if blocked
+            || record.get("id").and_then(Value::as_str) != Some(current.action_id.as_str())
+            || record
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            || !matches!(
+                record.get("status").and_then(Value::as_str),
+                Some("failed" | "rejected" | "expired")
+            )
+            || record.get("approval").is_some_and(|v| !v.is_null())
+            || record.get("submission").is_some_and(|v| !v.is_null())
+            || record
+                .get("authorization_source")
+                .is_some_and(|v| !v.is_null())
+            || record.get("run_id").is_some_and(|v| !v.is_null())
+            || record.pointer("/last_reconciliation_evidence/engine_predispatch_failure")
+                != Some(&Value::Bool(true))
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        tx.execute("INSERT INTO preapproval_revisions(token,input_json,input_hash,prior_record_json) VALUES (?1,?2,?3,?4)",params![token,input.to_string(),input_hash,raw])?;
+        record["input"] = input.clone();
+        record["status"] = Value::String("awaiting_approval".into());
+        record["error"] = Value::Null;
+        let updated = chrono::Utc::now().to_rfc3339();
+        record["updated_at"] = Value::String(updated.clone());
+        tx.execute("UPDATE operations SET status='awaiting_approval',record_json=?2,updated_at=?3 WHERE id=?1",params![current.action_id,record.to_string(),updated])?;
+        tx.execute(
+            "UPDATE preapproval_continuations SET input_hash=?2 WHERE token=?1",
+            params![token, input_hash],
+        )?;
+        let generation = current
+            .generation
+            .checked_add(1)
+            .ok_or(StoreError::ExecutionConflict)?;
+        let next = preapproval_token(&current.action_id, generation)?;
+        tx.execute(
+            "INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,?3)",
+            params![next, current.action_id, generation],
+        )?;
+        let claimed = read_preapproval(&tx, token)?.ok_or(StoreError::ExecutionConflict)?;
+        tx.commit()?;
+        Ok((claimed, true))
+    }
+
     /// Atomically record an interrupted, still-unapproved attempt and publish
     /// its precreated successor. No old token can initiate another prompt.
     pub fn interrupt_preapproval_continuation(

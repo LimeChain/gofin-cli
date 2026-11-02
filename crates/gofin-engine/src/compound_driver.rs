@@ -204,6 +204,55 @@ impl Engine {
             .map_err(|_| internal("store lock poisoned"))?
             .try_acquire_action_lease(id)
             .map_err(map_store)?;
+        let preapproval = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .preapproval_continuation(token)
+            .map_err(map_store)?;
+        if let Some(preapproval) = preapproval {
+            let mut drop_guard = gofin_domain::execution_progress::invocation_drop_guard()
+                .ok_or_else(|| internal("foreground invocation missing"))?;
+            let engine = self.clone();
+            let action_id = id.to_owned();
+            let token = token.to_owned();
+            let work = async move {
+                let (view, advance) = Box::pin(engine.continue_preapproval(
+                    &action_id,
+                    &token,
+                    &lease,
+                    preapproval,
+                    Some(input),
+                ))
+                .await?;
+                if !advance {
+                    if view.get("approval").is_some_and(|value| !value.is_null()) {
+                        let mut current =
+                            engine.operation_view(&engine.load_record(&action_id)?)?;
+                        current["reauthorization"] = json!("approved");
+                        return Ok(current);
+                    }
+                    return Ok(view);
+                }
+                gofin_domain::execution_progress::ensure_invocation_active()?;
+                let next = engine
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .latest_action_continuation(&action_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| internal("compound continuation missing"))?;
+                Box::pin(engine.continue_with_lease(&action_id, &next.token, &lease)).await?;
+                let mut current = engine.operation_view(&engine.load_record(&action_id)?)?;
+                current["reauthorization"] = json!("approved");
+                Ok(current)
+            };
+            let result = tokio::spawn(gofin_domain::execution_progress::inherit_current(work))
+                .await
+                .map_err(|_| internal("preapproval reauthorization task failed"))?;
+            drop_guard.disarm();
+            return result;
+        }
         let input_hash = binding_hash(&input)?;
         let token_row = self
             .store
@@ -518,9 +567,14 @@ impl Engine {
             let action_id = id.to_owned();
             let token = token.to_owned();
             let work = async move {
-                let (view, advance) =
-                    Box::pin(engine.continue_preapproval(&action_id, &token, &lease, preapproval))
-                        .await?;
+                let (view, advance) = Box::pin(engine.continue_preapproval(
+                    &action_id,
+                    &token,
+                    &lease,
+                    preapproval,
+                    None,
+                ))
+                .await?;
                 if !advance {
                     return Ok(view);
                 }
@@ -569,7 +623,24 @@ impl Engine {
             .map_err(map_store)?
             .ok_or_else(|| internal("preapproval successor missing"))?;
         let mut view = self.operation_view(&record)?;
-        view["outcome"]["next_action"] = json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":next.token},"continuation_token":next.token});
+        let request = OperationRequest {
+            request_id: record.request_id.clone(),
+            operation: record.operation.clone(),
+            input: record.input.clone(),
+            run_id: record.run_id.clone(),
+        };
+        let revised = request_fingerprint(&request).ok().as_deref() != Some(&record.fingerprint);
+        let deadline_expired = record.operation == "bridge.execute"
+            && record
+                .input
+                .get("actionDeadline")
+                .and_then(Value::as_i64)
+                .is_some_and(|deadline| deadline <= self.clock.now().timestamp());
+        view["outcome"]["next_action"] = if revised || deadline_expired {
+            json!({"code":"reauthorize","message":"Provide revised action input for a fresh approval.","operation_id":id,"command":"operations reauthorize","arguments":{"operation_id":id,"token":next.token,"input_required":true},"continuation_token":next.token})
+        } else {
+            json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":next.token},"continuation_token":next.token})
+        };
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
@@ -591,6 +662,7 @@ impl Engine {
         token: &str,
         lease: &gofin_store::execution_admission::StageInvocationLease,
         preapproval: gofin_store::execution_admission::PreapprovalContinuation,
+        revised_input: Option<Value>,
     ) -> Result<(Value, bool)> {
         if preapproval.action_id != id {
             return Err(GoFinError::validation(
@@ -602,12 +674,20 @@ impl Engine {
         if record.run_id.is_some() {
             return Err(retired_execution_interface());
         }
-        let (_, created) = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .claim_preapproval_continuation(lease, token, &record.fingerprint)
-            .map_err(map_store)?;
+        let (_, created) = if let Some(input) = &revised_input {
+            let hash = binding_hash(input)?;
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .claim_revised_preapproval_continuation(lease, token, input, &hash)
+                .map_err(map_store)?
+        } else {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .claim_preapproval_continuation(lease, token, &record.fingerprint)
+                .map_err(map_store)?
+        };
         if !created {
             if let Some(result) = preapproval.result {
                 return Ok((result, false));
@@ -630,13 +710,14 @@ impl Engine {
             self.finish_interrupted_preapproval(id, token, lease)?;
             return Err(error);
         }
+        record = self.load_record(id)?;
         let request = OperationRequest {
             request_id: record.request_id.clone(),
             operation: record.operation.clone(),
             input: record.input.clone(),
             run_id: record.run_id.clone(),
         };
-        if request_fingerprint(&request)? != record.fingerprint
+        if (revised_input.is_none() && request_fingerprint(&request)? != record.fingerprint)
             || record.approval.is_some()
             || record.submission.is_some()
         {
@@ -690,7 +771,27 @@ impl Engine {
                 record
             }
         };
-        let view = self.operation_view(&record)?;
+        let mut view = self.operation_view(&record)?;
+        if retryable {
+            let successor = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .preapproval_successor(token)
+                .map_err(map_store)?
+                .ok_or_else(|| internal("preapproval successor missing"))?;
+            let deadline_expired = record.operation == "bridge.execute"
+                && record
+                    .input
+                    .get("actionDeadline")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|deadline| deadline <= self.clock.now().timestamp());
+            view["outcome"]["next_action"] = if revised_input.is_some() || deadline_expired {
+                json!({"code":"reauthorize","message":"Provide revised action input for a fresh approval.","operation_id":id,"command":"operations reauthorize","arguments":{"operation_id":id,"token":successor.token,"input_required":true},"continuation_token":successor.token})
+            } else {
+                json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":successor.token},"continuation_token":successor.token})
+            };
+        }
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
@@ -1540,6 +1641,33 @@ impl Engine {
                 .and_then(|s| s.get("evidence_id"))
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.is_empty());
+            // A prepared transfer is not evidence of a source submission. Do
+            // not write a pending observation for a proved preapproval failure.
+            if !proof
+                && !matches!(
+                    state,
+                    "in_transit"
+                        | "destination_pending"
+                        | "refund_pending"
+                        | "refunded"
+                        | "completed"
+                )
+                && action.approval.is_none()
+                && action.submission.is_none()
+                && action
+                    .last_reconciliation_evidence
+                    .as_ref()
+                    .and_then(|e| e.get("engine_predispatch_failure"))
+                    == Some(&Value::Bool(true))
+                && attempts.iter().all(|attempt| {
+                    !matches!(
+                        attempt.state.as_str(),
+                        "admitted" | "uncertain" | "completed" | "failed"
+                    )
+                })
+            {
+                return Ok(action);
+            }
             let (result, transfer) = match (state, proof) {
                 ("completed", true) => (OutcomeResult::Executed, TransferState::Available),
                 ("refunded", true) => (OutcomeResult::Cancelled, TransferState::ReturnedToSource),

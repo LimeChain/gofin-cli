@@ -624,3 +624,227 @@ fn compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response()
     retired.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
     assert!(promote_compound_approval(&mut retired, &challenge, now, deadline).is_err());
 }
+
+struct ExpiredInputAdapter(SyntheticAdapter);
+#[async_trait]
+impl Adapter for ExpiredInputAdapter {
+    fn definitions(&self) -> Vec<Definition> {
+        self.0.definitions()
+    }
+    async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        self.0.read(operation, input).await
+    }
+    async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if input["amount"] == "1" {
+            return Err(GoFinError::validation("deadline expired"));
+        }
+        self.0.prepare(operation, input).await
+    }
+    async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        self.0.revalidate(prepared).await
+    }
+    async fn submit(
+        &self,
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        self.0.submit(prepared, journal).await
+    }
+    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        self.0.reconcile(record).await
+    }
+}
+
+#[tokio::test]
+async fn revised_preapproval_input_keeps_original_identity_and_is_idempotent_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let authorizer = Arc::new(CountApproval(AtomicUsize::new(0)));
+    let make_engine = || {
+        Engine::new(
+            Store::open(&path).unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap()
+    };
+    let engine = make_engine();
+    let request = ordinary_request("expired-input-revision");
+    let original = engine.execute(request.clone()).await.unwrap();
+    assert!(original.approval.is_none() && original.submission.is_none());
+    let token = engine
+        .store
+        .lock()
+        .unwrap()
+        .latest_preapproval_continuation(&original.id)
+        .unwrap()
+        .unwrap()
+        .token;
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+    drop(engine);
+    let engine = make_engine();
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let input = json!({"amount":"2"});
+    let result = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result["id"], original.id);
+    assert_eq!(result["reauthorization"], "approved");
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 1);
+    drop(engine);
+    let engine = make_engine();
+    let replay = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input))
+        .await
+        .unwrap();
+    assert_eq!(replay["id"], original.id);
+    assert_eq!(replay["reauthorization"], "approved");
+    assert!(
+        invocation
+            .scope(engine.reauthorize_operation(&original.id, &token, json!({"amount":"3"})))
+            .await
+            .is_err()
+    );
+    assert_eq!(engine.execute(request).await.unwrap().id, original.id);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn preapproval_failure_overrides_unsubmitted_prepared_transfer_observation() {
+    use gofin_domain::outcome::{Dispatch, OutcomeResult, TransferState};
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter],
+        Arc::new(SyntheticAuthorizer),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let original = engine
+        .execute(ordinary_request("predispatch-stale-observation"))
+        .await
+        .unwrap();
+    assert!(original.approval.is_none() && original.submission.is_none());
+    let mut stale = operation_resolutions::outcome_facts(&original);
+    stale.result = OutcomeResult::Pending;
+    stale.dispatch = Dispatch::NotDispatched;
+    stale.transfer = Some(TransferState::SourcePending);
+    engine
+        .store
+        .lock()
+        .unwrap()
+        .append_outcome_observation(&original.id, &stale, "bridge_destination")
+        .unwrap();
+    let view = engine.operation_view(&original).unwrap();
+    assert_eq!(view["outcome"]["result"], "failed", "{view}");
+    assert_eq!(view["outcome"]["dispatch"], "not_dispatched");
+    assert_ne!(view["outcome"]["transfer"], "source_pending");
+
+    let mut bridge = original.clone();
+    bridge.id = "expired-bridge-projection".into();
+    bridge.request_id = "expired-bridge-request".into();
+    bridge.operation = "bridge.execute".into();
+    bridge.input = json!({"actionDeadline": Utc::now().timestamp() - 1});
+    bridge.fingerprint = request_fingerprint(&OperationRequest {
+        request_id: bridge.request_id.clone(),
+        operation: bridge.operation.clone(),
+        input: bridge.input.clone(),
+        run_id: None,
+    })
+    .unwrap();
+    let mut expected = bridge.clone();
+    expected.status = Status::AwaitingApproval;
+    expected.error = None;
+    expected.last_reconciliation_evidence = None;
+    {
+        let mut store = engine.store.lock().unwrap();
+        store
+            .create_request(
+                &bridge.id,
+                &bridge.request_id,
+                &bridge.fingerprint,
+                &bridge.operation,
+                None,
+                "awaiting_approval",
+                &to_value(&expected).unwrap(),
+                &bridge.created_at,
+            )
+            .unwrap();
+        store
+            .record_predispatch_failure_and_issue(
+                &bridge.id,
+                &to_value(&expected).unwrap(),
+                &to_value(&bridge).unwrap(),
+                &bridge.updated_at,
+            )
+            .unwrap();
+    }
+    let view = engine.operation_view(&bridge).unwrap();
+    assert_eq!(
+        view["outcome"]["next_action"]["code"], "reauthorize",
+        "{view}"
+    );
+    assert_eq!(
+        view["outcome"]["next_action"]["command"],
+        "operations reauthorize"
+    );
+    assert_eq!(
+        view["outcome"]["next_action"]["arguments"]["input_required"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn rejected_revised_preapproval_replays_its_successor_without_prompt() {
+    let adapter = Arc::new(ExpiredInputAdapter(SyntheticAdapter::new()));
+    let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        approvals.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let original = engine
+        .execute(ordinary_request("revised-rejected"))
+        .await
+        .unwrap();
+    let token = engine
+        .store
+        .lock()
+        .unwrap()
+        .latest_preapproval_continuation(&original.id)
+        .unwrap()
+        .unwrap()
+        .token;
+    let input = json!({"amount":"1","revised":true});
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+    let first = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input.clone()))
+        .await
+        .unwrap();
+    let next = first
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(first["outcome"]["next_action"]["code"], "reauthorize");
+    let duplicate = invocation
+        .scope(engine.reauthorize_operation(&original.id, &token, input))
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str),
+        Some(next)
+    );
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
+}

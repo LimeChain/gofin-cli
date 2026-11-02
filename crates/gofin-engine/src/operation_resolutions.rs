@@ -248,6 +248,24 @@ impl Engine {
                     .and_then(|at| at.checked_add_signed(h))
             })
             .is_some_and(|at| at <= self.clock.now());
+        if !incomplete_observations
+            && !has_dispatch
+            && record.approval.is_none()
+            && record.submission.is_none()
+            && record
+                .last_reconciliation_evidence
+                .as_ref()
+                .and_then(|e| e.get("engine_predispatch_failure"))
+                == Some(&Value::Bool(true))
+            && facts.dispatch == gofin_domain::outcome::Dispatch::NotDispatched
+            && matches!(
+                facts.transfer,
+                None | Some(gofin_domain::outcome::TransferState::SourcePending)
+            )
+            && facts.result == gofin_domain::outcome::OutcomeResult::Pending
+        {
+            facts = outcome_facts(record);
+        }
         if !has_dispatch && admission.approval.is_some() && !approval_valid {
             facts.dispatch = gofin_domain::outcome::Dispatch::NotDispatched;
             facts.result = gofin_domain::outcome::OutcomeResult::Failed;
@@ -482,13 +500,41 @@ impl Engine {
                 .latest_preapproval_continuation(&record.id)
                 .map_err(map_store)?
         {
-            projected.next_action = gofin_domain::outcome::NextAction {
-                code: "continue".into(),
-                message: "Continue this original action to prepare and request approval.".into(),
-                operation_id: Some(record.id.clone()),
-                command: Some("operations continue".into()),
-                arguments: Some(json!({"operation_id":record.id,"token":token.token})),
-                continuation_token: Some(token.token),
+            let expired_deadline = record.operation == "bridge.execute"
+                && record
+                    .input
+                    .get("actionDeadline")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|deadline| deadline <= self.clock.now().timestamp());
+            let revised_request = OperationRequest {
+                request_id: record.request_id.clone(),
+                operation: record.operation.clone(),
+                input: record.input.clone(),
+                run_id: record.run_id.clone(),
+            };
+            let revised =
+                request_fingerprint(&revised_request).ok().as_deref() != Some(&record.fingerprint);
+            projected.next_action = if expired_deadline || revised {
+                gofin_domain::outcome::NextAction {
+                    code: "reauthorize".into(),
+                    message: "Provide revised action input for a fresh approval.".into(),
+                    operation_id: Some(record.id.clone()),
+                    command: Some("operations reauthorize".into()),
+                    arguments: Some(
+                        json!({"operation_id":record.id,"token":token.token,"input_required":true}),
+                    ),
+                    continuation_token: Some(token.token),
+                }
+            } else {
+                gofin_domain::outcome::NextAction {
+                    code: "continue".into(),
+                    message: "Continue this original action to prepare and request approval."
+                        .into(),
+                    operation_id: Some(record.id.clone()),
+                    command: Some("operations continue".into()),
+                    arguments: Some(json!({"operation_id":record.id,"token":token.token})),
+                    continuation_token: Some(token.token),
+                }
             };
         }
         value["outcome"] = to_value(&projected)?;

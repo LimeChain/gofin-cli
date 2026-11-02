@@ -1,9 +1,9 @@
 {
-  "atomic-action-admission": 2,
+  "atomic-action-admission": 5,
   "cli-authority": 15,
   "connection-recovery-guards": 4,
   "credentials": 11,
-  "dispatch-authority": 16,
+  "dispatch-authority": 19,
   "durable-identity": 7,
   "evm-amm-bounds": 5,
   "evm-bridge-evidence": 10,

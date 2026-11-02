@@ -1217,7 +1217,7 @@ fn verified_position_anchors_are_indexed_by_identity_and_exclude_current_attempt
     drop(store);
     {
         let old = rusqlite::Connection::open(&path).unwrap();
-        old.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
+        old.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
@@ -1774,7 +1774,7 @@ fn migration_backfills_only_engine_attested_unsubmitted_failures() {
     }
     drop(store);
     let old = rusqlite::Connection::open(&path).unwrap();
-    old.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;").unwrap();
+    old.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;").unwrap();
     drop(old);
     let store = Store::open(&path).unwrap();
     assert!(
@@ -1862,7 +1862,7 @@ fn meteora_v3_anchor_is_correlated_and_backfilled_on_schema39_restart() {
     assert_eq!(store.current_position_anchors(None).unwrap().len(), 1);
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
+    conn.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
         .unwrap();
     drop(conn);
     let store = Store::open(&path).unwrap();
@@ -2099,4 +2099,173 @@ fn submitted_replacement_requires_correlated_terminal_no_remainder_proof() {
             .unwrap()
     );
     assert!(store.claim_replacement("parent", "new", &parent).unwrap());
+}
+
+#[test]
+fn revised_preapproval_is_durable_and_bound_to_one_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("revision.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    request(&mut store, "action");
+    let mut before = store.get_record("action").unwrap().unwrap();
+    before["input"] = json!({"deadline": 1});
+    store
+        .update_record("action", &before, "2026-01-01T00:00:00Z")
+        .unwrap();
+    let mut failed = before.clone();
+    failed["status"] = json!("expired");
+    failed["last_reconciliation_evidence"] = json!({"engine_predispatch_failure":true});
+    let issued = store
+        .record_predispatch_failure_and_issue("action", &before, &failed, "2026-01-01T00:00:01Z")
+        .unwrap();
+    let lease = store.try_acquire_action_lease("action").unwrap();
+    let revised = json!({"deadline": 2});
+    let (claimed, created) = store
+        .claim_revised_preapproval_continuation(&lease, &issued.token, &revised, "revised-hash")
+        .unwrap();
+    assert!(created);
+    let record = store.get_record("action").unwrap().unwrap();
+    assert_eq!(record["input"], revised);
+    assert_eq!(record["fingerprint"], before["fingerprint"]);
+    assert_eq!(record["request_id"], before["request_id"]);
+    assert!(
+        store
+            .claim_revised_preapproval_continuation(
+                &lease,
+                &issued.token,
+                &json!({"deadline":3}),
+                "revised-hash"
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_revised_preapproval_continuation(&lease, &issued.token, &revised, "other")
+            .is_err()
+    );
+    drop(lease);
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    let lease = store.try_acquire_action_lease("action").unwrap();
+    assert_eq!(
+        store
+            .claim_revised_preapproval_continuation(&lease, &issued.token, &revised, "revised-hash")
+            .unwrap(),
+        (claimed.clone(), false)
+    );
+    let successor = store.preapproval_successor(&issued.token).unwrap().unwrap();
+    assert!(
+        store
+            .claim_revised_preapproval_continuation(
+                &lease,
+                &successor.token,
+                &revised,
+                "revised-hash"
+            )
+            .is_err()
+    );
+    let expected = store.get_record("action").unwrap().unwrap();
+    let mut failed_again = expected.clone();
+    failed_again["status"] = json!("failed");
+    let result = json!({"state":"not_dispatched"});
+    store
+        .interrupt_preapproval_continuation(
+            &lease,
+            &issued.token,
+            &expected,
+            &failed_again,
+            &result,
+            "2026-01-01T00:00:02Z",
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_revised_preapproval_continuation(&lease, &issued.token, &revised, "revised-hash")
+            .unwrap()
+            .0
+            .result,
+        Some(result)
+    );
+    assert!(
+        store
+            .claim_revised_preapproval_continuation(
+                &lease,
+                &successor.token,
+                &json!({"deadline":4}),
+                "next-hash"
+            )
+            .unwrap()
+            .1
+    );
+}
+
+#[test]
+fn revised_preapproval_rejects_prior_authority_or_submission() {
+    for field in ["approval", "authorization_source", "submission", "run_id"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        request(&mut store, "action");
+        let before = store.get_record("action").unwrap().unwrap();
+        let mut failed = before.clone();
+        failed["status"] = json!("expired");
+        failed["last_reconciliation_evidence"] = json!({"engine_predispatch_failure":true});
+        let issued = store
+            .record_predispatch_failure_and_issue(
+                "action",
+                &before,
+                &failed,
+                "2026-01-01T00:00:01Z",
+            )
+            .unwrap();
+        failed[field] = json!({"evidence":"prior"});
+        drop(store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE operations SET record_json=?1 WHERE id='action'",
+            [failed.to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        let mut store = Store::open(&path).unwrap();
+        let lease = store.try_acquire_action_lease("action").unwrap();
+        assert!(
+            store
+                .claim_revised_preapproval_continuation(
+                    &lease,
+                    &issued.token,
+                    &json!({"deadline":2}),
+                    "hash"
+                )
+                .is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn revision_schema_upgrade_recovers_interrupted_transaction_and_preserves_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    request(&mut store, "action");
+    let before = store.get_record("action").unwrap().unwrap();
+    let mut failed = before.clone();
+    failed["status"] = json!("expired");
+    failed["last_reconciliation_evidence"] = json!({"engine_predispatch_failure":true});
+    let issued = store
+        .record_predispatch_failure_and_issue("action", &before, &failed, "2026-01-01T00:00:01Z")
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE preapproval_revisions; PRAGMA user_version=41; BEGIN; CREATE TABLE preapproval_revisions(token TEXT PRIMARY KEY, input_json TEXT NOT NULL, input_hash TEXT NOT NULL, prior_record_json TEXT NOT NULL); PRAGMA user_version=42; ROLLBACK;").unwrap();
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.get_record("action").unwrap(), Some(failed));
+    assert_eq!(
+        store.latest_preapproval_continuation("action").unwrap(),
+        Some(issued)
+    );
+    drop(store);
+    Store::open(&path).unwrap();
 }
