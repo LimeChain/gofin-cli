@@ -31,6 +31,8 @@ struct ReuseAdapter {
     stale_price_after_window: bool,
     advance_after_window: chrono::Duration,
     revalidations: AtomicUsize,
+    pre_admission_only: bool,
+    pre_admission_queries: AtomicUsize,
     fail_first: AtomicBool,
 }
 
@@ -46,6 +48,8 @@ impl ReuseAdapter {
             stale_price_after_window: false,
             advance_after_window: chrono::Duration::zero(),
             revalidations: AtomicUsize::new(0),
+            pre_admission_only: false,
+            pre_admission_queries: AtomicUsize::new(0),
             fail_first: AtomicBool::new(false),
         }
     }
@@ -103,8 +107,24 @@ impl Adapter for ReuseAdapter {
         &self,
         _prepared: &PreparedOperation,
     ) -> Option<std::time::Duration> {
+        if self.pre_admission_only {
+            return None;
+        }
         self.clock.advance(self.advance_after_window);
         self.window
+    }
+
+    fn pre_admission_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.pre_admission_queries.fetch_add(1, Ordering::SeqCst);
+        if self.pre_admission_only {
+            self.clock.advance(self.advance_after_window);
+            self.window
+        } else {
+            None
+        }
     }
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
@@ -379,6 +399,105 @@ async fn adapters_without_a_reuse_window_keep_final_revalidation() {
 
     assert_eq!(result.status, Status::Pending, "{:?}", result.error);
     assert_eq!(adapter.revalidations.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_admission_reuse_keeps_locked_refresh_and_original_freshness_checks() {
+    for scenario in [
+        "fresh",
+        "slow_prepare",
+        "slow_approval",
+        "old_observation",
+        "expired_candidate",
+        "expired_price",
+    ] {
+        let clock = Arc::new(ManualClock::new());
+        let mut adapter = ReuseAdapter::new(clock.clone());
+        adapter.pre_admission_only = true;
+        let mut delay = std::time::Duration::ZERO;
+        match scenario {
+            "slow_prepare" => adapter.preparation_delay = std::time::Duration::from_secs(31),
+            "slow_approval" => delay = std::time::Duration::from_secs(31),
+            "old_observation" => {
+                adapter.candidate_observation_age = Some(chrono::Duration::seconds(45))
+            }
+            "expired_candidate" => {
+                adapter.candidate_lifetime = Some(chrono::Duration::seconds(1));
+                adapter.advance_after_window = chrono::Duration::seconds(2);
+            }
+            "expired_price" => {
+                adapter.stale_price_after_window = true;
+                adapter.advance_after_window = chrono::Duration::seconds(2);
+            }
+            _ => {}
+        }
+        let adapter = Arc::new(adapter);
+        let result = execute_with(adapter.clone(), clock, delay, scenario).await;
+        assert_eq!(
+            adapter.pre_admission_queries.load(Ordering::SeqCst),
+            1,
+            "{scenario}"
+        );
+        match scenario {
+            "expired_candidate" | "expired_price" => {
+                assert_eq!(
+                    result.error.unwrap().code,
+                    if scenario == "expired_candidate" {
+                        "PREVIEW_EXPIRED"
+                    } else {
+                        "STALE_VALUATION"
+                    }
+                );
+                assert!(result.submission.is_none());
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+            }
+            _ => {
+                assert_eq!(
+                    result.status,
+                    Status::Pending,
+                    "{scenario}: {:?}",
+                    result.error
+                );
+                // Fresh initial evidence eliminates only the pre-lock refresh.
+                // Slow preparation/approval or older observations retain both.
+                assert_eq!(
+                    adapter.revalidations.load(Ordering::SeqCst),
+                    if scenario == "fresh" { 1 } else { 2 },
+                    "{scenario}"
+                );
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pre_admission_opt_in_is_never_queried_for_boundary_or_plan_attempts() {
+    let clock = Arc::new(ManualClock::new());
+    let mut adapter = ReuseAdapter::new(clock);
+    adapter.pre_admission_only = true;
+    let prepared = adapter
+        .prepare("synthetic.transfer", &json!({}))
+        .await
+        .unwrap();
+    for (boundary, plan) in [(true, false), (false, true), (true, true)] {
+        assert!(execution_preparation_reuse_window(&adapter, &prepared, boundary, plan).is_none());
+    }
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        execution_preparation_reuse_window(&adapter, &prepared, false, false),
+        adapter.window
+    );
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 1);
+    // Existing explicit final-evidence reuse remains unchanged for those routes.
+    adapter.pre_admission_only = false;
+    for (boundary, plan) in [(true, false), (false, true), (true, true)] {
+        assert_eq!(
+            execution_preparation_reuse_window(&adapter, &prepared, boundary, plan),
+            adapter.window
+        );
+    }
+    assert_eq!(adapter.pre_admission_queries.load(Ordering::SeqCst), 1);
 }
 
 #[test]

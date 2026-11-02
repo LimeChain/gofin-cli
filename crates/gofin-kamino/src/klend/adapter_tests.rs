@@ -362,14 +362,24 @@ fn borrowed_principal_and_origination_fee_consume_gross_cumulative_authority() {
     let mut b = bounds();
     b["maximum_cumulative_borrow_atoms"] = json!("201");
     assert!(boundaries::permission(&i, &key(1), &c.reserve, &c.obligation_before, &b).is_err());
-    assert_eq!(
-        operation_definitions()
-            .into_iter()
-            .find(|d| d.name == OP_BORROW)
-            .unwrap()
-            .semantics["plan_permission"]["requires_adapter_scope"],
-        true
-    );
+}
+
+#[test]
+fn borrow_discovery_describes_native_action_authority() {
+    let definition = operation_definitions()
+        .into_iter()
+        .find(|d| d.name == OP_BORROW)
+        .unwrap();
+    for retired in [
+        "plan_permission",
+        "boundary_parameters",
+        "borrow_reusable_authority",
+    ] {
+        assert!(definition.semantics.get(retired).is_none());
+    }
+    let authority = definition.semantics["authority"].as_str().unwrap();
+    assert!(authority.contains("Each borrow action requires native approval"));
+    assert!(authority.contains("repayment does not authorize another borrow"));
 }
 
 #[tokio::test]

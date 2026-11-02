@@ -872,7 +872,7 @@ impl Adapter for KaminoAdapter {
                     settlement::verify_not_dispatched(submission, &reason_code, &reason)?;
                 Ok(Reconciliation {
                     status: Status::Failed,
-                    evidence: json!({"no_network_send":true,"reason_code":reason_code,"reason":reason}),
+                    evidence: verified.evidence.clone(),
                     verified: Some(verified),
                 })
             }

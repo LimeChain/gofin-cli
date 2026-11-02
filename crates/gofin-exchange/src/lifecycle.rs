@@ -29,6 +29,14 @@ fn error(code: &str, stage: &str, message: &str) -> GoFinError {
 /// deliberately not an Adapter: authorization-sensitive lifecycle is shared.
 #[async_trait]
 pub trait ExchangeProfile: Send + Sync {
+    /// Standalone-only reuse before the engine's full, locked admission refresh.
+    /// Does not opt into reusing evidence for boundary or plan dispatch.
+    fn pre_admission_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
     fn supports_approved_reprepare(&self, _prepared: &PreparedOperation) -> bool {
         false
     }
@@ -521,6 +529,12 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<PreparedOperation, GoFinError> {
         self.require_kind(operation, OperationKind::Write, "preview")?;
         self.profile.prepare(operation, input).await
+    }
+    fn pre_admission_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.profile.pre_admission_reuse_window(prepared)
     }
     fn validate_recovery_child(
         &self,

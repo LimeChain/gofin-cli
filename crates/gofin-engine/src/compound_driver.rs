@@ -1962,13 +1962,25 @@ impl Engine {
             };
             stage
         } else {
-            let candidate = bounded_evidence(
+            let mut candidate = bounded_evidence(
                 &action.operation,
                 "retry preparation",
                 PREFLIGHT_TIMEOUT,
-                adapter.prepare_with_context(&action.operation, &action.input, &context),
+                async {
+                    if adapter.supports_approved_reprepare(parent) {
+                        adapter
+                            .prepare_with_context(&action.operation, &action.input, &context)
+                            .await
+                    } else {
+                        // Exact adapters own refresh of their approved durable
+                        // identities. A new preparation may allocate a different
+                        // venue idempotency key even for identical input.
+                        adapter.revalidate(parent).await
+                    }
+                },
             )
             .await?;
+            financial_plans::carry_action_deadline(parent, &mut candidate)?;
             ("standalone".to_owned(), candidate)
         };
         validate_parent_stage(adapter.as_ref(), parent, &stage_id, &candidate)?;

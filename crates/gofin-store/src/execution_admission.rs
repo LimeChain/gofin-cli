@@ -1155,6 +1155,79 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// Restore only missing recovery metadata after approval was saved but
+    /// admission setup was interrupted. Historical expiry is retained: this
+    /// token permits review, never admission under an expired authority.
+    pub fn restore_unsubmitted_action_authority(
+        &mut self,
+        action_id: &str,
+        expected_record: &Value,
+        authority: &Value,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM operations WHERE id=?1 AND status='awaiting_approval'",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        let record: gofin_domain::OperationRecord = serde_json::from_str(&raw)?;
+        let audit = record
+            .approval
+            .as_ref()
+            .ok_or(StoreError::ExecutionConflict)?;
+        if serde_json::to_value(&record)? != *expected_record
+            || record.id != action_id
+            || record.run_id.is_some()
+            || record.submission.is_some()
+            || authority.get("audit") != Some(&serde_json::to_value(audit)?)
+            || authority.get("prepared") != Some(&serde_json::to_value(&record.preview)?)
+            || DateTime::parse_from_rfc3339(&audit.expires_at).is_err()
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let has_execution: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1) OR EXISTS(SELECT 1 FROM stage_attempts WHERE action_id=?1) OR EXISTS(SELECT 1 FROM action_continuations WHERE action_id=?1)",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        if has_execution {
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO logical_actions(action_id,deadline) VALUES (?1,?2)",
+            params![action_id, audit.expires_at],
+        )?;
+        let deadline: String = tx.query_row(
+            "SELECT deadline FROM logical_actions WHERE action_id=?1",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        if deadline != audit.expires_at {
+            return Err(StoreError::ExecutionConflict);
+        }
+        tx.execute("INSERT OR IGNORE INTO action_authorities(action_id,authority_id,authority_json,audit_json,expires_at) VALUES (?1,?2,?3,?4,?5)", params![action_id,audit.challenge_nonce,authority.to_string(),serde_json::to_string(audit)?,audit.expires_at])?;
+        let existing: (String, String) = tx.query_row("SELECT authority_json,expires_at FROM action_authorities WHERE action_id=?1 AND authority_id=?2", params![action_id,audit.challenge_nonce], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        if serde_json::from_str::<Value>(&existing.0)? != *authority
+            || existing.1 != audit.expires_at
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let digest = Sha256::digest(serde_json::to_vec(&(
+            "gofin-action-continuation-v1",
+            action_id,
+            1_i64,
+        ))?);
+        let token = format!("action-continuation-v1-{}", hex::encode(digest));
+        tx.execute(
+            "INSERT INTO action_continuations(token,action_id,generation) VALUES (?1,?2,1)",
+            params![token, action_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Load the immutable audit and approved intent for broker-side validation.
     pub fn action_authority(&self, action_id: &str, authority_id: &str) -> Result<Option<Value>> {
         let raw: Option<String> = self.conn.query_row("SELECT authority_json FROM action_authorities WHERE action_id=?1 AND authority_id=?2", params![action_id, authority_id], |r| r.get(0)).optional()?;

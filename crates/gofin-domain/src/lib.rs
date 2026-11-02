@@ -2142,6 +2142,16 @@ pub trait Adapter: Send + Sync {
     ) -> Option<std::time::Duration> {
         None
     }
+    /// Reuse initial evidence only before standalone admission, where the engine
+    /// will still run full revalidation under the submission resource lock.
+    /// The window starts before preparation and never extends evidence or
+    /// approval deadlines. Boundary and plan attempts cannot use this opt-in.
+    fn pre_admission_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
     /// Refresh observation evidence after slow reservation work. The engine
     /// requires the exact execution binding and financial intent to stay fixed.
