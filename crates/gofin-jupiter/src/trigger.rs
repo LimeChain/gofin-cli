@@ -3348,6 +3348,8 @@ impl Adapter for TriggerAdapter {
                         };
                     }
                     let sequence = previous_sequence.checked_add(1).ok_or_else(bad_response)?;
+                    evidence["outcome_live_order"] =
+                        json!(history_state == "open_escrowed" && remaining > 0);
                     evidence["order_history"] = history;
                     evidence["settlement_progress"] = json!({"version":1,"sequence":sequence,"snapshot_id":format!("trigger:{}:{}",order,sequence),"event_digests":event_digests});
                 }

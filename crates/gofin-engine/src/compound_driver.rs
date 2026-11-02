@@ -20,7 +20,10 @@ pub(super) fn validate_parent_stage(
     if adapter.is_compound_action(parent) {
         adapter.validate_stage_candidate(parent, stage_id, candidate)
     } else if stage_id == "standalone" {
-        adapter.validate_approved_candidate(parent, candidate)
+        adapter.validate_approved_candidate(
+            &strip_plan_metadata(parent),
+            &strip_plan_metadata(candidate),
+        )
     } else {
         Err(GoFinError::validation(
             "Invalid standalone attempt identity.",
@@ -204,6 +207,55 @@ impl Engine {
             .map_err(|_| internal("store lock poisoned"))?
             .try_acquire_action_lease(id)
             .map_err(map_store)?;
+        let preapproval = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .preapproval_continuation(token)
+            .map_err(map_store)?;
+        if let Some(preapproval) = preapproval {
+            let mut drop_guard = gofin_domain::execution_progress::invocation_drop_guard()
+                .ok_or_else(|| internal("foreground invocation missing"))?;
+            let engine = self.clone();
+            let action_id = id.to_owned();
+            let token = token.to_owned();
+            let work = async move {
+                let (view, advance) = Box::pin(engine.continue_preapproval(
+                    &action_id,
+                    &token,
+                    &lease,
+                    preapproval,
+                    Some(input),
+                ))
+                .await?;
+                if !advance {
+                    if view.get("approval").is_some_and(|value| !value.is_null()) {
+                        let mut current =
+                            engine.operation_view(&engine.load_record(&action_id)?)?;
+                        current["reauthorization"] = json!("approved");
+                        return Ok(current);
+                    }
+                    return Ok(view);
+                }
+                gofin_domain::execution_progress::ensure_invocation_active()?;
+                let next = engine
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .latest_action_continuation(&action_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| internal("compound continuation missing"))?;
+                Box::pin(engine.continue_with_lease(&action_id, &next.token, &lease)).await?;
+                let mut current = engine.operation_view(&engine.load_record(&action_id)?)?;
+                current["reauthorization"] = json!("approved");
+                Ok(current)
+            };
+            let result = tokio::spawn(gofin_domain::execution_progress::inherit_current(work))
+                .await
+                .map_err(|_| internal("preapproval reauthorization task failed"))?;
+            drop_guard.disarm();
+            return result;
+        }
         let input_hash = binding_hash(&input)?;
         let token_row = self
             .store
@@ -307,7 +359,9 @@ impl Engine {
         }
         let original = self.approved_action(&action)?;
         let context = PreparationContext::default();
-        let candidate = if adapter.is_compound_action(&original) {
+        let linked = self.amendment_preparation_context(&input)?;
+        let compound_context = self.compound_preparation_context(&input)?;
+        let mut candidate = if adapter.is_compound_action(&original) {
             bounded_evidence(
                 &action.operation,
                 "remaining action preparation",
@@ -320,10 +374,38 @@ impl Engine {
                 &action.operation,
                 "reauthorization preparation",
                 PREFLIGHT_TIMEOUT,
-                adapter.prepare_with_context(&action.operation, &input, &context),
+                async {
+                    if let Some(linked_compound) = &compound_context {
+                        adapter
+                            .prepare_with_compound_context(
+                                &action.operation,
+                                &input,
+                                &context,
+                                linked_compound,
+                            )
+                            .await
+                    } else {
+                        adapter
+                            .prepare_with_linked_context(
+                                &action.operation,
+                                &input,
+                                &context,
+                                &linked,
+                            )
+                            .await
+                    }
+                },
             )
             .await?
         };
+        stamp_mutation_baselines(&mut candidate, &linked, compound_context.as_ref())?;
+        let mut candidate_record = action.clone();
+        candidate_record.preview = Some(candidate.clone());
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_mutation_candidate(&action.id, &to_value(&candidate_record)?)
+            .map_err(map_store)?;
         validate_prepared(&candidate, &action.operation, self.clock.now())?;
         let mut no_new_costs = candidate.clone();
         no_new_costs.intent.maximum_costs.clear();
@@ -420,13 +502,21 @@ impl Engine {
             binding,
             summary: candidate.summary.clone(),
             nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: deadline.to_rfc3339(),
+            expires_at: deadline
+                .min(self.clock.now() + chrono::Duration::seconds(90))
+                .to_rfc3339(),
         };
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::AwaitingApproval,
         );
-        let audit = self.authorizer.authorize(&challenge).await?;
-        validate_approval(&audit, &challenge, self.clock.now())?;
+        let mut audit = self.authorizer.authorize(&challenge).await?;
+        let approved_now = self.clock.now();
+        validate_approval(&audit, &challenge, approved_now)?;
+        if adapter.is_compound_action(&candidate) {
+            promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+        } else {
+            promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+        }
         validate_financial_approval_source(&audit)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
         let mut updated = action.clone();
@@ -460,8 +550,8 @@ impl Engine {
                 &input_hash,
                 &challenge.nonce,
                 &authority,
-                &challenge.expires_at,
-                &challenge.expires_at,
+                &audit.expires_at,
+                &audit.expires_at,
                 &to_value(&action)?,
                 &to_value(&updated)?,
                 &result,
@@ -510,9 +600,14 @@ impl Engine {
             let action_id = id.to_owned();
             let token = token.to_owned();
             let work = async move {
-                let (view, advance) =
-                    Box::pin(engine.continue_preapproval(&action_id, &token, &lease, preapproval))
-                        .await?;
+                let (view, advance) = Box::pin(engine.continue_preapproval(
+                    &action_id,
+                    &token,
+                    &lease,
+                    preapproval,
+                    None,
+                ))
+                .await?;
                 if !advance {
                     return Ok(view);
                 }
@@ -561,7 +656,24 @@ impl Engine {
             .map_err(map_store)?
             .ok_or_else(|| internal("preapproval successor missing"))?;
         let mut view = self.operation_view(&record)?;
-        view["outcome"]["next_action"] = json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":next.token},"continuation_token":next.token});
+        let request = OperationRequest {
+            request_id: record.request_id.clone(),
+            operation: record.operation.clone(),
+            input: record.input.clone(),
+            run_id: record.run_id.clone(),
+        };
+        let revised = request_fingerprint(&request).ok().as_deref() != Some(&record.fingerprint);
+        let deadline_expired = record.operation == "bridge.execute"
+            && record
+                .input
+                .get("actionDeadline")
+                .and_then(Value::as_i64)
+                .is_some_and(|deadline| deadline <= self.clock.now().timestamp());
+        view["outcome"]["next_action"] = if revised || deadline_expired {
+            json!({"code":"reauthorize","message":"Provide revised action input for a fresh approval.","operation_id":id,"command":"operations reauthorize","arguments":{"operation_id":id,"token":next.token,"input_required":true},"continuation_token":next.token})
+        } else {
+            json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":next.token},"continuation_token":next.token})
+        };
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
@@ -583,6 +695,7 @@ impl Engine {
         token: &str,
         lease: &gofin_store::execution_admission::StageInvocationLease,
         preapproval: gofin_store::execution_admission::PreapprovalContinuation,
+        revised_input: Option<Value>,
     ) -> Result<(Value, bool)> {
         if preapproval.action_id != id {
             return Err(GoFinError::validation(
@@ -594,12 +707,20 @@ impl Engine {
         if record.run_id.is_some() {
             return Err(retired_execution_interface());
         }
-        let (_, created) = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .claim_preapproval_continuation(lease, token, &record.fingerprint)
-            .map_err(map_store)?;
+        let (_, created) = if let Some(input) = &revised_input {
+            let hash = binding_hash(input)?;
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .claim_revised_preapproval_continuation(lease, token, input, &hash)
+                .map_err(map_store)?
+        } else {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .claim_preapproval_continuation(lease, token, &record.fingerprint)
+                .map_err(map_store)?
+        };
         if !created {
             if let Some(result) = preapproval.result {
                 return Ok((result, false));
@@ -622,13 +743,14 @@ impl Engine {
             self.finish_interrupted_preapproval(id, token, lease)?;
             return Err(error);
         }
+        record = self.load_record(id)?;
         let request = OperationRequest {
             request_id: record.request_id.clone(),
             operation: record.operation.clone(),
             input: record.input.clone(),
             run_id: record.run_id.clone(),
         };
-        if request_fingerprint(&request)? != record.fingerprint
+        if (revised_input.is_none() && request_fingerprint(&request)? != record.fingerprint)
             || record.approval.is_some()
             || record.submission.is_some()
         {
@@ -682,7 +804,27 @@ impl Engine {
                 record
             }
         };
-        let view = self.operation_view(&record)?;
+        let mut view = self.operation_view(&record)?;
+        if retryable {
+            let successor = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .preapproval_successor(token)
+                .map_err(map_store)?
+                .ok_or_else(|| internal("preapproval successor missing"))?;
+            let deadline_expired = record.operation == "bridge.execute"
+                && record
+                    .input
+                    .get("actionDeadline")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|deadline| deadline <= self.clock.now().timestamp());
+            view["outcome"]["next_action"] = if revised_input.is_some() || deadline_expired {
+                json!({"code":"reauthorize","message":"Provide revised action input for a fresh approval.","operation_id":id,"command":"operations reauthorize","arguments":{"operation_id":id,"token":successor.token,"input_required":true},"continuation_token":successor.token})
+            } else {
+                json!({"code":"continue","message":"Continue this original action to prepare and request approval.","operation_id":id,"command":"operations continue","arguments":{"operation_id":id,"token":successor.token},"continuation_token":successor.token})
+            };
+        }
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
@@ -1066,7 +1208,7 @@ impl Engine {
             &candidate.operation,
             "stage nonce observation",
             PREFLIGHT_TIMEOUT,
-            adapter.evm_nonce_scope(&candidate),
+            adapter.evm_nonce_scope(&strip_plan_metadata(&candidate)),
         )
         .await?
         {
@@ -1078,7 +1220,8 @@ impl Engine {
                 .claim_evm_nonce(&scope, &child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
-            nonce_candidate = adapter.apply_claimed_evm_nonce(&candidate, nonce)?;
+            nonce_candidate =
+                adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
             validate_parent_stage(
                 parent_adapter.as_ref(),
                 &parent,
@@ -1090,7 +1233,7 @@ impl Engine {
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&nonce_candidate),
+            adapter.revalidate(&strip_plan_metadata(&nonce_candidate)),
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &current)?;
@@ -1107,6 +1250,7 @@ impl Engine {
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &finalized)?;
         validate_stage_fee_caps(&parent, &finalized, &prior)?;
         candidate = finalized;
+        carry_mutation_baselines(&parent, &mut candidate)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
         child.preview = Some(candidate.clone());
         child.updated_at = self.clock.now().to_rfc3339();
@@ -1185,8 +1329,10 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated =
-            gofin_domain::RevalidatedOperation::after_revalidation(candidate, self.clock.clone())?;
+        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+            strip_plan_metadata(&candidate),
+            self.clock.clone(),
+        )?;
         let result = adapter
             .submit_revalidated(&validated, journal.clone())
             .await;
@@ -1297,7 +1443,7 @@ impl Engine {
             &candidate.operation,
             "stage nonce observation",
             PREFLIGHT_TIMEOUT,
-            adapter.evm_nonce_scope(&candidate),
+            adapter.evm_nonce_scope(&strip_plan_metadata(&candidate)),
         )
         .await?
         {
@@ -1309,19 +1455,19 @@ impl Engine {
                 .claim_evm_nonce(&scope, child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
-            candidate = adapter.apply_claimed_evm_nonce(&candidate, nonce)?;
+            candidate = adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
         }
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&candidate),
+            adapter.revalidate(&strip_plan_metadata(&candidate)),
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage.stage_id, &current)?;
         validate_stage_fee_caps(&parent, &current, &prior)?;
         validate_prepared(&current, &current.operation, self.clock.now())?;
-        let finalized = bounded_evidence(
+        let mut finalized = bounded_evidence(
             &current.operation,
             "stage finalization",
             PREFLIGHT_TIMEOUT,
@@ -1337,6 +1483,7 @@ impl Engine {
         )?;
         validate_stage_fee_caps(&parent, &finalized, &prior)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
+        carry_mutation_baselines(&parent, &mut finalized)?;
         child.preview = Some(finalized.clone());
         child.updated_at = self.clock.now().to_rfc3339();
         self.store
@@ -1375,8 +1522,10 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated =
-            gofin_domain::RevalidatedOperation::after_revalidation(finalized, self.clock.clone())?;
+        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+            strip_plan_metadata(&finalized),
+            self.clock.clone(),
+        )?;
         let result = adapter
             .submit_revalidated(&validated, journal.clone())
             .await;
@@ -1532,6 +1681,33 @@ impl Engine {
                 .and_then(|s| s.get("evidence_id"))
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.is_empty());
+            // A prepared transfer is not evidence of a source submission. Do
+            // not write a pending observation for a proved preapproval failure.
+            if !proof
+                && !matches!(
+                    state,
+                    "in_transit"
+                        | "destination_pending"
+                        | "refund_pending"
+                        | "refunded"
+                        | "completed"
+                )
+                && action.approval.is_none()
+                && action.submission.is_none()
+                && action
+                    .last_reconciliation_evidence
+                    .as_ref()
+                    .and_then(|e| e.get("engine_predispatch_failure"))
+                    == Some(&Value::Bool(true))
+                && attempts.iter().all(|attempt| {
+                    !matches!(
+                        attempt.state.as_str(),
+                        "admitted" | "uncertain" | "completed" | "failed"
+                    )
+                })
+            {
+                return Ok(action);
+            }
             let (result, transfer) = match (state, proof) {
                 ("completed", true) => (OutcomeResult::Executed, TransferState::Available),
                 ("refunded", true) => (OutcomeResult::Cancelled, TransferState::ReturnedToSource),
@@ -1783,7 +1959,15 @@ impl Engine {
             ) {
                 return Ok(None);
             }
-            if attempt.state == "failed" && attempt.authority_id == authority_id {
+            if (attempt.state == "failed"
+                || (attempt.state == "rejected"
+                    && attempt
+                        .operation_id
+                        .as_deref()
+                        .and_then(|id| self.load_record(id).ok())
+                        .is_some_and(|r| r.submission.is_some())))
+                && attempt.authority_id == authority_id
+            {
                 return Err(GoFinError::new(
                     "STAGE_FAILED",
                     "preflight",
@@ -1826,13 +2010,26 @@ impl Engine {
             };
             stage
         } else {
-            let candidate = bounded_evidence(
+            let mut candidate = bounded_evidence(
                 &action.operation,
                 "retry preparation",
                 PREFLIGHT_TIMEOUT,
-                adapter.prepare_with_context(&action.operation, &action.input, &context),
+                async {
+                    if adapter.supports_approved_reprepare(parent) {
+                        adapter
+                            .prepare_with_context(&action.operation, &action.input, &context)
+                            .await
+                    } else {
+                        // Exact adapters own refresh of their approved durable
+                        // identities. A new preparation may allocate a different
+                        // venue idempotency key even for identical input.
+                        adapter.revalidate(&strip_plan_metadata(parent)).await
+                    }
+                },
             )
             .await?;
+            financial_plans::carry_action_deadline(parent, &mut candidate)?;
+            carry_mutation_baselines(parent, &mut candidate)?;
             ("standalone".to_owned(), candidate)
         };
         validate_parent_stage(adapter.as_ref(), parent, &stage_id, &candidate)?;

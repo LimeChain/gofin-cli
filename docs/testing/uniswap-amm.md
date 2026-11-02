@@ -47,7 +47,7 @@ Review quote financial metadata, the net worst-case output, native fee budget,
 recipient and deadline. The provider constructs the corresponding opaque
 execution payload. Necessary token allowance is finite and explicit; typed
 permit signing follows durable authorization admission. A refreshed candidate
-may reuse valid bounded authority but may not widen its approved limits.
+may use the action’s valid approval but may not widen its approved limits.
 
 The optional read-only helper prepares unsigned native-input AMM review files:
 
@@ -72,7 +72,7 @@ workflow. Record actual approval, dispatch, pending/recovery and finalized
 settlement observations without claiming synthetic evidence proves them.
 
 For an upgrade, preserve protected credentials, history, pending submission
-identities and reservations. Historical local-pool permissions cannot authorize
+identities and historical approval bindings. Historical local-pool permissions cannot authorize
 new API swaps. Pending original submissions reconcile through their existing
 identities; never replace them merely because the integration changed.
 
@@ -80,8 +80,7 @@ Native-token settlement requires the selected RPC to support
 `debug_traceTransaction` with `callTracer`, including the canonical transaction's
 complete native transfer tree. RPC availability for ordinary reads does not
 establish tracing support. If tracing is unavailable or its transaction identity
-cannot be verified, reconciliation cannot credit output or release the original
-reservation; retain the original submission and retry reconciliation with a
+cannot be verified, reconciliation cannot credit output; retain the original submission and retry reconciliation with a
 configured RPC that supplies the required evidence. ERC-20-only swaps use
 canonical Transfer logs; UniswapX additionally requires the original order's
 reactor Fill event.

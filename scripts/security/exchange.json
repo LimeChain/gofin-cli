@@ -22,7 +22,9 @@
     "reason": "Reject drift in financial limits before dispatch.",
     "tests": [
       "changed_filters_reject_but_advisory_valuation_does_not",
-      "authorization_denial_and_expiry_never_send_orders"
+      "authorization_denial_and_expiry_never_send_orders",
+      "changed_position_after_approval_never_dispatches_reduce_only_order",
+      "funding_during_action_respects_approved_bounds_without_replay"
     ]
   },
   {

@@ -204,7 +204,9 @@ pub(crate) fn verify_not_dispatched(
     bundle(
         submission,
         vec![],
-        json!({"state":"not_dispatched","reason_code":reason_code,"reason":reason,"financial_effects":[]}),
+        json!({"state":"not_dispatched","reason_code":reason_code,"reason":reason,"financial_effects":[],
+            "outcome_dispatch":"rejected","outcome_replay_safe":true,"definitive_nonexecution":true,
+            "source":"kamino_verified_pre_send_rejection","submission_reference":submission.reference}),
     )
 }
 pub(crate) fn verify_expired_without_inclusion(
@@ -234,7 +236,7 @@ pub(crate) fn verify_expired_without_inclusion(
     bundle(
         submission,
         vec![],
-        json!({"state":"expired_without_inclusion","signature":signature,"message_sha256":message_sha256,"reason":reason,"proof":proof,"financial_effects":[]}),
+        json!({"state":"expired_without_inclusion","outcome_replay_safe":true,"signature":signature,"message_sha256":message_sha256,"reason":reason,"proof":proof,"financial_effects":[]}),
     )
 }
 pub(crate) fn verify_failed(
@@ -590,6 +592,42 @@ pub(crate) fn verify(
 mod tests {
     use super::*;
     #[test]
+    fn verified_no_send_emits_identity_bound_outcome_tags() {
+        let submission = Submission {
+            kind: "solana.transaction".into(),
+            reference: format!("solana:message:{}", "a".repeat(64)),
+            data: json!({"message_sha256":"a".repeat(64)}),
+        };
+        let verified = verify_not_dispatched(
+            &submission,
+            "SOLANA_RPC_RATE_LIMITED",
+            "Transport rejected before network send.",
+        )
+        .unwrap();
+        assert!(verified.effects.is_empty());
+        assert_eq!(verified.evidence["outcome_dispatch"], "rejected");
+        assert_eq!(verified.evidence["outcome_replay_safe"], true);
+        assert_eq!(verified.evidence["definitive_nonexecution"], true);
+        assert_eq!(
+            verified.evidence["submission_reference"],
+            submission.reference
+        );
+        assert_eq!(
+            verified.evidence["source"],
+            "kamino_verified_pre_send_rejection"
+        );
+        assert_eq!(
+            verified.proof_digest,
+            verified_effect_digest(&verified).unwrap()
+        );
+        let mut tampered = verified.clone();
+        tampered.evidence["submission_reference"] = json!("other");
+        assert_ne!(
+            tampered.proof_digest,
+            verified_effect_digest(&tampered).unwrap()
+        );
+    }
+    #[test]
     fn expired_non_inclusion_binds_original_message_and_lifetime_without_claiming_no_send() {
         let hash = "a".repeat(64);
         let signature = bs58::encode([1u8; 64]).into_string();
@@ -628,6 +666,7 @@ mod tests {
             verified_effect_digest(&verified).unwrap()
         );
         assert_eq!(verified.evidence["state"], "expired_without_inclusion");
+        assert_eq!(verified.evidence["outcome_replay_safe"], true);
         assert!(verified.evidence.get("no_network_send").is_none());
         for (field, value) in [
             ("message_sha256", json!("other")),

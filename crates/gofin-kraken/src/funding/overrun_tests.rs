@@ -25,6 +25,8 @@ struct Venue {
     writes: AtomicUsize,
     ambiguous: AtomicBool,
     bounded_fees: AtomicBool,
+    preparations: AtomicUsize,
+    admission_change: AtomicUsize,
 }
 fn address() -> Value {
     json!({"crypto":{"address":"0x1111111111111111111111111111111111111111"}})
@@ -55,6 +57,8 @@ impl Venue {
             writes: AtomicUsize::new(0),
             ambiguous: AtomicBool::new(false),
             bounded_fees: AtomicBool::new(false),
+            preparations: AtomicUsize::new(0),
+            admission_change: AtomicUsize::new(0),
         })
     }
     fn active(&self) -> bool {
@@ -148,8 +152,9 @@ impl KrakenTransport for Venue {
         } else {
             "0.101"
         };
-        let data = match e {
+        let mut data = match e {
             E::KrakenPrivatePostGetApiKeyInfo => {
+                self.preparations.fetch_add(1, Ordering::SeqCst);
                 json!({"result":{"permissions":["query-funds","query-ledger","earn-funds","withdraw-funds","add-funds"]}})
             }
             E::KrakenPublicGetAssets => {
@@ -220,6 +225,19 @@ impl KrakenTransport for Venue {
             }
             _ => panic!("Unexpected synthetic native funding request {e:?}"),
         };
+        if self.preparations.load(Ordering::SeqCst) > 1 {
+            match (self.admission_change.load(Ordering::SeqCst), e) {
+                (1, E::KrakenFundingGetFundingV1FeesMethodId) => {
+                    data["fee"]["amount"] = json!("0.002");
+                    data["net_amount"]["amount"] = json!("0.099");
+                }
+                (2, E::KrakenFundingGetFundingV1Addresses) => {
+                    data["addresses"][0]["address_details"]["crypto"]["address"] =
+                        json!("0x2222222222222222222222222222222222222222");
+                }
+                _ => {}
+            }
+        }
         Ok(KrakenResponse::Json(data))
     }
 }
@@ -662,4 +680,62 @@ async fn current_fixed_net_fee_headroom_is_reserved_and_final_increase_settles_o
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
         assert!(result.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms==Quantity::from_decimal("0.002",36).unwrap())));
     }
+}
+
+#[tokio::test]
+async fn funding_v1_admission_reuse_preserves_fresh_fee_and_recipient_checks() {
+    for (change, expected) in [(1, "KRAKEN_FEE_LIMIT"), (2, "PREVIEW_CHANGED")] {
+        let dir = tempfile::tempdir().unwrap();
+        let venue = Venue::new(Family::Current);
+        venue.admission_change.store(change, Ordering::SeqCst);
+        let result = engine(
+            &dir.path().join("SYNTHETIC-admission.sqlite3"),
+            venue.clone(),
+        )
+        .execute(request(Family::Current))
+        .await
+        .unwrap();
+        assert_eq!(result.error.as_ref().unwrap().code, expected);
+        assert!(result.approval.is_some());
+        assert!(result.submission.is_none());
+        assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
+        // Initial preparation + locked admission refresh. A bypass of the final
+        // check would submit changed economics or a changed saved recipient.
+        assert_eq!(venue.preparations.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn only_funding_v1_withdrawal_opts_into_pre_admission_reuse() {
+    use gofin_domain::Adapter;
+    let venue = Venue::new(Family::Current);
+    let adapter = ExchangeAdapter::new(
+        KrakenProfile::new(KrakenProduct::Spot, vec![account()], venue)
+            .unwrap()
+            .with_prices(Arc::new(Quotes)),
+    );
+    let req = request(Family::Current);
+    let prepared = adapter.prepare(&req.operation, &req.input).await.unwrap();
+    assert_eq!(
+        adapter.pre_admission_reuse_window(&prepared),
+        Some(std::time::Duration::from_secs(90))
+    );
+    assert!(adapter.preparation_reuse_window(&prepared).is_none());
+    for operation in [
+        E::KrakenPrivatePostWithdraw,
+        E::KrakenFundingPutFundingV1DepositAddress,
+        E::KrakenPrivatePostEarnAllocate,
+        E::KrakenPrivatePostAddOrder,
+    ] {
+        let mut other = prepared.clone();
+        other.operation = operation.operation().into();
+        assert!(adapter.pre_admission_reuse_window(&other).is_none());
+    }
+    let mut missing_evidence = prepared;
+    missing_evidence.binding["funding"] = Value::Null;
+    assert!(
+        adapter
+            .pre_admission_reuse_window(&missing_evidence)
+            .is_none()
+    );
 }

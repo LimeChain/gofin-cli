@@ -514,6 +514,7 @@ async fn legacy_edit_proves_successor_then_original_owner_retains_predecessor_fi
     };
     let result = a.reconcile_with_context(&original, &context).await.unwrap();
     assert_eq!(result.status, Status::Pending);
+    assert_eq!(result.evidence["outcome_live_order"], true);
     let proof = result.verified.unwrap();
     assert_eq!(proof.submission, original.submission.unwrap());
     assert_eq!(proof.evidence["proofEvents"][0], old_events[0]);

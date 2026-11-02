@@ -649,4 +649,72 @@ mod tests {
             "NOOP_ANCHOR_INVALID"
         );
     }
+    struct PositionTransport(Value);
+    #[async_trait::async_trait]
+    impl BinanceTransport for PositionTransport {
+        async fn request(
+            &self,
+            _: &CredentialHandle,
+            request: BinanceRequest,
+        ) -> Result<Value, TransportError> {
+            assert_eq!(request.endpoint, BinanceEndpoint::FuturesPositions);
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_cleanup_refuses_changed_or_wrong_mode_native_position() {
+        let resource = ResourceId("synthetic-margin".into());
+        let baseline = PositionAnchor {
+            resource: resource.clone(),
+            position: "ETHUSDT:LONG".into(),
+            position_kind: PositionKind::DerivativeLong,
+            principal: Amount {
+                asset: asset("ETH"),
+                atoms: Quantity::zero(),
+            },
+            scaled_receipt: None,
+            evidence_version: 1,
+            evidence: json!({"positionAmtAtoms":"0"}),
+            observed_at: now(),
+        };
+        let submission = Submission {
+            kind: "binance".into(),
+            reference: "synthetic-noop".into(),
+            data: json!({
+                "account":"synthetic-main", "submittedAt":now(), "balancesBefore":{"USDT":"99"},
+                "binding":{"futures":true,"quantity":"0","positionBefore":"0","resource":resource,
+                    "symbol":"ETHUSDT","positionKind":PositionKind::DerivativeLong,"base":asset("ETH"),"quote":asset("USDT"),
+                    gofin_domain::BASELINE_ANCHORS_KEY:[baseline]}
+            }),
+        };
+        for row in [
+            json!({"symbol":"ETHUSDT","positionSide":"BOTH","positionAmt":"0.01"}),
+            json!({"symbol":"ETHUSDT","positionSide":"LONG","positionAmt":"0.01"}),
+            json!({"symbol":"ETHUSDT","positionSide":"BOTH"}),
+        ] {
+            let account = BinanceAccount {
+                name: "synthetic-main".into(),
+                resource: ResourceId("synthetic-spot".into()),
+                credential: CredentialHandle::new("test-only:noop-position").unwrap(),
+                role: AccountRole::Main,
+                parent: None,
+                email: None,
+                wallet_type: "SPOT".into(),
+            };
+            let profile = BinanceProfile::new(
+                BinanceConfig {
+                    accounts: vec![account],
+                    destinations: vec![],
+                },
+                Arc::new(PositionTransport(json!([row]))),
+                None,
+                None,
+            )
+            .unwrap();
+            let result = profile.trading_noop(&submission).await.unwrap();
+            assert_eq!(result.status, Status::Unknown);
+            assert!(result.verified.is_none());
+        }
+    }
 }

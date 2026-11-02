@@ -941,7 +941,12 @@ impl KrakenEvmDepositAdapter {
                         }],
                         &[],
                     )
-                    .await?;
+                    .await.map_err(|cause| {
+                        error(
+                            "KRAKEN_DEPOSIT_LIMIT_UNVERIFIED",
+                            "Fresh USD valuation is required to verify Kraken's account-specific tokenized deposit limit; nothing was submitted.",
+                        ).with_details(json!({"reason":"venue_usd_limit_valuation_unavailable","cause_code":cause.code}))
+                    })?;
                 let usd = native_quantity(text(maximum, "amount")?, 36)?.mul_div_floor(
                     &Quantity::from_u64(1_000_000),
                     &Quantity::new(format!("1{}", "0".repeat(36)))?,

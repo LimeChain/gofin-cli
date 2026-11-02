@@ -802,6 +802,13 @@ mod reconciliation {
             assert!(
                 matches!(&effects[0],FinancialEffect::CashDebit{amount,..}if amount.asset.reference=="USDC"&&amount.atoms==Quantity::from_decimal(if refunded{"0.0001"}else{"0.001"},36).unwrap())
             );
+            assert!(effects.iter().any(|e| matches!(
+                e,
+                FinancialEffect::Cost {
+                    treatment: CostTreatment::AdditionalDebit,
+                    ..
+                }
+            )));
             assert!(
                 !effects
                     .iter()

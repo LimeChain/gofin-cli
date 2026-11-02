@@ -8319,7 +8319,7 @@ impl ExchangeProfile for CoinbaseProfile {
             event_digests,
             position_orders: vec![],
         };
-        let evidence = json!({"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"withinAuthorizedCosts":within_authorized_costs,"meetsMinimum":meets_minimum,"realizedSpend":realized_spend,"realizedFee":fee_total});
+        let evidence = json!({"outcome_live_order":matches!(status_text.as_str(), "OPEN" | "PARTIALLY_FILLED"),"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"withinAuthorizedCosts":within_authorized_costs,"meetsMinimum":meets_minimum,"realizedSpend":realized_spend,"realizedFee":fee_total});
         let mut verified = None;
         if !effects.is_empty() || status.terminal() {
             let mut bundle = VerifiedEffects {

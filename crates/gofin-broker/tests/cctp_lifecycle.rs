@@ -753,6 +753,7 @@ struct Approvals(
     AtomicUsize,
     AtomicBool,
     Mutex<Vec<gofin_domain::approval_review::ApprovalReview>>,
+    AtomicBool,
 );
 #[async_trait]
 impl Authorizer for Approvals {
@@ -760,7 +761,18 @@ impl Authorizer for Approvals {
         self.1.load(Ordering::SeqCst)
     }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        if self.3.swap(false, Ordering::SeqCst) {
+            return Err(GoFinError::new(
+                "AUTHORIZATION_EXPIRED",
+                "authorization",
+                "Synthetic approval prompt expired before authorization.",
+                "Request a fresh review.",
+            ));
+        }
         if self.requires_financial_review() {
+            let issued = now();
+            gofin_authorization::validate_challenge(c, &issued)?;
+            let native = gofin_authorization::helper_challenge(c)?;
             self.2
                 .lock()
                 .unwrap()
@@ -778,6 +790,17 @@ impl Authorizer for Approvals {
                 assert!(!reason.to_lowercase().contains("fee"), "{reason}");
                 assert!(!reason.to_lowercase().contains("deadline"), "{reason}");
             }
+            let response = json!({
+                "version": 1,
+                "status": "accepted",
+                "nonce": c.nonce,
+                "bindingHash": native["bindingHash"],
+                "approvedAt": now(),
+                "expiresAt": c.expires_at,
+            });
+            let audit = gofin_authorization::validate_response(c, &response, &issued, &now())?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            return Ok(audit);
         }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
@@ -1145,7 +1168,7 @@ impl Harness {
                 .asset_id(),
                 kind: FeeKind::Gas,
                 maximum: Quantity::new("10000000000000000").unwrap(),
-                maximum_usd_micros: Some(20_000_000),
+                maximum_usd_micros: None,
             })
             .collect();
         fees.push(FeeCap {
@@ -1220,12 +1243,7 @@ impl Harness {
     async fn start_compound_mode(&self, request_id: &str, fast: bool) -> (String, String) {
         Box::pin(self.start_compound_options(request_id, fast, false)).await
     }
-    async fn start_compound_options(
-        &self,
-        request_id: &str,
-        fast: bool,
-        reverse_caps: bool,
-    ) -> (String, String) {
+    fn compound_input(&self, fast: bool, reverse_caps: bool) -> Value {
         let source = self.chain.lock().unwrap().source_chain();
         let destination = self.chain.lock().unwrap().destination_chain();
         let mut bounds = self.bounds();
@@ -1250,6 +1268,15 @@ impl Harness {
         if fast {
             input["cctp"] = json!({"transferMode":"fast"});
         }
+        input
+    }
+    async fn start_compound_options(
+        &self,
+        request_id: &str,
+        fast: bool,
+        reverse_caps: bool,
+    ) -> (String, String) {
+        let input = self.compound_input(fast, reverse_caps);
         let request = OperationRequest {
             request_id: request_id.into(),
             operation: "bridge.execute".into(),
@@ -1394,6 +1421,68 @@ async fn compound_cctp_native_review_covers_all_stages_once() {
             );
         }
         h.chain.lock().unwrap().attestation_ready = true;
+        let transfer_status = h.status(&transfer).await;
+        assert_eq!(
+            transfer_status["provider_status"]["status"], "mint_ready",
+            "{transfer_status}"
+        );
+        assert_eq!(
+            transfer_status["operation_next_action"]["command"],
+            "status"
+        );
+        assert_eq!(
+            transfer_status["operation_next_action"]["arguments"]["operation_id"],
+            id
+        );
+        assert!(
+            transfer_status["next_action"]
+                .as_str()
+                .unwrap()
+                .contains(&id)
+        );
+        assert_eq!(
+            transfer_status["provider_status"]["next_action"],
+            transfer_status["next_action"]
+        );
+        assert!(!transfer_status.to_string().contains("plan authority"));
+        let mint = transfer_status["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["kind"] == "mint")
+            .unwrap();
+        let separate_input = json!({
+            "transferId": transfer,
+            "stepId": mint["step_id"],
+            "stepKind": "mint",
+            "bounds": h.compound_input(false, false)["bounds"]
+        });
+        let broadcasts = h.chain.lock().unwrap().broadcasts.clone();
+        for request in [
+            BrokerRequest::Preview {
+                operation: "bridge.transfer".into(),
+                input: separate_input.clone(),
+            },
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "accidental-separate-mint".into(),
+                    operation: "bridge.transfer".into(),
+                    input: separate_input,
+                    run_id: None,
+                },
+            },
+        ] {
+            let response = Box::pin(h.runtime.handle(request)).await;
+            assert!(
+                !response.ok,
+                "Separate compound stage must redirect before approval"
+            );
+            let error = response.error.unwrap();
+            assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+            assert_eq!(error.details.unwrap()["operation_id"], id);
+            assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+            assert_eq!(h.chain.lock().unwrap().broadcasts, broadcasts);
+        }
         let waiting = h
             .call(
                 args(&["status", &id, "--json"]),
@@ -1433,6 +1522,16 @@ async fn compound_cctp_native_review_covers_all_stages_once() {
             )
             .await;
         assert_eq!(observed["outcome"]["phase"], "done", "{observed}");
+        assert_eq!(observed["approval"]["source"], "touch_id");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(
+                observed["approval"]["expires_at"].as_str().unwrap()
+            )
+            .unwrap()
+            .timestamp(),
+            observed["input"]["actionDeadline"].as_i64().unwrap(),
+            "Compound consent must keep its reviewed action deadline"
+        );
         let input = observed["input"].clone();
         let repeated = h
             .call(
@@ -2058,9 +2157,141 @@ async fn expired_attestation_refresh_keeps_original_burn_and_unsubmitted_mint() 
 }
 
 #[tokio::test]
+async fn expired_unapproved_cctp_revises_deadline_on_original_action_once() {
+    Box::pin(async {
+        let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
+        h.approvals.3.store(true, Ordering::SeqCst);
+        let original_input = h.compound_input(false, false);
+        let request = OperationRequest {
+            request_id: "expired-unapproved-cctp".into(),
+            operation: "bridge.execute".into(),
+            input: original_input.clone(),
+            run_id: None,
+        };
+        let original = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &original_input.to_string(),
+                    "--id",
+                    &request.request_id,
+                    "--json",
+                ]),
+                BrokerRequest::Execute {
+                    request: request.clone(),
+                },
+            )
+            .await;
+        let id = original["id"].as_str().unwrap().to_owned();
+        assert!(original["approval"].is_null());
+        assert!(h.chain.lock().unwrap().broadcasts.is_empty());
+        h.clock.freeze();
+        h.clock.advance(std::time::Duration::from_secs(601));
+        let h = h.restart();
+        let expired = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(
+            expired["outcome"]["dispatch"], "not_dispatched",
+            "{expired}"
+        );
+        assert_ne!(
+            expired["outcome"]["transfer"], "source_pending",
+            "{expired}"
+        );
+        assert_eq!(
+            expired["outcome"]["next_action"]["code"], "reauthorize",
+            "{expired}"
+        );
+        let token = expired["outcome"]["next_action"]["continuation_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        h.clock.unfreeze();
+        let mut input = original_input.clone();
+        input["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+        let request_args = args(&[
+            "operations",
+            "reauthorize",
+            &id,
+            "--token",
+            &token,
+            "--input",
+            &input.to_string(),
+            "--json",
+        ]);
+        let revised = h
+            .call(
+                request_args.clone(),
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                    input: input.clone(),
+                },
+            )
+            .await;
+        assert_eq!(revised["reauthorization"], "approved", "{revised}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        let duplicate = h
+            .call(
+                request_args,
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                    input: input.clone(),
+                },
+            )
+            .await;
+        assert_eq!(duplicate["id"], revised["id"]);
+        assert_eq!(duplicate["reauthorization"], "approved");
+        assert_eq!(
+            duplicate["outcome"]["dispatch"],
+            revised["outcome"]["dispatch"]
+        );
+        let replay = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &original_input.to_string(),
+                    "--id",
+                    &request.request_id,
+                    "--json",
+                ]),
+                BrokerRequest::Execute { request },
+            )
+            .await;
+        assert_eq!(replay["id"], id);
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
+        let mut different = input;
+        different["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 1200);
+        let _ = h.reauthorization_error(&id, &token, different).await;
+        h.chain.lock().unwrap().attestation_ready = true;
+        let completed = h.continue_compound(&id).await;
+        assert_eq!(completed["outcome"]["phase"], "done", "{completed}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
+}
+
+#[tokio::test]
 async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
     Box::pin(async {
         let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
         let (id, transfer) = h.start_compound("expired-action").await;
         let before = h.state.transfer(&transfer).unwrap().unwrap();
         h.clock.freeze();
@@ -2102,6 +2333,14 @@ async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
         assert_eq!(result["reauthorization"], "approved", "{result}");
         assert_eq!(h.status(&transfer).await["state"], "completed");
         assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let authorized = h.engine.status(&id, false).await.unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&authorized.approval.unwrap().expires_at)
+                .unwrap()
+                .timestamp(),
+            authorized.input["actionDeadline"].as_i64().unwrap(),
+            "Reauthorization must retain the newly reviewed compound deadline"
+        );
         let after = h.state.transfer(&transfer).unwrap().unwrap();
         assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
         assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
@@ -2109,6 +2348,128 @@ async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
             h.chain.lock().unwrap().broadcasts,
             BTreeMap::from([(1, 2), (42161, 1)])
         );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn failed_compound_mint_requires_fresh_approval_and_preserves_burn() {
+    Box::pin(async {
+        let h = Harness::new();
+        let (id, transfer) = h.start_compound("failed-compound-mint").await;
+        let before = h.state.transfer(&transfer).unwrap().unwrap();
+        let initial_source_balance = h.chain.lock().unwrap().source_balance;
+        let allowance = h.chain.lock().unwrap().allowance;
+        {
+            let mut state = h.chain.lock().unwrap();
+            state.attestation_ready = true;
+            state.revert_next = Some(42161);
+        }
+        let _ = h.continue_compound(&id).await;
+        let failed = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(
+            failed["outcome"]["next_action"]["code"], "reauthorize",
+            "{failed}"
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+        // A failed-looking stage without its correlated receipt cannot create
+        // a replacement identity or ask for a new approval.
+        let transfer_before_recovery = h.state.transfer(&transfer).unwrap().unwrap();
+        let parent = h.engine.status(&id, false).await.unwrap();
+        let mut prior = Vec::new();
+        for step in &transfer_before_recovery.steps {
+            if let Some(operation_id) = &step.operation_id {
+                prior.push(h.engine.status(operation_id, false).await.unwrap());
+            }
+        }
+        let failed_stage = prior
+            .iter_mut()
+            .find(|stage| stage.status == Status::Failed)
+            .unwrap();
+        failed_stage.effects = None;
+        let error = h
+            .bridge
+            .prepare_remaining_action(
+                &parent,
+                &failed["input"],
+                &prior,
+                &gofin_domain::PreparationContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert_eq!(
+            h.state.transfer(&transfer).unwrap().unwrap().steps,
+            transfer_before_recovery.steps
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        let token = failed
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let mut input = failed["input"].clone();
+        input["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+        let mut insufficient = input.clone();
+        let destination_cap = insufficient["bounds"]["fee_caps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|cap| cap["asset"]["network"] == "ethereum:42161")
+            .unwrap();
+        destination_cap["maximum"] = json!("29999999999999");
+        let error = h.reauthorization_error(&id, token, insufficient).await;
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "FEE_LIMIT" | "BRIDGE_CUMULATIVE_FEE_LIMIT" | "STAGE_FEE_CAP_EXCEEDED"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+        let result = h
+            .call(
+                args(&[
+                    "operations",
+                    "reauthorize",
+                    &id,
+                    "--token",
+                    token,
+                    "--input",
+                    &input.to_string(),
+                    "--json",
+                ]),
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.into(),
+                    input,
+                },
+            )
+            .await;
+        assert_eq!(result["reauthorization"], "approved", "{result}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let state = h.chain.lock().unwrap();
+        assert_eq!(state.broadcasts, BTreeMap::from([(1, 2), (42161, 2)]));
+        assert_eq!(state.source_balance, initial_source_balance);
+        assert_eq!(state.allowance, allowance);
+        assert_eq!(state.destination_balance, U256::from(10_000_000));
+        drop(state);
+        let after = h.state.transfer(&transfer).unwrap().unwrap();
+        assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
+        assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
     })
     .await
 }

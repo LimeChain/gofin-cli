@@ -284,15 +284,133 @@ def rehearse(fixture: str, *, positive_only: bool = False) -> dict:
                 lifecycle("stop", env)
 
 
+def rehearse_fresh_position_recovery() -> dict:
+    """A missing/stale historical anchor must not prevent a new reduce-only action."""
+    with tempfile.TemporaryDirectory(prefix="gofin-binance-fresh-position-") as temp:
+        state_home = Path(temp) / "state"
+        env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state_home))
+        started = False
+        records = []
+        try:
+            lifecycle("start", env)
+            started = True
+            fixture_path, = state_home.rglob("binance-fixture.json")
+
+            def state() -> dict:
+                return json.loads(fixture_path.read_text())
+
+            def external_change(**changes) -> None:
+                # Mutate only the stopped synthetic venue, never GoFin's journal.
+                lifecycle("stop", env)
+                fixture_state = state()
+                fixture_state.update(changes)
+                fixture_path.write_text(json.dumps(fixture_state))
+                lifecycle("start", env)
+
+            external_change(futures="10", leverage=3, suppress_faults=True)
+            order = {
+                "account": ACCOUNT, "symbol": "ETHUSDT", "quantity": "0.003",
+                "side": "BUY", "reduce_only": False, "limit_price": "2000",
+                "time_in_force": "FOK", "leverage": 3, "margin_type": "CROSSED",
+                "maximum_fees": {"USDT": "0.01"}, "maximum_loss": "0.01",
+                "maximum_profit": "0.01", "maximum_funding_loss": "0.01",
+                "maximum_funding_profit": "0.01",
+            }
+
+            def execute(label: str, data: dict, unresolved: bool = False) -> dict:
+                args = ["execute", "binance.futures.order-place", "--input",
+                        json.dumps({"request_id": label, **data}), "--id", label]
+                result = cli(args, env, unresolved=unresolved)
+                records.append(result)
+                posts = state()["posts"]
+                duplicate = cli(args, env, unresolved=unresolved)
+                assert duplicate["id"] == result["id"]
+                assert duplicate["submission"] == result["submission"]
+                assert state()["posts"] == posts, "Duplicate dispatched another order"
+                return result
+
+            # The venue fills the first order but drops its response. A concurrent
+            # external reduction then makes its aggregate position proof unavailable.
+            original = execute("unresolved-opening", order, unresolved=True)
+            assert original["status"] == "unknown" and not original.get("effects"), original
+            external_change(position="0.002")
+            unresolved = cli(["status", original["id"]], env, unresolved=True)
+            assert unresolved["status"] == "unknown" and not unresolved.get("effects"), unresolved
+            assert unresolved["last_reconciliation_evidence"]["executedQty"] == "0.003", unresolved
+
+            # No historical verified position exists. Use current native 0.002,
+            # not the original opening's 0.003, and reduce by an exact 0.001.
+            reduced = execute("fresh-reduction", {**order, "side": "SELL",
+                              "quantity": "0.001", "reduce_only": True})
+            assert reduced["status"] == "completed", reduced
+            assert reduced["effects"]["proof_digest"]
+            assert state()["position"] == "0.001" and state()["order_posts"] == 2
+
+            # An external increase makes the last verified GoFin anchor stale.
+            # A new close still uses the fresh 0.002 exposure and native reduceOnly.
+            external_change(position="0.002")
+            closed = execute("fresh-close", {**order, "side": "SELL", "quantity": "all",
+                             "maximum_quantity": "0.002", "reduce_only": True})
+            assert closed["status"] == "completed", closed
+            assert closed["preview"]["binding"]["quantity"] == "0.002"
+            assert closed["effects"]["proof_digest"]
+            assert state()["position"] == "0" and state()["futures"] == "9.993"
+            assert state()["order_posts"] == 3 and state()["posts"] == 3
+            lifecycle("stop", env)
+            lifecycle("start", env)
+            for record in (reduced, closed):
+                recovered = cli(["status", record["id"]], env)
+                assert recovered["effects"]["proof_digest"] == record["effects"]["proof_digest"]
+            unresolved = cli(["status", original["id"]], env, unresolved=True)
+            assert unresolved["status"] == "unknown" and not unresolved.get("effects"), unresolved
+            assert unresolved["submission"] == original["submission"]
+            assert unresolved["approval"] == original["approval"]
+            assert state()["posts"] == 3, "Observation replayed an order"
+            approvals = {record["approval"]["challenge_nonce"] for record in records}
+            assert len(approvals) == 3
+            return {"scenario": "binance-fresh-position-recovery", "approval_count": len(approvals),
+                    "external_submission_count": state()["posts"], "intervention_count": 0,
+                    "remaining_external_uncertainty": True, "blocked_unrelated_activity": False,
+                    "reason": "Original fills retained; historical position attribution remains unresolved",
+                    "missing_and_stale_history_close_verified": True, "final_position_eth": "0",
+                    "evidence_class": "public_cli_synthetic", "live_network": False}
+        except Exception:
+            evidence = Path(tempfile.mkdtemp(prefix="gofin-binance-fresh-position-failure-"))
+            if started:
+                lifecycle("stop", env)
+                started = False
+            shutil.copytree(state_home, evidence / "synthetic-state")
+            (evidence / "operations.json").write_text(json.dumps(records, indent=2))
+            print(f"Synthetic failure evidence: {evidence}", file=sys.stderr)
+            raise
+        finally:
+            if started:
+                lifecycle("stop", env)
+
+
 def main() -> int:
     options = sys.argv[1:]
+    if options == ["--fresh-position-recovery"]:
+        print(json.dumps(rehearse_fresh_position_recovery(), indent=2))
+        return 0
     if options not in ([], ["--positive-main"], ["--positive-subaccount"]):
-        raise SystemExit("usage: test-binance-futures-rehearsal.py [--positive-main|--positive-subaccount]")
+        raise SystemExit("usage: test-binance-futures-rehearsal.py [--positive-main|--positive-subaccount|--fresh-position-recovery]")
     positive_only = bool(options)
     fixtures = (["binance-futures"] if options == ["--positive-main"] else
                 ["binance-futures-subaccount"] if options == ["--positive-subaccount"] else
                 ["binance-futures", "binance-futures-subaccount"])
     reports = [rehearse(fixture, positive_only=positive_only) for fixture in fixtures]
+    if options != ["--positive-subaccount"]:
+        recovery = rehearse_fresh_position_recovery()
+        reports.append(recovery)
+        if positive_only and (evidence_path := os.environ.get("GOFIN_EXECUTION_EVIDENCE")):
+            path = Path(evidence_path)
+            original = json.loads(path.read_text())
+            combined = {**original, "components": [original, recovery],
+                        "remaining_external_uncertainty": True, "blocked_unrelated_activity": False}
+            for key in ("approval_count", "external_submission_count", "intervention_count"):
+                combined[key] = original[key] + recovery[key]
+            path.write_text(json.dumps(combined, indent=2))
     print(json.dumps({"evidence_class":"public_cli_synthetic", "live_network":False, "rehearsals":reports}, indent=2))
     return 0
 

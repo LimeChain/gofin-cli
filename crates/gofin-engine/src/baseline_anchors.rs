@@ -62,11 +62,34 @@ pub(super) fn merge(
         .map(position_anchor_key)
         .collect::<Result<BTreeSet<_>>>()?;
     for anchor in rows(prepared)? {
-        if keys.insert(position_anchor_key(&anchor)?) {
+        let key = position_anchor_key(&anchor)?;
+        if fresh_binance_derivative(prepared, &anchor) {
+            result
+                .positions
+                .retain(|previous| position_anchor_key(previous).ok().as_ref() != Some(&key));
+            keys.insert(key);
+            result.positions.push(anchor);
+        } else if keys.insert(key) {
             result.positions.push(anchor);
         }
     }
     Ok(result)
+}
+
+// Binance binds a fresh native position observation to each futures order.
+// Older records and other position types retain historical-anchor semantics.
+pub(super) fn fresh_binance_derivative(
+    prepared: &PreparedOperation,
+    anchor: &PositionAnchor,
+) -> bool {
+    prepared.operation == "binance.futures.order-place" && anchor.position_kind.is_derivative()
+}
+
+pub(super) fn is_bound_fresh_binance_anchor(
+    prepared: &PreparedOperation,
+    anchor: &PositionAnchor,
+) -> Result<bool> {
+    Ok(fresh_binance_derivative(prepared, anchor) && rows(prepared)?.contains(anchor))
 }
 
 #[cfg(test)]

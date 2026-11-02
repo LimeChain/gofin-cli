@@ -144,7 +144,7 @@ missing evidence, bounded concurrency and loser cancellation. Snapshot regressio
 cover reads beyond the former 8- and 10-second cutoffs, stable result ordering,
 partial coverage for actual failures and cancellation of child readers.
 Broker/SQLite restart fixtures exercise the same transport through the Ethereum
-adapter and optional isolated CLI, preserving the original ID, hash, reservations and proof
+adapter and optional isolated CLI, preserving the original ID, hash, historical approval binding and proof
 with one signature and one broadcast. Public probes remain opt-in read-only
 checks; they do not establish live-write or native-approval evidence.
 
@@ -208,10 +208,8 @@ protected hidden prompt, then confirm the protected configuration review after t
 ping and fresh ETH/USD quote checks. The key grants market-data access only and requests consume plan
 quota/billing. Never provide it in chat, JSON, CLI values or environment variables.
 No enrollment is required during setup; without it, anonymous access remains
-best effort. A standalone financial write needs fresh exact approval. An attempt
-explicitly submitted under an active named plan may use that plan's authority
-without another prompt, but still needs fresh valid USD quotes and current
-policy/evidence checks. CoinGecko authentication grants no financial authority,
+best effort. A standalone financial write needs fresh exact approval. Retired named plans cannot authorize a new attempt; current operation-specific
+quotes and evidence checks still apply. CoinGecko authentication grants no financial authority,
 and it does not make stale or missing quotes usable. Verify protected enrollment
 and authenticated freshness independently from anonymous public probes.
 

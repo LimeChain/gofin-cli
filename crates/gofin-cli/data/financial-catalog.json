@@ -12493,8 +12493,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -12503,6 +12501,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -16191,8 +16199,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -16201,6 +16207,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -20144,7 +20160,7 @@
   },
   {
     "name": "binance.futures.order-place",
-    "description": "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes.",
+    "description": "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only and uses the fresh venue position independently of historical reconciliation. Settings must already match; no implicit configuration changes.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -20226,7 +20242,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding loss from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_funding_profit": {
           "anyOf": [
@@ -20239,7 +20256,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding profit from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_loss": {
           "anyOf": [
@@ -21298,8 +21316,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -21308,6 +21324,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -25811,7 +25837,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding loss from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_funding_profit": {
           "anyOf": [
@@ -25824,7 +25851,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Maximum funding profit from this submission through reconciliation; excludes earlier funding."
         },
         "maximum_loss": {
           "anyOf": [
@@ -27690,6 +27718,7 @@
       "command_line_example": "gofin execute bridge.execute --input JSON --json",
       "execution_input": "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting.",
       "financial_authorization": "One native action approval covering declared stages through the explicit deadline, or protected Yolo.",
+      "preview_timing": "Preview binding.timing_guidance reports the provider arrival estimate when available, the remaining approval window at observed_at, and a suggested deadline with a 25% buffer of at least 300 seconds. A shorter window produces a warning. These are advisory estimates, not settlement guarantees; the reviewed deadline never extends automatically.",
       "providers": [
         "relay",
         "arbitrum_canonical",
@@ -29131,6 +29160,7 @@
         }
       },
       "command_line_example": "gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'",
+      "compound_owned_stage": "A stage owned by an approved bridge.execute action cannot be previewed or executed as a new standalone action. Inspect the original operation with status and follow its returned continuation or reauthorization arguments.",
       "financial_authorization": "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages.",
       "observer_only_chains": [
         {
@@ -46280,24 +46310,8 @@
           "optional_usd_value": "estimate"
         }
       },
-      "exact_plan_accounting": {
-        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
-        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
-        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
-        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
-        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
-        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
-        "market_type": "perpetual",
-        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
-      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
-      "plan_funding_accounting": {
-        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
-        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
-        "spot": "Uses the exact input-asset principal debit and separately classified costs."
-      },
-      "plan_immediate_orders": true,
       "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity."
     }
   },
@@ -46715,24 +46729,8 @@
           "optional_usd_value": "estimate"
         }
       },
-      "exact_plan_accounting": {
-        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
-        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
-        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
-        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
-        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
-        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
-        "market_type": "perpetual",
-        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
-      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
-      "plan_funding_accounting": {
-        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
-        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
-        "spot": "Uses the exact input-asset principal debit and separately classified costs."
-      },
-      "plan_immediate_orders": true,
       "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity.",
       "replacement": {
         "version": 1
@@ -46922,24 +46920,8 @@
           "optional_usd_value": "estimate"
         }
       },
-      "exact_plan_accounting": {
-        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
-        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
-        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
-        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
-        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
-        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
-        "market_type": "perpetual",
-        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
-      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
-      "plan_funding_accounting": {
-        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
-        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
-        "spot": "Uses the exact input-asset principal debit and separately classified costs."
-      },
-      "plan_immediate_orders": true,
       "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity.",
       "replacement": {
         "version": 1
@@ -47248,24 +47230,8 @@
           "optional_usd_value": "estimate"
         }
       },
-      "exact_plan_accounting": {
-        "aggregate_bounds": "Declare matching aggregate_bounds for the intended cumulative debit and cost budget; per-step ceilings can share a smaller aggregate budget. Sum requirements sharing an exact identity within a batch; never use order notional as a collateral debit.",
-        "before_approval": "Plan preview and authorization check all perpetual loss-debit and cost requirements together. PLAN_EXACT_SCOPE_INCOMPLETE returns required_debits, required_costs and validation_errors; correct the complete scope within the intended budget before requesting approval.",
-        "close_proceeds": "Closing a perpetual position does not establish released margin as usable plan proceeds. Funding dependencies and minimum_net_receipt cannot count freed collateral as a verified credit from the close; later spending of existing collateral needs its own accurate bounded authority.",
-        "deferred": "Balances, positions, margin capacity and current market evidence are revalidated at execution; a future-funded step is not required to hold its funds during plan review.",
-        "identity": "Use the verified account-mode cash resource and canonical asset identity from operation preview; unified collateral and separate perpetual collateral have different resources.",
-        "loss": "A positive max_realized_loss_usdc requires the same exact USDC amount in maximum_debits and maximum_costs with treatment included_in_debit. These describe one loss in two accounting dimensions, not two charges.",
-        "market_type": "perpetual",
-        "trading_fee": "A positive max_fee_usdc separately requires maximum_costs with treatment additional_debit."
-      },
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "execution_price": "Perpetual limits permit better prices: buy at most limit_price, sell at least limit_price. Perpetual market and trigger orders use the corresponding directional bound. Perpetual buy min_price and sell max_price are unsupported and rejected before approval. Spot orders retain two-sided min_price/max_price receipt bounds; an executed fill outside those bounds is reported as a discrepancy.",
-      "plan_funding_accounting": {
-        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
-        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
-        "spot": "Uses the exact input-asset principal debit and separately classified costs."
-      },
-      "plan_immediate_orders": true,
       "precision": "native market metadata required",
       "reconciliation_limits": "max_notional_usdc, max_fee_usdc and max_realized_loss_usdc remain independent limits. These are checked after execution; a confirmed overrun is reported as a discrepancy under the original identity."
     }
@@ -53168,69 +53134,6 @@
           "optional_usd_value": "estimate"
         }
       },
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -53371,7 +53274,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
@@ -53389,47 +53292,6 @@
           "candidate_binding_at_admission": "enforced",
           "optional_usd_value": "estimate"
         }
-      },
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -53497,48 +53359,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -53603,48 +53424,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -53713,48 +53493,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -53821,48 +53560,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -53998,48 +53696,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -54175,7 +53832,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
@@ -54193,47 +53850,6 @@
           "candidate_binding_at_admission": "enforced",
           "optional_usd_value": "estimate"
         }
-      },
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -54302,48 +53918,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -54410,48 +53985,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
       "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
@@ -54588,7 +54122,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
@@ -54606,47 +54140,6 @@
           "candidate_binding_at_admission": "enforced",
           "optional_usd_value": "estimate"
         }
-      },
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -54785,7 +54278,7 @@
     "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
     "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
     "semantics": {
-      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Each borrow action requires native approval of its debt increase and current account-wide risk limits; repayment does not authorize another borrow.",
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
@@ -54803,47 +54296,6 @@
           "candidate_binding_at_admission": "enforced",
           "optional_usd_value": "estimate"
         }
-      },
-      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amount_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_cumulative_borrow_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_debt_increase_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_protocol_fee_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "minimum_amount_atoms": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_amount_atoms",
-          "maximum_protocol_fee_atoms",
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
       },
       "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
       "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
@@ -54914,69 +54366,6 @@
     "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
     "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
     "semantics": {
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -55047,69 +54436,6 @@
     "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
     "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
     "semantics": {
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -55231,69 +54557,6 @@
     "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
     "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
     "semantics": {
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -55365,69 +54628,6 @@
     "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
     "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
     "semantics": {
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -55496,69 +54696,6 @@
     "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
     "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
     "semantics": {
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
-      },
       "families": [
         "lending",
         "liquidity"
@@ -55694,69 +54831,6 @@
           "candidate_binding_at_admission": "enforced",
           "optional_usd_value": "estimate"
         }
-      },
-      "boundary_example": {
-        "maximum_account_funding_lamports": 3000000,
-        "maximum_amounts": [
-          {
-            "atoms": "1000000",
-            "mint": "<canonical-underlying-mint>"
-          }
-        ],
-        "maximum_network_fee_lamports": 10000,
-        "maximum_stake_shares_atoms": "1000000"
-      },
-      "boundary_parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maximum_account_funding_lamports": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "maximum_amounts": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "atoms": {
-                  "pattern": "^(0|[1-9][0-9]*)$",
-                  "type": "string"
-                },
-                "mint": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "mint",
-                "atoms"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "maximum_network_fee_lamports": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "maximum_shares_atoms": {
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "maximum_stake_shares_atoms": {
-            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
-            "pattern": "^[1-9][0-9]*$",
-            "type": "string"
-          },
-          "minimum_shares_atoms": {
-            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "maximum_network_fee_lamports",
-          "maximum_account_funding_lamports"
-        ],
-        "type": "object"
       },
       "families": [
         "lending",
@@ -56047,8 +55121,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -56057,6 +55129,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -60178,8 +59260,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -60188,6 +59268,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -64208,8 +63298,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -64218,6 +63306,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -67898,8 +66996,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -67908,6 +67004,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -71665,8 +70771,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -71675,6 +70779,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -75483,8 +74597,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -75493,6 +74605,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -79164,8 +78286,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -79174,6 +78294,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -82889,8 +82019,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -82899,6 +82027,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -86626,8 +85764,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -86636,6 +85772,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -90312,8 +89458,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -90322,6 +89466,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -94000,8 +93154,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -94010,6 +93162,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -97722,8 +96884,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -97732,6 +96892,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -101833,8 +101003,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -101843,6 +101011,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -105654,8 +104832,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -105664,6 +104840,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -109932,8 +109118,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -109942,6 +109126,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -120063,8 +119257,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -120073,6 +119265,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -123796,8 +122998,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -123806,6 +123006,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -127784,8 +126994,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -127794,6 +127002,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -131464,8 +130682,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -131474,6 +130690,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -135178,8 +134404,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -135188,6 +134412,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -139381,8 +138615,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -139391,6 +138623,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -146842,8 +146084,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -146852,6 +146092,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -150645,8 +149895,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -150655,6 +149903,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -154710,8 +153968,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -154720,6 +153976,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -158407,8 +157673,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -158417,6 +157681,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -162329,8 +161603,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -162339,6 +161611,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -169915,7 +169197,8 @@
         }
       },
       "required": [
-        "chain_id"
+        "chain_id",
+        "network"
       ],
       "title": "MorphoReadInput",
       "type": "object"
@@ -174330,6 +173613,7 @@
       },
       "required": [
         "chain_id",
+        "network",
         "vault"
       ],
       "title": "MorphoReadInput",
@@ -174455,7 +173739,8 @@
         }
       },
       "required": [
-        "chain_id"
+        "chain_id",
+        "network"
       ],
       "title": "MorphoReadInput",
       "type": "object"
@@ -178932,7 +178217,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -182100,7 +181386,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -184475,7 +183762,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -189131,7 +188419,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",

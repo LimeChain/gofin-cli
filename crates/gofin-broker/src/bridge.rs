@@ -2887,12 +2887,36 @@ impl BridgeAdapter {
             resolved_at: current.to_rfc3339(),
             deadline_unix_seconds: deadline,
         };
+        let timing_guidance = bridge_timing_guidance(
+            saved.quote.estimated_arrival_seconds,
+            deadline,
+            self.clock.now(),
+        );
+        let warnings = if timing_guidance["shorter_than_estimate"] == true {
+            let recommendation = timing_guidance["recommended_deadline_rfc3339"]
+                .as_str()
+                .map(|deadline| {
+                    format!(
+                        "A suggested deadline is {deadline}, including a {} second buffer. ",
+                        timing_guidance["buffer_seconds"]
+                    )
+                })
+                .unwrap_or_default();
+            vec![format!(
+                "The remaining approval window ({} seconds) is shorter than the estimated arrival ({} seconds). {}Estimates are not guarantees and the deadline will not extend automatically.",
+                timing_guidance["remaining_window_seconds"],
+                timing_guidance["estimated_arrival_seconds"],
+                recommendation,
+            )]
+        } else {
+            vec![]
+        };
         Ok(PreparedOperation {
             operation:"bridge.execute".into(), input:input.clone(),
-            binding:json!({"compound_bridge":true,"transfer_id":transfer_id,"scope":permission.spec,"provider":provider}),
+            binding:json!({"compound_bridge":true,"transfer_id":transfer_id,"scope":permission.spec,"provider":provider,"timing_guidance":timing_guidance}),
             summary:permission.spec.summary.clone(),
             checks:vec![Check{name:"bridge_stage_requirements".into(),status:CheckStatus::Passed,detail:"The selected route, destination, native fee assets and stage limits were checked before approval.".into()}],
-            warnings:vec![], observed_at:current.to_rfc3339(), expires_at:deadline_time.to_rfc3339(), valuation:None,
+            warnings, observed_at:current.to_rfc3339(), expires_at:deadline_time.to_rfc3339(), valuation:None,
             intent:FinancialIntent { debits:permission.spec.maximum_debits.clone(), maximum_costs:permission.spec.maximum_costs.clone(), expected:vec![EffectConstraint::Transfer { from:debit.resource.clone(),to:destination,debit_asset:debit.amount.asset.clone(),credit_asset:min.asset,maximum_debit:debit.amount.atoms.clone(),minimum_credit:min.atoms }],locks:vec![] },
             operation_version:1, action_deadline:Some(action_deadline),
         })
@@ -2946,7 +2970,7 @@ impl BridgeAdapter {
                 .map_err(store_error)?
                 .ok_or_else(internal_error)?;
         }
-        let provider_status = if matches!(
+        let mut provider_status = if matches!(
             transfer.state,
             BridgeTransferState::InTransit
                 | BridgeTransferState::DestinationPending
@@ -3002,13 +3026,33 @@ impl BridgeAdapter {
             .as_ref()
             .and_then(|status| status["next_action"].as_str())
             .unwrap_or(&next_action);
+        // A compound action owns its saved transfer. Its status supplies the
+        // current continuation token and determines whether authority remains
+        // usable; a transfer read must not direct the caller to a new write.
+        let owner = engine.compound_bridge_action_for_transfer(&transfer.id)?;
+        let (next_action, operation_next_action) = match owner {
+            Some(owner) => {
+                let guidance = format!(
+                    "Inspect the original bridge action {} with gofin status {} --json and follow its returned next action.",
+                    owner.id, owner.id
+                );
+                if let Some(status) = provider_status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("next_action".into(), json!(guidance));
+                }
+                (
+                    guidance,
+                    Some(json!({"command":"status","arguments":{"operation_id":owner.id}})),
+                )
+            }
+            None => (next_action.to_owned(), None),
+        };
         let saved = self.saved_quote(&transfer)?;
         let settlement_policy = self.settlement_policy(
             bridge_source_chain_id(&saved.quote.intent),
             saved.quote.intent.destination_chain_id,
         );
         Ok(
-            json!({"transfer_id":transfer.id,"state":transfer.state,"grant_id":transfer.grant_id,"steps":transfer.steps,"transit":transfer.transit,"provider_status":provider_status,"settlement":bridge_settlement_status_summary(&transfer),"settlement_policy":settlement_policy,"next_action":next_action}),
+            json!({"transfer_id":transfer.id,"state":transfer.state,"grant_id":transfer.grant_id,"steps":transfer.steps,"transit":transfer.transit,"provider_status":provider_status,"settlement":bridge_settlement_status_summary(&transfer),"settlement_policy":settlement_policy,"next_action":next_action,"operation_next_action":operation_next_action}),
         )
     }
 
@@ -5500,11 +5544,36 @@ impl Adapter for BridgeAdapter {
         let transfer_id = original_preview.binding["transfer_id"]
             .as_str()
             .ok_or_else(internal_error)?;
-        let transfer = self
+        let mut transfer = self
             .state()?
             .transfer(transfer_id)
             .map_err(store_error)?
             .ok_or_else(internal_error)?;
+        // Only a terminal, correlated receipt for the exact failed destination
+        // stage permits planning a new recovery identity. Never replay the
+        // original submission or create a new source step.
+        let failed_stage = |step: &gofin_domain::BridgeStepLink| {
+            step.kind.is_destination_stage()
+                && step.state == BridgeStepState::NeedsAttention
+                && completed.iter().any(|stage| {
+                    stage.status == Status::Failed
+                        && step.operation_id.as_deref() == Some(stage.id.as_str())
+                        && stage.effects.as_ref().is_some_and(|proof| {
+                            stage.submission.as_ref() == Some(&proof.submission)
+                                && gofin_domain::verified_effect_digest(proof).ok().as_deref()
+                                    == Some(proof.proof_digest.as_str())
+                        })
+                })
+        };
+        if transfer.steps.iter().any(failed_stage) {
+            self.bridge_recovery(&json!({"transferId":transfer_id}))
+                .await?;
+            transfer = self
+                .state()?
+                .transfer(transfer_id)
+                .map_err(store_error)?
+                .ok_or_else(internal_error)?;
+        }
         if !transfer
             .steps
             .iter()
@@ -5515,24 +5584,22 @@ impl Adapter for BridgeAdapter {
             ));
         }
         if transfer.steps.iter().any(|step| {
-            matches!(
-                step.state,
-                BridgeStepState::Submitted | BridgeStepState::NeedsAttention
-            )
+            step.state == BridgeStepState::Submitted
+                || (step.state == BridgeStepState::NeedsAttention && !failed_stage(step))
         }) {
             return Err(GoFinError::validation(
                 "Observe the submitted bridge stage before revising its remaining scope.",
             ));
         }
         for stage in completed {
-            if stage.status != Status::Completed
-                || !transfer.steps.iter().any(|step| {
-                    step.state == BridgeStepState::Settled
-                        && step.operation_id.as_deref() == Some(stage.id.as_str())
-                })
-            {
+            if !transfer.steps.iter().any(|step| {
+                step.operation_id.as_deref() == Some(stage.id.as_str())
+                    && ((stage.status == Status::Completed
+                        && step.state == BridgeStepState::Settled)
+                        || (stage.status == Status::Failed && failed_stage(step)))
+            }) {
                 return Err(GoFinError::validation(
-                    "Completed stage identity differs from the persisted bridge.",
+                    "Prior stage identity or verified terminal evidence differs from the persisted bridge.",
                 ));
             }
         }
@@ -8891,6 +8958,52 @@ fn bridge_step_execution_matches(approved: &Value, candidate: &Value) -> bool {
                 .to_ascii_lowercase()
 }
 
+fn bridge_timing_guidance(
+    estimate: Option<u64>,
+    deadline: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let now_unix = u64::try_from(now.timestamp()).unwrap_or(0);
+    let remaining = deadline
+        .saturating_sub(now_unix)
+        .saturating_sub(u64::from(now.timestamp_subsec_nanos() != 0));
+    let buffer = estimate.map(|seconds| (seconds / 4 + u64::from(seconds % 4 != 0)).max(300));
+    let recommended = estimate.zip(buffer).and_then(|(seconds, buffer)| {
+        now_unix
+            .checked_add(u64::from(now.timestamp_subsec_nanos() != 0))?
+            .checked_add(seconds)?
+            .checked_add(buffer)
+            .filter(|timestamp| {
+                i64::try_from(*timestamp)
+                    .ok()
+                    .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+                    .is_some()
+            })
+    });
+    json!({
+        "observed_at": now.to_rfc3339(),
+        "estimated_arrival_seconds": estimate,
+        "remaining_window_seconds": remaining,
+        "buffer_seconds": buffer,
+        "recommended_deadline_unix_seconds": recommended,
+        "recommended_deadline_rfc3339": recommended.and_then(|timestamp| i64::try_from(timestamp).ok()).and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0)).map(|time| time.to_rfc3339()),
+        "shorter_than_estimate": estimate.map(|seconds| remaining < seconds),
+        "note": "Arrival is an estimate, not a guarantee. The approval deadline does not extend automatically."
+    })
+}
+
+fn bridge_candidate_violation(
+    message: &str,
+    violation: gofin_domain::boundaries::BoundaryViolation,
+) -> GoFinError {
+    let mut error = gofin_domain::boundaries::violation_error(message, violation);
+    error.code = "CANDIDATE_OUT_OF_SCOPE".into();
+    error.stage = "submission".into();
+    error.message = format!("{message} Nothing was submitted by this candidate.");
+    error.next_action = "Request a fresh candidate within the current approval; review changed terms only if no in-scope candidate exists. Preserve previously submitted stages.".into();
+    error
+}
+
 fn validate_bridge_execute_candidate(
     spec: &gofin_domain::boundaries::BoundarySpec,
     prepared: &PreparedOperation,
@@ -8983,14 +9096,14 @@ fn validate_bridge_execute_candidate(
     let selected_bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
         .map_err(|_| GoFinError::validation("Nominated bridge bounds are malformed."))?;
     if !candidate_in_scope || selected_bounds != bounds {
-        return Err(gofin_domain::boundaries::violation_error(
+        return Err(bridge_candidate_violation(
             "Nominated bridge quote changes the approved intent or exceeds its finite bounds.",
             gofin_domain::boundaries::BoundaryViolation {
                 constraint: "fixed_scope".into(),
                 approved_bound: spec.fixed.clone(),
                 candidate_value: prepared.binding.clone(),
                 evidence_time: Some(prepared.observed_at.clone()),
-                reauthorization_required: true,
+                reauthorization_required: false,
                 reconciliation_required: false,
             },
         ));
@@ -9015,15 +9128,15 @@ fn validate_bridge_boundary(
             })
         })
     {
-        return Err(gofin_domain::boundaries::violation_error(
+        return Err(bridge_candidate_violation(
             "Bridge candidate changes fixed transfer or route identity.",
             gofin_domain::boundaries::BoundaryViolation {
                 constraint: "fixed_scope".into(),
                 approved_bound: spec.fixed.clone(),
                 candidate_value: prepared.binding.clone(),
                 evidence_time: Some(prepared.observed_at.clone()),
-                reauthorization_required: true,
-                reconciliation_required: true,
+                reauthorization_required: false,
+                reconciliation_required: false,
             },
         ));
     }
@@ -12515,7 +12628,21 @@ mod tests {
 
         let mut changed_provider = prepared.clone();
         changed_provider.binding["quote"]["provider"] = json!("arbitrum_canonical");
-        assert!(validate_bridge_execute_candidate(&spec, &changed_provider).is_err());
+        let rejected = validate_bridge_execute_candidate(&spec, &changed_provider).unwrap_err();
+        assert_eq!(rejected.code, "CANDIDATE_OUT_OF_SCOPE");
+        assert!(
+            rejected
+                .message
+                .contains("Nothing was submitted by this candidate")
+        );
+        assert_eq!(
+            rejected.details.as_ref().unwrap()["boundary_violation"]["reauthorization_required"],
+            false
+        );
+        assert_eq!(
+            rejected.details.as_ref().unwrap()["boundary_violation"]["reconciliation_required"],
+            false
+        );
 
         let mut changed_source_asset = prepared.clone();
         changed_source_asset.binding["quote"]["intent"]["source"]["token"] =

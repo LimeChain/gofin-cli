@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Positive public CLI AMM swap and receipt-funded return on an owned fork."""
+"""Four dependent public CLI AMM swaps on an owned fork."""
 import argparse
 import importlib.util
 import json
@@ -34,27 +34,41 @@ class Roundtrip(AMM.Rehearsal):
 
     def run_positive(self,dex,protocol,fee):
         before=self.read('wallet.balances',{**AMM.BASE,'tokens':[AMM.TOKEN]})
-        first=self.settled(f'{dex}.swap',self.make_swap(dex,protocol,'native',AMM.TOKEN,'0.001',fee))
-        proceeds=AMM.conversion(first)['received']
-        assert proceeds['asset']['reference'].lower()==AMM.TOKEN.lower() and int(proceeds['atoms'])>0
-        records=[first]
-        if protocol=='v4':
-            approve={**AMM.BASE,'request_id':str(uuid.uuid4()),'token':AMM.TOKEN,'spender':'0x000000000022d473030f116ddee9f6b43ac78ba3','amount':AMM.decimal(proceeds['atoms'],proceeds['asset']['decimals']),'max_fee_eth':'0.01'}
-            records.append(self.settled('wallet.approve',approve))
-        second=self.settled(f'{dex}.swap',self.make_swap(dex,protocol,AMM.TOKEN,'native',AMM.decimal(proceeds['atoms'],proceeds['asset']['decimals']),fee))
-        records.append(second)
-        assert AMM.conversion(second)['spent']==proceeds
-        if protocol=='v4':
-            revoke={**approve,'request_id':str(uuid.uuid4()),'amount':'0'}
-            records.append(self.settled('wallet.approve',revoke))
+        records=[]
+        swaps=[]
+        proceeds=None
+        for cycle in range(2):
+            amount='0.001' if proceeds is None else AMM.decimal(proceeds['atoms'],proceeds['asset']['decimals'])
+            first=self.settled(f'{dex}.swap',self.make_swap(dex,protocol,'native',AMM.TOKEN,amount,fee))
+            if proceeds is not None:
+                assert AMM.conversion(first)['spent']==proceeds
+            proceeds=AMM.conversion(first)['received']
+            assert proceeds['asset']['reference'].lower()==AMM.TOKEN.lower() and int(proceeds['atoms'])>0
+            records.append(first);swaps.append(first)
+            if protocol=='v4':
+                approve={**AMM.BASE,'request_id':str(uuid.uuid4()),'token':AMM.TOKEN,'spender':'0x000000000022d473030f116ddee9f6b43ac78ba3','amount':AMM.decimal(proceeds['atoms'],proceeds['asset']['decimals']),'max_fee_eth':'0.01'}
+                records.append(self.settled('wallet.approve',approve))
+            second=self.settled(f'{dex}.swap',self.make_swap(dex,protocol,AMM.TOKEN,'native',AMM.decimal(proceeds['atoms'],proceeds['asset']['decimals']),fee))
+            records.append(second);swaps.append(second)
+            assert AMM.conversion(second)['spent']==proceeds
+            proceeds=AMM.conversion(second)['received']
+            if protocol=='v4':
+                revoke={**approve,'request_id':str(uuid.uuid4()),'amount':'0'}
+                records.append(self.settled('wallet.approve',revoke))
+            if cycle==0:
+                self.restart()
+                recovered=self.cli('status',second['id'])
+                assert recovered['submission']==second['submission'] and recovered['effects']==second['effects']
+        assert len({record['id'] for record in swaps})==4
+        assert len({json.dumps(record['submission'],sort_keys=True) for record in swaps})==4
         after=self.read('wallet.balances',{**AMM.BASE,'tokens':[AMM.TOKEN]})
         def atoms(value, asset):
             return int(next(r['amount']['atoms'] for r in value['data'] if r['amount']['asset']['reference'].lower()==asset.lower()))
         assert atoms(after,AMM.TOKEN)==atoms(before,AMM.TOKEN)
         costs=sum(int(e['amount']['atoms']) for record in records for e in record['effects']['effects'] if e['kind']=='cost' and e['amount']['asset']['reference']=='native')
-        spent=int(AMM.conversion(first)['spent']['atoms']);returned=int(AMM.conversion(second)['received']['atoms'])
+        spent=int(AMM.conversion(swaps[0])['spent']['atoms']);returned=int(proceeds['atoms'])
         assert atoms(after,'native')==atoms(before,'native')-spent+returned-costs
-        self.save('result',{'status':'passed','dex':dex,'protocol':protocol,'chain_id':AMM.CHAIN,'forward_id':first['id'],'reverse_id':second['id'],'asset_restored':True,'production_writes':0,'liquidity':'deployed fork state, not synthetic seeded pool','approval':'isolated development automatic','valuation':'synthetic fixed owned-fork prices; not public pricing'})
+        self.save('result',{'status':'passed','dex':dex,'protocol':protocol,'chain_id':AMM.CHAIN,'swap_ids':[record['id'] for record in swaps],'swap_count':len(swaps),'restart_after_swap':2,'asset_restored':True,'production_writes':0,'liquidity':'deployed fork state, not synthetic seeded pool','approval':'isolated development automatic','valuation':'synthetic fixed owned-fork prices; not public pricing'})
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

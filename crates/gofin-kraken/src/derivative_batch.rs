@@ -750,10 +750,12 @@ impl KrakenProfile {
                 return crate::unresolved_consumption::new_write_overrun_with_progress(
                     record,
                     submission,
-                    if terminal {
+                    if !terminal {
+                        Status::Pending
+                    } else if any_fill && !any_rejected_mutation {
                         Status::Completed
                     } else {
-                        Status::Pending
+                        Status::Failed
                     },
                     &other,
                     json!({"code":"KRAKEN_BATCH_NEW_WRITE_COST_BOUND_EXCEEDED","batch":observations,"proofEvents":events,"unknownChildren":unknown_children}),
@@ -763,10 +765,12 @@ impl KrakenProfile {
         if crate::unresolved_consumption::costs_exceed_bounds(&other, &bounds)? {
             return crate::unresolved_consumption::proven_cost_overrun(
                 submission,
-                if terminal {
+                if !terminal {
+                    Status::Pending
+                } else if any_fill && !any_rejected_mutation {
                     Status::Completed
                 } else {
-                    Status::Pending
+                    Status::Failed
                 },
                 &other,
                 json!({"code":"KRAKEN_BATCH_COST_BOUND_EXCEEDED","batch":observations,"proofEvents":events,"unknownChildren":unknown_children}),

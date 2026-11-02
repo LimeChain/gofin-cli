@@ -522,6 +522,121 @@ fn record(
 }
 
 #[tokio::test]
+async fn compound_bridge_lookup_preserves_terminal_owner_and_rejects_ambiguity() {
+    let engine = build_engine(vec![observer("bridge.transfer", vec![], vec![])]);
+    let mut candidate = prepared();
+    candidate.operation = "bridge.execute".into();
+    candidate.binding = json!({"compound_bridge":true,"transfer_id":"transfer-1"});
+    let mut action = record(candidate, None);
+    action.status = Status::Expired;
+    action.approval = Some(gofin_domain::ApprovalAudit {
+        source: None,
+        yolo_provenance: None,
+        mechanism: "synthetic".into(),
+        binding_hash: "hash".into(),
+        challenge_nonce: "nonce".into(),
+        approved_at: now(),
+        expires_at: now(),
+    });
+    let insert = |action: &OperationRecord| {
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &action.id,
+                &action.request_id,
+                &action.fingerprint,
+                &action.operation,
+                None,
+                "expired",
+                &to_value(action).unwrap(),
+                &now(),
+            )
+            .unwrap();
+    };
+    insert(&action);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let input = json!({"transferId":"transfer-1","stepId":"mint"});
+    let error = engine.preview("bridge.transfer", &input).await.unwrap_err();
+    assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+    assert_eq!(error.details.as_ref().unwrap()["operation_id"], action.id);
+    let error = engine
+        .execute(OperationRequest {
+            request_id: "new-child".into(),
+            operation: "bridge.transfer".into(),
+            input,
+            run_id: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "BRIDGE_COMPOUND_ACTION_OWNED");
+    assert!(
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .by_request("new-child")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .compound_bridge_action_for_transfer("other")
+            .unwrap()
+            .is_none()
+    );
+    let mut unapproved = action.clone();
+    unapproved.id = "unapproved".into();
+    unapproved.request_id = "unapproved-request".into();
+    unapproved.fingerprint = "unapproved-fingerprint".into();
+    unapproved.approval = None;
+    insert(&unapproved);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let mut unrelated = action.clone();
+    unrelated.id = "unrelated".into();
+    unrelated.request_id = "unrelated-request".into();
+    unrelated.fingerprint = "unrelated-fingerprint".into();
+    unrelated.preview.as_mut().unwrap().binding["compound_bridge"] = json!(false);
+    insert(&unrelated);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        action.id
+    );
+    let mut duplicate = action;
+    duplicate.id = "duplicate".into();
+    duplicate.request_id = "duplicate-request".into();
+    duplicate.fingerprint = "duplicate-fingerprint".into();
+    duplicate.status = Status::Completed;
+    insert(&duplicate);
+    assert_eq!(
+        engine
+            .compound_bridge_action_for_transfer("transfer-1")
+            .unwrap_err()
+            .code,
+        "BRIDGE_ACTION_OWNER_AMBIGUOUS"
+    );
+}
+
+#[tokio::test]
 async fn observer_failure_keeps_safe_cause_without_private_transport_details() {
     let source = Arc::new(PositionObserver {
         resource: resource(),
@@ -583,6 +698,68 @@ fn observer_rpc_diagnostic_method_requires_known_solana_method() {
     assert_eq!(
         safe_position_observer_rpc_diagnostics(&known_method).unwrap()["observer_rpc_method"],
         "getMultipleAccounts"
+    );
+}
+
+#[tokio::test]
+async fn binance_futures_fresh_bound_baseline_survives_stale_and_newer_history() {
+    let engine = build_engine(vec![]);
+    let mut prepared = prepared();
+    prepared.operation = "binance.futures.order-place".into();
+    prepared.intent.expected = vec![EffectConstraint::DerivativePosition {
+        resource: resource(),
+        position: POSITION.into(),
+        asset: asset(),
+        position_kind: PositionKind::DerivativeLong,
+        minimum_delta: SignedQuantity::new("-5").unwrap(),
+        maximum_delta: SignedQuantity::new("0").unwrap(),
+    }];
+    let mut fresh = anchor("5");
+    fresh.position_kind = PositionKind::DerivativeLong;
+    fresh.observed_at = prepared.observed_at.clone();
+    prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY] = json!([fresh.clone()]);
+    let mut stale = fresh.clone();
+    stale.principal.atoms = Quantity::new("2").unwrap();
+    let prior = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![stale.clone()],
+    };
+    let baseline = engine
+        .capture_position_baseline("synthetic-operation", &prepared, &prior)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(baseline.anchors, vec![fresh.clone()]);
+    let rec = record(prepared.clone(), Some(baseline));
+    let recovered = engine
+        .merge_record_position_baseline(&rec, &[], prior.clone())
+        .unwrap();
+    assert_eq!(recovered.positions, vec![fresh]);
+
+    // Older candidates without a bound observation retain conflict protection.
+    let mut legacy = prepared;
+    legacy
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove(gofin_domain::BASELINE_ANCHORS_KEY);
+    let baseline = engine
+        .capture_position_baseline("synthetic-operation", &legacy, &prior)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut newer = stale.clone();
+    newer.principal.atoms = Quantity::new("3").unwrap();
+    let context = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![newer],
+    };
+    assert_eq!(
+        engine
+            .merge_record_position_baseline(&record(legacy, Some(baseline)), &[], context)
+            .unwrap_err()
+            .code,
+        "POSITION_BASELINE_CONFLICT"
     );
 }
 

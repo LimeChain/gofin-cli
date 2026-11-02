@@ -2,6 +2,20 @@
 use super::*;
 use gofin_domain::amendments::ApprovedAmendment;
 impl Store {
+    /// Check mutation preconditions before requesting approval. Admission repeats
+    /// this under the write transaction to close the race with other actions.
+    pub fn validate_mutation_candidate(
+        &mut self,
+        operation_id: &str,
+        record: &Value,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_mutation_admission_tx(&tx, operation_id, record)?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn amendment_revisions(&self, original_id: &str) -> Result<Vec<ApprovedAmendment>> {
         let mut statement=self.conn.prepare("SELECT revision_json FROM (SELECT revision,revision_json FROM operation_amendments WHERE original_operation_id=?1 UNION ALL SELECT revision,revision_json FROM compound_amendment_children WHERE original_operation_id=?1 AND revision_json IS NOT NULL UNION ALL SELECT revision,revision_json FROM grouped_amendment_revisions WHERE original_operation_id=?1) ORDER BY revision")?;
         let rows = statement
@@ -259,6 +273,118 @@ pub(super) fn validate_successor_available_tx(
     let owned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE kind=?1 AND reference=?2 UNION ALL SELECT 1 FROM operation_amendments WHERE successor_kind=?1 AND successor_reference=?2 UNION ALL SELECT 1 FROM compound_amendment_children WHERE successor_kind=?1 AND successor_reference=?2)",params![kind,reference],|row|row.get(0))?;
     if owned {
         return Err(StoreError::SubmissionConflict);
+    }
+    Ok(())
+}
+
+/// Revalidate mutation preimages and unresolved per-owner dispatches in the
+/// same immediate transaction that persists the new submission.
+pub(super) fn validate_mutation_admission_tx(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    record: &Value,
+) -> Result<()> {
+    let Some(expected) = record
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    if !expected.iter().any(|v| {
+        matches!(
+            v.get("kind").and_then(Value::as_str),
+            Some(
+                "submission_amendment"
+                    | "grouped_submission_amendments"
+                    | "compound_submission_mutations"
+            )
+        )
+    }) {
+        return Ok(());
+    }
+    let prepared: gofin_domain::PreparedOperation =
+        serde_json::from_value(record["preview"].clone())?;
+    let targets = gofin_domain::amendments::mutation_admission_targets(&prepared)
+        .map_err(|_| StoreError::ExecutionConflict)?;
+    for target in targets {
+        let original = get_operation_record_tx(tx, &target.operation_id)?;
+        if !matches!(
+            json_string(&original, "status"),
+            Some("submitted" | "pending" | "unknown")
+        ) {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let latest: Option<String> = tx.query_row("SELECT revision_json FROM (SELECT revision,revision_json FROM operation_amendments WHERE original_operation_id=?1 UNION ALL SELECT revision,revision_json FROM compound_amendment_children WHERE original_operation_id=?1 AND revision_json IS NOT NULL UNION ALL SELECT revision,revision_json FROM grouped_amendment_revisions WHERE original_operation_id=?1) ORDER BY revision DESC LIMIT 1", [&target.operation_id], |r| r.get(0)).optional()?;
+        if target.requires_previous_scope {
+            let baseline = prepared
+                .binding
+                .get("__gofin_mutation_baselines")
+                .and_then(|value| value.get(&target.operation_id))
+                .ok_or(StoreError::ExecutionConflict)?;
+            let previous: gofin_domain::amendments::AmendmentScope =
+                serde_json::from_value(baseline.clone())?;
+            let current = if let Some(raw) = latest {
+                serde_json::from_str::<ApprovedAmendment>(&raw)?.scope
+            } else {
+                let p: gofin_domain::PreparedOperation =
+                    serde_json::from_value(original["preview"].clone())?;
+                gofin_domain::amendments::AmendmentScope {
+                    intent: p.intent,
+                    binding: p.binding,
+                    valuation: p.valuation,
+                }
+            };
+            if previous != current {
+                return Err(StoreError::ConcurrentReservation);
+            }
+        }
+        let mut stmt = tx.prepare("SELECT o.id,o.status,o.record_json,s.kind,s.reference,s.data_json FROM operations o JOIN submissions s ON s.operation_id=o.id WHERE o.id<>?1 AND json_valid(o.record_json) AND EXISTS (SELECT 1 FROM json_each(o.record_json,'$.preview.intent.expected') e WHERE e.type='object' AND ((json_extract(e.value,'$.kind') IN ('submission_amendment','submission_cancellation') AND json_extract(e.value,'$.operation_id')=?2) OR (json_extract(e.value,'$.kind')='grouped_submission_amendments' AND json_extract(e.value,'$.group.operation_id')=?2) OR (json_extract(e.value,'$.kind')='compound_submission_mutations' AND EXISTS (SELECT 1 FROM json_each(e.value,'$.children') c WHERE c.type='object' AND json_extract(c.value,'$.operation_id')=?2))))")?;
+        let rows = stmt
+            .query_map(params![operation_id, target.operation_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (id, status, raw, kind, reference, data) in rows {
+            // Independently committed child proofs release only that owner.
+            let settled_child: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM compound_amendment_children WHERE amendment_operation_id=?1 AND original_operation_id=?2 AND outcome IN ('accepted','rejected') AND proof_json IS NOT NULL)", params![id,target.operation_id], |r|r.get(0))?;
+            if settled_child {
+                continue;
+            }
+            let grouped_done: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM (SELECT amendment_operation_id,original_operation_id FROM grouped_amendments UNION SELECT amendment_operation_id,original_operation_id FROM grouped_amendment_scopes) g WHERE g.amendment_operation_id=?1 AND g.original_operation_id=?2 AND EXISTS(SELECT 1 FROM grouped_amendment_children c WHERE c.amendment_operation_id=g.amendment_operation_id) AND NOT EXISTS(SELECT 1 FROM grouped_amendment_children c WHERE c.amendment_operation_id=g.amendment_operation_id AND c.proof_json IS NULL))",params![id,target.operation_id],|r|r.get(0))?;
+            if grouped_done {
+                continue;
+            }
+            let revision_done: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operation_amendments WHERE amendment_operation_id=?1 AND original_operation_id=?2)",params![id,target.operation_id],|r|r.get(0))?;
+            if revision_done {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&raw)?;
+            let proof = value
+                .get("effects")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<gofin_domain::VerifiedEffects>(v).ok());
+            let rejected = proof.is_some_and(|p| {
+                matches!(status.as_str(), "failed" | "rejected" | "cancelled")
+                    && p.evidence["definitive_nonexecution"] == true
+                    && p.submission.kind == kind
+                    && p.submission.reference == reference
+                    && serde_json::from_str::<Value>(&data).ok().as_ref()
+                        == Some(&p.submission.data)
+                    && gofin_domain::verified_effect_digest(&p).ok().as_deref()
+                        == Some(p.proof_digest.as_str())
+            });
+            if !rejected {
+                return Err(StoreError::ConcurrentReservation);
+            }
+        }
     }
     Ok(())
 }

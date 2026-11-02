@@ -180,7 +180,7 @@ pub(crate) fn parse_bounds(
 
 pub(crate) fn fail(field: &str, approved: Value, candidate: Value) -> GoFinError {
     violation_error(
-        &format!("AMM boundary {field} was exceeded."),
+        &format!("Swap candidate violates the approved {field} bound."),
         BoundaryViolation {
             constraint: field.into(),
             approved_bound: approved,

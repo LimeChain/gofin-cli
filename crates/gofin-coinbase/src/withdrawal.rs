@@ -670,7 +670,13 @@ impl CoinbaseProfile {
                 evidence_version: 1,
                 submission: submission.clone(),
                 effects: Vec::new(),
-                evidence: json!({"nativeRejection":receipt,"httpStatus":http}),
+                evidence: json!({
+                    "nativeRejection":receipt,"httpStatus":http,
+                    "outcome_dispatch":"rejected","outcome_replay_safe":true,
+                    "definitive_nonexecution":true,
+                    "source":"coinbase_captured_send_rejection",
+                    "submission_reference":submission.reference
+                }),
                 observed_at: gofin_domain::now(),
                 proof_digest: String::new(),
             };

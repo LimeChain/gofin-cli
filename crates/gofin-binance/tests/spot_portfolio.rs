@@ -593,8 +593,10 @@ async fn withdrawal_email_confirmation_is_actionable_and_failure_waits_for_refun
     assert_eq!(failed.status, Status::Failed);
     assert_eq!(
         engine.operation_view(&failed).unwrap()["outcome"]["transfer"],
-        "source_pending"
+        "in_transit"
     );
+    // The initial observation already established a completed source debit.
+    // A later failure without a correlated refund cannot undo that evidence.
     assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
     assert_eq!(auth.count.load(Ordering::SeqCst), 1);
 }

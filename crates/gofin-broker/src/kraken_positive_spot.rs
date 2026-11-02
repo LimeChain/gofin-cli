@@ -330,3 +330,7 @@ fn positive_kraken_spot_lifecycle_via_public_cli() {
         if let Ok(path)=std::env::var("GOFIN_EXECUTION_EVIDENCE") {let writes=wire.ledger.lock().unwrap().writes;let broadcasts=venue.rpc.calls.lock().unwrap().iter().filter(|method|*method=="eth_sendRawTransaction").count();let evidence=json!({"scenario":"kraken-spot","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":writes+broadcasts,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
     })).unwrap().join().unwrap();
 }
+
+mod funding_v1_roundtrip {
+    include!("kraken_funding_v1_roundtrip.rs");
+}

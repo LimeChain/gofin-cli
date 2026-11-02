@@ -1138,6 +1138,9 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             definition.semantics["execution_input"] = json!(
                 "Provide intent, one allowed provider, native bounds and actionDeadline (future Unix seconds). No new stage may be admitted after that deadline. Use original-ID continuation arguments returned by the broker after waiting."
             );
+            definition.semantics["preview_timing"] = json!(
+                "Preview binding.timing_guidance reports the provider arrival estimate when available, the remaining approval window at observed_at, and a suggested deadline with a 25% buffer of at least 300 seconds. A shorter window produces a warning. These are advisory estimates, not settlement guarantees; the reviewed deadline never extends automatically."
+            );
             definition.semantics["selection"] = json!(
                 "The broker prepares stages within the approved provider and route; no automatic provider switching."
             );
@@ -1179,6 +1182,9 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             definition.semantics["financial_authorization"] = json!(
                 "Native per-action approval or protected Yolo. Use bridge.execute for one approval covering declared compound stages."
             );
+            definition.semantics["compound_owned_stage"] = json!(
+                "A stage owned by an approved bridge.execute action cannot be previewed or executed as a new standalone action. Inspect the original operation with status and follow its returned continuation or reauthorization arguments."
+            );
         }
         "hyperliquid.orders.twap" => {
             definition.semantics["fees"] =
@@ -1208,8 +1214,7 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             "wallet.transfer" => {
                 json!({"mode":"conditional", "supported_when":"EVM wallet selected", "otherwise":"exact_binding"})
             }
-            "swap.execute" | "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
-            | "jupiter.swap" | "kraken.add-order" => {
+            "swap.execute" | "jupiter.swap" | "kraken.add-order" => {
                 json!({"mode":"within_approved_native_terms"})
             }
             "bridge.execute" => {
@@ -4802,8 +4807,8 @@ impl BrokerRuntime {
                 self.engine
                     .operations()?
                     .iter()
-                    .map(|record| self.engine.operation_view_isolated(record))
-                    .collect(),
+                    .map(|record| self.engine.operation_view(record))
+                    .collect::<Result<Vec<_>, _>>()?,
             )),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
@@ -6746,7 +6751,7 @@ mod tests {
                     definition.name.as_str(),
                     "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
                 ) {
-                    assert_eq!(refresh["mode"], "within_approved_native_terms");
+                    assert_eq!(refresh["mode"], "exact_binding");
                     assert_eq!(
                         definition.semantics["authorization"]["terms"]["minimum_output"],
                         if definition.name == "uniswap.swap" {

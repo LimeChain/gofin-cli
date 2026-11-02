@@ -59,6 +59,7 @@ pub fn definitions() -> Vec<Definition> {
             } { properties.remove(field); }
         }
         let required = input_schema["required"].as_array_mut().expect("required Morpho fields");
+        if !required.contains(&json!("network")) { required.push(json!("network")); }
         match name {
             "morpho.vault" => required.push(json!("vault")),
             "morpho.deposit" => required.push(json!("min_shares")),

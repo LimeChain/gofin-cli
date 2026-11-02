@@ -364,6 +364,10 @@ async fn resting_partial_order_survives_restart_and_settles_only_new_fill_deltas
     });
     let partial = first_engine.status(&submitted.id, true).await.unwrap();
     assert_eq!(partial.status, Status::Pending);
+    assert_eq!(
+        partial.effects.as_ref().unwrap().evidence["outcome_live_order"],
+        true
+    );
     let partial_sequence =
         partial.effects.as_ref().unwrap().evidence["settlement_progress"]["sequence"]
             .as_u64()

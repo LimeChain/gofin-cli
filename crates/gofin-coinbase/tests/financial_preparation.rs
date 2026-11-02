@@ -2072,6 +2072,7 @@ async fn partial_order_reconciliation_paginates_and_rejects_changed_fill_identit
         .await
         .unwrap();
     assert_eq!(partial.status, Status::Pending);
+    assert_eq!(partial.evidence["outcome_live_order"], true);
     let verified = partial.verified.unwrap();
     assert_eq!(partial.evidence["fillCount"], 2);
     assert_eq!(partial.evidence["settlement_progress"]["sequence"], 1);

@@ -1605,7 +1605,9 @@ pub enum AuthorizationSource {
     TouchId,
     /// Fresh sudo provenance and protected review for configuration only.
     Sudo,
+    /// Historical audit value; cannot authorize new financial work.
     BoundedGrant,
+    /// Historical audit value; cannot authorize new financial work.
     NamedPlan,
     Yolo,
     Development,
@@ -2137,6 +2139,16 @@ pub trait Adapter: Send + Sync {
     /// must perform exact final nonce/authority checks through their submit path.
     /// None preserves the adapter's ordinary final revalidation contract.
     fn preparation_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
+    /// Reuse initial evidence only before standalone admission, where the engine
+    /// will still run full revalidation under the submission resource lock.
+    /// The window starts before preparation and never extends evidence or
+    /// approval deadlines. Boundary and plan attempts cannot use this opt-in.
+    fn pre_admission_reuse_window(
         &self,
         _prepared: &PreparedOperation,
     ) -> Option<std::time::Duration> {

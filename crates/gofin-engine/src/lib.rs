@@ -136,6 +136,24 @@ fn observed_within_reuse_window(
     age >= chrono::Duration::zero() && age < window
 }
 
+fn execution_preparation_reuse_window(
+    adapter: &dyn Adapter,
+    prepared: &PreparedOperation,
+    has_boundary: bool,
+    has_plan: bool,
+) -> Option<std::time::Duration> {
+    adapter.preparation_reuse_window(prepared).or_else(|| {
+        // Only standalone execution guarantees another full revalidation under
+        // the resource lock before admission. Other routes retain their prior
+        // evidence contract, even when their metadata is stripped for adapters.
+        if !has_boundary && !has_plan {
+            adapter.pre_admission_reuse_window(prepared)
+        } else {
+            None
+        }
+    })
+}
+
 const DEFAULT_LIMIT_MICROS: u64 = gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
 fn legacy_movement_limit() -> String {
     gofin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
@@ -629,6 +647,7 @@ impl Engine {
                 "Use the read or configuration command for this operation.",
             ));
         }
+        self.reject_owned_bridge_transfer(operation, input)?;
         let context = self.preparation_context(run_id)?;
         gofin_domain::execution_progress::emit(gofin_domain::execution_progress::Stage::Preparing);
         let linked = self.amendment_preparation_context(input)?;
@@ -936,11 +955,10 @@ impl Engine {
                 return Err(ambiguous_anchor());
             }
         }
-        // Historical anchors are authoritative. Preserve the exact anchors
-        // needed by this action in the operation's immutable reconciliation
-        // baseline, then capture only keys with no prior journal/run history.
-        // A newer snapshot must not erase accrued or otherwise recorded
-        // historical semantics.
+        // Preserve the selected anchors in the immutable reconciliation
+        // baseline, then observe only keys with no selected anchor. The merge
+        // normally prefers history; Binance futures candidates may bind their
+        // fresh native derivative observation instead.
         let mut anchors = historical
             .values()
             .filter(|anchor| {
@@ -1233,6 +1251,18 @@ impl Engine {
             if !seen.insert(key.clone()) {
                 return Err(ambiguous_anchor());
             }
+            // This exact native observation was bound into the approved Binance
+            // futures candidate and persisted before dispatch. Reconciliation
+            // must use it even if the materialized history subsequently changes.
+            if let Some(preview) = &record.preview
+                && baseline_anchors::is_bound_fresh_binance_anchor(preview, anchor)?
+            {
+                context.positions.retain(|previous| {
+                    position_anchor_key(previous).ok().as_deref() != Some(key.as_str())
+                });
+                context.positions.push(anchor.clone());
+                continue;
+            }
             if let Some(previous) = historical.get(&key) {
                 let predecessor_matches_history = approved_predecessors.iter().any(|candidate| {
                     position_anchor_key(candidate).ok().as_deref() == Some(key.as_str())
@@ -1319,6 +1349,7 @@ impl Engine {
             let original: OperationRecord = from_value(existing.record)?;
             return self.status(&original.id, true).await;
         }
+        self.reject_owned_bridge_transfer(&request.operation, &request.input)?;
         if definition.semantics["plan_only"] == true
             && !(request.operation == "bridge.execute" && request.input.get("intent").is_some())
         {
@@ -1735,7 +1766,7 @@ impl Engine {
         };
         let linked = self.amendment_preparation_context(&request.input)?;
         let compound = self.compound_preparation_context(&request.input)?;
-        let prepared = match preprepared {
+        let mut prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
@@ -1772,6 +1803,9 @@ impl Engine {
                 }
             },
         };
+        if matches!(&route, ExecutionRoute::Financial) {
+            stamp_mutation_baselines(&mut prepared, &linked, compound.as_ref())?;
+        }
         let has_venue_calculated_cost = prepared
             .intent
             .maximum_costs
@@ -1819,6 +1853,13 @@ impl Engine {
         )?;
         record.preview = Some(prepared.clone());
         record.updated_at = self.clock.now().to_rfc3339();
+        // Avoid prompting for an already conflicting or stale mutation; the
+        // same guard is repeated atomically at durable submission admission.
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_mutation_candidate(&record.id, &to_value(record)?)
+            .map_err(map_store)?;
         let amendment = self.validate_submission_amendment_for_attempt(
             &prepared,
             request.run_id.as_deref(),
@@ -1833,7 +1874,7 @@ impl Engine {
         let approved_binding = gofin_domain::native_authorization_binding(&prepared);
         let approved_binding_hash = binding_hash(&approved_binding)?;
         let (audit, challenge) = {
-            let challenge_expiry = if compound_action {
+            let action_deadline = if compound_action {
                 let deadline = prepared.action_deadline.as_ref().ok_or_else(|| {
                     GoFinError::validation("A compound action requires an explicit deadline.")
                 })?;
@@ -1843,9 +1884,13 @@ impl Engine {
                     0,
                 )
                 .ok_or_else(|| GoFinError::validation("Invalid compound deadline."))?
+                .into()
             } else {
-                self.clock.now() + chrono::Duration::seconds(90)
+                None
             };
+            let prompt_deadline = self.clock.now() + chrono::Duration::seconds(90);
+            let challenge_expiry =
+                action_deadline.map_or(prompt_deadline, |deadline| deadline.min(prompt_deadline));
             let challenge = AuthorizationChallenge {
                 review: if matches!(&route, ExecutionRoute::Financial)
                     && self.authorizer.requires_financial_review()
@@ -1924,13 +1969,21 @@ impl Engine {
             gofin_domain::execution_progress::emit(
                 gofin_domain::execution_progress::Stage::AwaitingApproval,
             );
-            let audit = match &route {
+            let mut audit = match &route {
                 ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
                 ExecutionRoute::Configuration(authorizer) => {
                     authorizer.authorize_configuration(&challenge).await?
                 }
             };
-            validate_approval(&audit, &challenge, self.clock.now())?;
+            let approved_now = self.clock.now();
+            validate_approval(&audit, &challenge, approved_now)?;
+            if matches!(&route, ExecutionRoute::Financial) {
+                if let Some(deadline) = action_deadline {
+                    promote_compound_approval(&mut audit, &challenge, approved_now, deadline)?;
+                } else {
+                    promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+                }
+            }
             (audit, Some(challenge))
         };
         record.approval = Some(audit.clone());
@@ -1996,11 +2049,15 @@ impl Engine {
             gofin_domain::execution_progress::Stage::Revalidating,
         );
         let reuse_preparation = matches!(&route, ExecutionRoute::Financial)
-            && adapter
-                .preparation_reuse_window(&adapter_candidate)
-                .is_some_and(|window| {
-                    preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
-                })
+            && execution_preparation_reuse_window(
+                adapter.as_ref(),
+                &adapter_candidate,
+                false, // Compound execution returned above; this route is standalone.
+                false,
+            )
+            .is_some_and(|window| {
+                preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
+            })
             && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
         let mut refreshed = if reuse_preparation
             && adapter.supports_approved_reprepare(&adapter_candidate)
@@ -2025,7 +2082,7 @@ impl Engine {
             )
             .await?;
             financial_plans::carry_action_deadline(&prepared, &mut fresh)?;
-            adapter.validate_approved_candidate(&prepared, &fresh)?;
+            adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &fresh)?;
             bounded_evidence(
                 &request.operation,
                 "revalidation",
@@ -2055,7 +2112,10 @@ impl Engine {
             &mut refreshed.binding,
         )?;
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
-        adapter.validate_approved_candidate(&prepared, &refreshed)?;
+        adapter.validate_approved_candidate(
+            &strip_plan_metadata(&prepared),
+            &strip_plan_metadata(&refreshed),
+        )?;
         if let Some(challenge) = &challenge {
             ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
@@ -2120,7 +2180,8 @@ impl Engine {
                         .map_err(map_store)?;
                     nonce_claimed = true;
                     current = adapter.apply_claimed_evm_nonce(&current, nonce)?;
-                    adapter.validate_approved_candidate(&prepared, &current)?;
+                    adapter
+                        .validate_approved_candidate(&strip_plan_metadata(&prepared), &current)?;
                 }
                 let mut latest = bounded_evidence(
                     &request.operation,
@@ -2135,7 +2196,7 @@ impl Engine {
                     &mut latest.binding,
                 )?;
                 validate_prepared(&latest, &request.operation, self.clock.now())?;
-                adapter.validate_approved_candidate(&prepared, &latest)?;
+                adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &latest)?;
                 if let Some(challenge) = &challenge {
                     ensure_approval_fresh(&audit, challenge, self.clock.now())?;
                 }
@@ -2153,6 +2214,7 @@ impl Engine {
             validate_prepared(&finalized, &request.operation, self.clock.now())?;
             refreshed = finalized;
         }
+        carry_mutation_baselines(&prepared, &mut refreshed)?;
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
             operation_id: record.id.clone(),
@@ -2671,6 +2733,15 @@ impl Engine {
             ));
         }
         let mut evidence = reconciliation.evidence.clone();
+        if let Some(verified) = &reconciliation.verified
+            && (record.submission.as_ref() != Some(&verified.submission)
+                || verified.evidence_version == 0
+                || verified.proof_digest != verified_effect_digest(verified)?)
+        {
+            return Err(reconciliation_error(
+                "Observation does not match the original submission identity.",
+            ));
+        }
         if evidence.get("outcome_dispatch").and_then(Value::as_str) == Some("rejected") {
             let submission = record.submission.as_ref().ok_or_else(|| {
                 reconciliation_error("Rejection has no durable submission identity.")
@@ -2698,7 +2769,37 @@ impl Engine {
                 .stage_attempt_by_operation(&record.id)
                 .map_err(map_store)?
             {
-                if submission.kind == "ethereum" {
+                // Upgrades may add outcome tags to an already verified empty
+                // rejection. Keep its terminal stage history immutable while
+                // allowing the same proof to gain observation-only metadata.
+                let terminal_refinement = matches!(stage.state.as_str(), "failed" | "rejected")
+                    && record.status == Status::Failed
+                    && reconciliation.status == Status::Failed
+                    && record
+                        .effects
+                        .as_ref()
+                        .zip(reconciliation.verified.as_ref())
+                        .is_some_and(|(old, new)| {
+                            new.evidence == evidence
+                                && old.submission == new.submission
+                                && old.evidence_version == new.evidence_version
+                                && old.effects.is_empty()
+                                && new.effects.is_empty()
+                                && verified_effect_digest(old).ok().as_deref()
+                                    == Some(old.proof_digest.as_str())
+                                && old.evidence.as_object().is_some_and(|fields| {
+                                    fields
+                                        .iter()
+                                        .all(|(key, value)| new.evidence.get(key) == Some(value))
+                                })
+                        });
+                if terminal_refinement {
+                    // No admission, authority, nonce or stage mutation.
+                } else if matches!(stage.state.as_str(), "failed" | "rejected") {
+                    return Err(reconciliation_error(
+                        "Terminal rejection observation changed its status or verified proof.",
+                    ));
+                } else if submission.kind == "ethereum" {
                     store
                         .record_evm_definitive_rejection(&stage.token, &evidence)
                         .map_err(map_store)?;
@@ -2711,14 +2812,6 @@ impl Engine {
         }
         let mut has_new_verified = false;
         if let Some(verified) = &reconciliation.verified {
-            if record.submission.as_ref() != Some(&verified.submission)
-                || verified.evidence_version == 0
-                || verified.proof_digest != verified_effect_digest(verified)?
-            {
-                return Err(reconciliation_error(
-                    "Observation does not match the original submission identity.",
-                ));
-            }
             if verified.evidence.get("settlement_progress").is_some()
                 && record
                     .effects
@@ -2873,7 +2966,21 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .append_outcome_observation(&record.id, &facts, "adapter")
+            .append_outcome_observation(
+                &record.id,
+                &facts,
+                if record
+                    .last_reconciliation_evidence
+                    .as_ref()
+                    .and_then(|e| e.get("outcome_live_order"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    "adapter_live_order"
+                } else {
+                    "adapter"
+                },
+            )
             .map_err(map_store)?;
         Ok(record)
     }
@@ -2977,6 +3084,70 @@ impl Engine {
             .into_iter()
             .map(from_value)
             .collect()
+    }
+
+    /// Find the approved compound action that owns a saved bridge transfer.
+    /// Terminal and expired actions remain owners for durable recovery.
+    pub fn compound_bridge_action_for_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<OperationRecord>> {
+        if transfer_id.trim().is_empty() {
+            return Err(GoFinError::validation("Bridge transfer ID is required."));
+        }
+        let candidates = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .operations_by_prepared_binding(
+                "bridge.execute",
+                "/preview/binding/transfer_id",
+                &json!(transfer_id),
+            )
+            .map_err(map_store)?;
+        let mut owner = None;
+        for candidate in candidates {
+            if candidate.pointer("/preview/binding/compound_bridge") != Some(&Value::Bool(true))
+                || candidate.get("approval").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let record: OperationRecord = from_value(candidate)?;
+            if owner.is_some() {
+                return Err(GoFinError::new(
+                    "BRIDGE_ACTION_OWNER_AMBIGUOUS",
+                    "reconciliation",
+                    "Multiple approved bridge actions own this transfer.",
+                    "Keep the transfer unresolved and inspect the original action records.",
+                ));
+            }
+            owner = Some(record);
+        }
+        Ok(owner)
+    }
+
+    fn reject_owned_bridge_transfer(&self, operation: &str, input: &Value) -> Result<()> {
+        if operation != "bridge.transfer" {
+            return Ok(());
+        }
+        let Some(transfer_id) = input.get("transferId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if transfer_id.trim().is_empty() {
+            return Ok(());
+        }
+        if let Some(owner) = self.compound_bridge_action_for_transfer(transfer_id)? {
+            return Err(GoFinError::new(
+                "BRIDGE_COMPOUND_ACTION_OWNED",
+                "validation",
+                "This transfer belongs to an existing approved bridge action.",
+                "Follow the original action's status and continue its recovery.",
+            ).with_details(json!({
+                "operation_id": owner.id,
+                "next_action": {"code":"observe","command":"status","arguments":{"operation_id":owner.id}}
+            })));
+        }
+        Ok(())
     }
 
     fn bind_bridge_approved_scope(
@@ -3302,8 +3473,10 @@ impl Engine {
         else {
             return Ok(());
         };
-        if record.run_id.is_some()
+        if record.status != Status::AwaitingApproval
+            || record.run_id.is_some()
             || record.submission.is_some()
+            || parse_time(&audit.expires_at).is_err()
             || matches!(
                 audit.source,
                 Some(
@@ -3312,7 +3485,6 @@ impl Engine {
                         | gofin_domain::AuthorizationSource::BoundedGrant
                 )
             )
-            || !parse_time(&audit.expires_at).is_ok_and(|expiry| expiry > self.clock.now())
             || binding_hash(&gofin_domain::native_authorization_binding(prepared))
                 .ok()
                 .as_deref()
@@ -3320,28 +3492,16 @@ impl Engine {
         {
             return Ok(());
         }
-        if audit.source == Some(gofin_domain::AuthorizationSource::Yolo) {
-            let lease = self.authorizer.acquire_submission_authority(audit)?;
-            validate_submission_authority_lease(audit, lease.as_ref())?;
-        }
+        // Rebuild the passive recovery path even if the original approval has
+        // expired or its Yolo activation ended. Its original audit and expiry
+        // remain unchanged; normal continuation and dispatch independently
+        // validate current authority, and expired authority requires review.
         let authority = json!({"audit":audit,"intent":gofin_domain::native_authorization_binding(prepared),"prepared":prepared});
-        let mut store = self
-            .store
+        self.store
             .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        store
-            .register_action_authority(
-                &record.id,
-                &audit.expires_at,
-                &audit.challenge_nonce,
-                &authority,
-                &audit.expires_at,
-            )
-            .map_err(map_store)?;
-        store
-            .issue_action_continuation(&record.id)
-            .map_err(map_store)?;
-        Ok(())
+            .map_err(|_| internal("store lock poisoned"))?
+            .restore_unsubmitted_action_authority(&record.id, &to_value(record)?, &authority)
+            .map_err(map_store)
     }
 
     pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
@@ -3351,53 +3511,50 @@ impl Engine {
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
             let report = store.recover_interrupted().map_err(map_store)?;
-            let candidates = store.approved_unsubmitted_records().unwrap_or_default();
+            let candidates = store.approved_unsubmitted_records().map_err(map_store)?;
             (report, candidates)
         };
         for value in candidates {
             let Ok(record) = from_value::<OperationRecord>(value) else {
                 continue;
             };
-            let (Some(audit), Some(prepared)) = (record.approval.as_ref(), record.preview.as_ref())
-            else {
-                continue;
-            };
-            if matches!(
-                audit.source,
-                Some(
-                    gofin_domain::AuthorizationSource::Sudo
-                        | gofin_domain::AuthorizationSource::NamedPlan
-                        | gofin_domain::AuthorizationSource::BoundedGrant
-                )
-            ) || !parse_time(&audit.expires_at).is_ok_and(|expiry| expiry > self.clock.now())
-                || binding_hash(&gofin_domain::native_authorization_binding(prepared))
-                    .ok()
-                    .as_deref()
-                    != Some(audit.binding_hash.as_str())
-            {
-                continue;
-            }
-            if audit.source == Some(gofin_domain::AuthorizationSource::Yolo) {
-                let Ok(lease) = self.authorizer.acquire_submission_authority(audit) else {
-                    continue;
-                };
-                if validate_submission_authority_lease(audit, lease.as_ref()).is_err() {
+            if let Err(error) = self.recover_approved_action(&record) {
+                if error.code == "EXECUTION_CONFLICT" {
                     continue;
                 }
+                return Err(error);
             }
-            if let Ok(mut store) = self.store.lock() {
-                let authority = json!({"audit":audit,"intent":gofin_domain::native_authorization_binding(prepared),"prepared":prepared});
-                if store
-                    .register_action_authority(
-                        &record.id,
-                        &audit.expires_at,
-                        &audit.challenge_nonce,
-                        &authority,
-                        &audit.expires_at,
-                    )
-                    .is_ok()
-                {
-                    let _ = store.issue_action_continuation(&record.id);
+            let expired = record.approval.as_ref().is_some_and(|audit| {
+                parse_time(&audit.expires_at).is_ok_and(|expiry| expiry <= self.clock.now())
+            });
+            let standalone = record.preview.as_ref().is_some_and(|preview| {
+                self.adapters
+                    .read()
+                    .ok()
+                    .and_then(|adapters| adapters.get(&record.operation).cloned())
+                    .is_some_and(|adapter| !adapter.is_compound_action(preview))
+            }) && !(record.operation == "bridge.execute"
+                && record.input.get("intent").is_some());
+            if expired && standalone && record.run_id.is_none() {
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                match store.try_acquire_action_lease(&record.id) {
+                    Ok(lease) => {
+                        match store.expire_unsubmitted_approval(
+                            &lease,
+                            &to_value(&record)?,
+                            &self.clock.now().to_rfc3339(),
+                        ) {
+                            Ok(_)
+                            | Err(StoreError::ExecutionConflict)
+                            | Err(StoreError::ActionLeaseHeld) => {}
+                            Err(error) => return Err(map_store(error)),
+                        }
+                    }
+                    Err(StoreError::ActionLeaseHeld | StoreError::ExecutionConflict) => {}
+                    Err(error) => return Err(map_store(error)),
                 }
             }
         }
@@ -4847,9 +5004,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 .preview
                 .as_ref()
                 .ok_or_else(|| internal("stage candidate missing"))?;
-            if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-                != binding_hash(&gofin_domain::native_authorization_binding(candidate))?
-            {
+            if binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(prepared),
+            ))? != binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(candidate),
+            ))? {
                 return Err(GoFinError::validation(
                     "The submitted payload differs from the claimed stage candidate.",
                 ));
@@ -4868,7 +5027,10 @@ impl SubmissionJournal for OperationSubmissionJournal {
             ));
         }
         if let Some(adapter) = &self.adapter {
-            adapter.validate_approved_candidate(approved, prepared)?;
+            adapter.validate_approved_candidate(
+                &strip_plan_metadata(approved),
+                &strip_plan_metadata(prepared),
+            )?;
         }
         let record = self
             .record
@@ -4878,9 +5040,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             .preview
             .as_ref()
             .ok_or_else(|| internal("submission candidate missing"))?;
-        if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-            != binding_hash(&gofin_domain::native_authorization_binding(exact_candidate))?
-        {
+        if binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(prepared),
+        ))? != binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(exact_candidate),
+        ))? {
             return Err(GoFinError::new(
                 "REQUEST_CHANGED",
                 "approval",
@@ -16355,6 +16519,69 @@ fn validate_approval(
     Ok(())
 }
 
+/// Preserve the reviewed compound deadline after validating the short prompt.
+/// Yolo authority remains subject to its independent activation admission lease.
+fn promote_compound_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> Result<()> {
+    if !matches!(
+        audit.source,
+        None | Some(
+            gofin_domain::AuthorizationSource::TouchId
+                | gofin_domain::AuthorizationSource::Yolo
+                | gofin_domain::AuthorizationSource::Development
+        )
+    ) || parse_time(&audit.expires_at)? != parse_time(&challenge.expires_at)?
+        || instant >= deadline
+        || parse_time(&audit.approved_at)? > instant
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "Compound approval is expired or differs from its prompt.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = deadline.to_rfc3339();
+    Ok(())
+}
+
+/// Derive only new standalone Touch ID execution authority after the short
+/// challenge response has been independently validated. Stored historical
+/// audits are never passed through this function during recovery.
+fn promote_standalone_touch_id_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+) -> Result<()> {
+    if audit.source != Some(gofin_domain::AuthorizationSource::TouchId) {
+        return Ok(());
+    }
+    let approved = parse_time(&audit.approved_at)?;
+    let prompt_deadline = parse_time(&challenge.expires_at)?;
+    if parse_time(&audit.expires_at)? != prompt_deadline
+        || instant >= prompt_deadline
+        || approved > instant
+        || approved + chrono::Duration::milliseconds(1)
+            < prompt_deadline - chrono::Duration::seconds(90)
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "The native response is outside its original prompt interval.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = approved
+        .checked_add_signed(chrono::Duration::minutes(30))
+        .ok_or_else(|| GoFinError::validation("Approval expiry is out of range."))?
+        .to_rfc3339();
+    Ok(())
+}
+
 fn validate_financial_approval_source(audit: &ApprovalAudit) -> Result<()> {
     if audit.source == Some(gofin_domain::AuthorizationSource::Sudo) {
         return Err(GoFinError::new(
@@ -16776,6 +17003,77 @@ fn remaining_costs(
         .collect()
 }
 
+const MUTATION_BASELINES_KEY: &str = "__gofin_mutation_baselines";
+
+fn stamp_mutation_baselines(
+    candidate: &mut PreparedOperation,
+    linked: &gofin_domain::amendments::AmendmentContext,
+    compound: Option<&gofin_domain::compound_mutations::CompoundAmendmentContext>,
+) -> Result<()> {
+    let targets = gofin_domain::amendments::mutation_admission_targets(candidate)?;
+    let mut baselines = serde_json::Map::new();
+    for target in targets {
+        let context = compound
+            .and_then(|group| {
+                group
+                    .children
+                    .values()
+                    .find(|child| child.operation_id == target.operation_id)
+                    .map(|child| &child.context)
+            })
+            .or_else(|| {
+                (candidate.input.get("operationId").and_then(Value::as_str)
+                    == Some(target.operation_id.as_str()))
+                .then_some(linked)
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment context is missing.")
+            })?;
+        let scope = context
+            .effective_scope()
+            .cloned()
+            .or_else(|| {
+                context
+                    .original
+                    .as_ref()
+                    .map(|p| gofin_domain::amendments::AmendmentScope {
+                        intent: p.intent.clone(),
+                        binding: p.binding.clone(),
+                        valuation: p.valuation.clone(),
+                    })
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment scope is missing.")
+            })?;
+        baselines.insert(target.operation_id, to_value(&scope)?);
+    }
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if !baselines.is_empty() {
+        binding.insert(MUTATION_BASELINES_KEY.into(), Value::Object(baselines));
+    }
+    Ok(())
+}
+
+fn carry_mutation_baselines(
+    approved: &PreparedOperation,
+    candidate: &mut PreparedOperation,
+) -> Result<()> {
+    let marker = approved.binding.get(MUTATION_BASELINES_KEY).cloned();
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if let Some(marker) = marker {
+        binding.insert(MUTATION_BASELINES_KEY.into(), marker);
+    }
+    Ok(())
+}
+
 /// Broker-owned journal markers must never cross the adapter API boundary.
 /// They are restored on the durable engine preview after validation.
 fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
@@ -16785,6 +17083,7 @@ fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
             binding,
             gofin_domain::financial_plans::PLAN_METADATA_KEY,
         );
+        binding.remove("__gofin_mutation_baselines");
     }
     candidate
 }
@@ -17343,6 +17642,12 @@ fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
 
 fn map_store(error: StoreError) -> GoFinError {
     match error {
+        StoreError::ExecutionConflict => GoFinError::new(
+            "EXECUTION_CONFLICT",
+            "admission",
+            "Operation state changed or this continuation was already claimed.",
+            "Inspect the original action and use its current continuation.",
+        ),
         StoreError::ActionLeaseHeld => GoFinError::new(
             "ACTION_BUSY",
             "admission",
@@ -17406,13 +17711,13 @@ fn map_store(error: StoreError) -> GoFinError {
         StoreError::ConcurrentReservation => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         ),
         StoreError::ConcurrentReservationAt { reason } => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         )
         .with_details(json!({"store_conflict_stage": reason})),
@@ -20631,7 +20936,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn definitive_rejection_can_reuse_valid_approval_for_one_new_attempt() {
+    async fn transmitted_rejection_requires_new_approval() {
         let adapter = Arc::new(RejectedOnceAdapter {
             inner: SyntheticAdapter::new(),
             submissions: AtomicUsize::new(0),
@@ -20650,7 +20955,8 @@ mod tests {
             .unwrap();
         let view = engine.operation_view(&original).unwrap();
         assert_eq!(view["outcome"]["dispatch"], "rejected");
-        assert_eq!(view["outcome"]["retry_approval"], "covered");
+        assert_eq!(view["outcome"]["retry_approval"], "required");
+        assert_eq!(view["outcome"]["next_action"]["code"], "reauthorize");
         let token = view
             .pointer("/outcome/next_action/continuation_token")
             .and_then(Value::as_str)
@@ -20659,11 +20965,10 @@ mod tests {
             gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
         let continued = invocation
             .scope(engine.continue_operation(&original.id, token))
-            .await
-            .unwrap();
-        assert_eq!(continued["stage"]["submission"]["reference"], "attempt-1");
+            .await;
+        assert!(continued.is_err());
         assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
     }
 
     struct FailedCostAdapter {
@@ -20672,6 +20977,12 @@ mod tests {
     }
     #[async_trait]
     impl Adapter for FailedCostAdapter {
+        fn supports_approved_reprepare(&self, _: &PreparedOperation) -> bool {
+            true
+        }
+        fn preparation_reuse_window(&self, _: &PreparedOperation) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(30))
+        }
         fn definitions(&self) -> Vec<Definition> {
             self.inner.definitions()
         }
@@ -20803,6 +21114,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_empty_rejection_can_gain_observation_tags_without_rewriting_stage() {
+        for initially_tagged in [false, true] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            adapter.completed_response();
+            {
+                let mut response = adapter.response.lock().unwrap();
+                response.status = Status::Failed;
+                response.evidence =
+                    json!({"nativeRejection":{"id":"invalid_request"},"httpStatus":400});
+                let evidence = response.evidence.clone();
+                let proof = response.verified.as_mut().unwrap();
+                proof.effects.clear();
+                proof.evidence = evidence;
+                if initially_tagged {
+                    proof.evidence["outcome_dispatch"] = json!("rejected");
+                    proof.evidence["outcome_replay_safe"] = json!(true);
+                    proof.evidence["definitive_nonexecution"] = json!(true);
+                    proof.evidence["source"] = json!("synthetic_captured_rejection");
+                    proof.evidence["submission_reference"] = json!(proof.submission.reference);
+                }
+                proof.proof_digest = verified_effect_digest(proof).unwrap();
+                response.evidence = proof.evidence.clone();
+            }
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                Arc::new(SyntheticAuthorizer),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let original = engine
+                .execute(ordinary_request("terminal-rejection-refinement"))
+                .await
+                .unwrap();
+            assert_eq!(original.status, Status::Failed);
+            let before = engine
+                .store
+                .lock()
+                .unwrap()
+                .stage_attempt_by_operation(&original.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                before.state,
+                if initially_tagged {
+                    "rejected"
+                } else {
+                    "failed"
+                }
+            );
+            let mut proof = original.effects.clone().unwrap();
+            proof.evidence["outcome_dispatch"] = json!("rejected");
+            proof.evidence["outcome_replay_safe"] = json!(true);
+            proof.evidence["definitive_nonexecution"] = json!(true);
+            proof.evidence["source"] = json!("synthetic_captured_rejection");
+            proof.evidence["submission_reference"] = json!(proof.submission.reference);
+            proof.proof_digest = verified_effect_digest(&proof).unwrap();
+            let observation = |proof: VerifiedEffects| Reconciliation {
+                status: Status::Failed,
+                evidence: proof.evidence.clone(),
+                verified: Some(proof),
+            };
+            let mut corrupt = proof.clone();
+            corrupt.proof_digest = "tampered".into();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(corrupt))
+                    .is_err()
+            );
+            let mut changed = proof.clone();
+            changed.effects.push(transfer_effect());
+            changed.proof_digest = verified_effect_digest(&changed).unwrap();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(changed))
+                    .is_err()
+            );
+            let mut changed = proof.clone();
+            changed.evidence["nativeRejection"] = json!({"id":"different"});
+            changed.proof_digest = verified_effect_digest(&changed).unwrap();
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), observation(changed))
+                    .is_err()
+            );
+            let mut changed_status = observation(proof.clone());
+            changed_status.status = Status::Completed;
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), changed_status)
+                    .is_err()
+            );
+            let mut unbound_tags = observation(proof.clone());
+            unbound_tags.evidence["source"] = json!("different source");
+            assert!(
+                engine
+                    .apply_reconciliation(original.clone(), unbound_tags)
+                    .is_err()
+            );
+            assert_eq!(engine.load_record(&original.id).unwrap(), original);
+            let updated = engine
+                .apply_reconciliation(original.clone(), observation(proof.clone()))
+                .unwrap();
+            let repeated = engine
+                .apply_reconciliation(updated, observation(proof))
+                .unwrap();
+            assert_eq!(repeated.approval, original.approval);
+            assert_eq!(repeated.preview, original.preview);
+            assert_eq!(repeated.submission, original.submission);
+            let after = engine
+                .store
+                .lock()
+                .unwrap()
+                .stage_attempt_by_operation(&original.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(to_value(&before).unwrap(), to_value(&after).unwrap());
+            let view = engine.operation_view(&repeated).unwrap();
+            assert_eq!(view["outcome"]["dispatch"], "rejected");
+            assert_eq!(view["outcome"]["replay_safe"], true);
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn retired_run_rejects_new_admission_but_observes_original_identity() {
         let adapter = Arc::new(SyntheticAdapter::new());
         let engine = Engine::new(
@@ -20846,6 +21282,53 @@ mod tests {
             "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn mutation_baseline_is_broker_captured_and_survives_adapter_refresh() {
+        let original: PreparedOperation = serde_json::from_value(json!({"operation":"test.order","input":{},"binding":{"identity":"original"},"summary":"order","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-01T00:01:00Z","operation_version":1,"intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":[]}})).unwrap();
+        let original_scope = gofin_domain::amendments::AmendmentScope {
+            intent: original.intent.clone(),
+            binding: original.binding.clone(),
+            valuation: original.valuation.clone(),
+        };
+        let context = gofin_domain::amendments::AmendmentContext {
+            original: Some(original.clone()),
+            ..Default::default()
+        };
+        let mut candidate = original.clone();
+        candidate.input = json!({"operationId":"owner"});
+        candidate.binding[MUTATION_BASELINES_KEY] = json!({"owner":{"forged":true}});
+        candidate
+            .intent
+            .expected
+            .push(EffectConstraint::SubmissionAmendment {
+                operation_id: "owner".into(),
+                submission: Submission {
+                    kind: "test".into(),
+                    reference: "original".into(),
+                    data: json!({}),
+                },
+                revision: Box::new(original_scope.clone()),
+            });
+        stamp_mutation_baselines(&mut candidate, &context, None).unwrap();
+        assert_eq!(
+            candidate.binding[MUTATION_BASELINES_KEY]["owner"],
+            json!(original_scope)
+        );
+        let adapter_candidate = strip_plan_metadata(&candidate);
+        assert!(
+            adapter_candidate
+                .binding
+                .get(MUTATION_BASELINES_KEY)
+                .is_none()
+        );
+        let mut refreshed = adapter_candidate;
+        carry_mutation_baselines(&candidate, &mut refreshed).unwrap();
+        assert_eq!(
+            refreshed.binding[MUTATION_BASELINES_KEY],
+            candidate.binding[MUTATION_BASELINES_KEY]
+        );
     }
 
     struct GroupedFixture(SyntheticAdapter);
@@ -21108,9 +21591,17 @@ mod tests {
             self.inner.read(operation, input).await
         }
         async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
-            self.inner.prepare(operation, input).await
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            let idem = Uuid::new_v4().to_string();
+            prepared.binding["idem"] = json!(idem);
+            prepared.binding["requestBodyExact"] =
+                json!(json!({"idem":idem,"amount":"1"}).to_string());
+            Ok(prepared)
         }
         async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            if parse_time(&prepared.expires_at)? <= Utc::now() {
+                return Err(GoFinError::validation("Prepared withdrawal expired."));
+            }
             if self.first.swap(false, Ordering::SeqCst) {
                 return Err(GoFinError::validation(
                     "Synthetic candidate expired before dispatch.",
@@ -21159,6 +21650,18 @@ mod tests {
             .await
             .unwrap();
         assert!(continued["stage"]["submission"].is_object(), "{continued}");
+        let approved = original.preview.as_ref().unwrap();
+        assert_eq!(
+            continued["stage"]["preview"]["binding"]["idem"],
+            approved.binding["idem"]
+        );
+        assert_eq!(
+            continued["stage"]["preview"]["binding"]["requestBodyExact"],
+            approved.binding["requestBodyExact"]
+        );
+        let mut stale = approved.clone();
+        stale.expires_at = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        assert!(adapter.revalidate(&stale).await.is_err());
         let observed = engine.status(&original.id, true).await.unwrap();
         let observed = engine.operation_view(&observed).unwrap();
         assert!(observed["submission"].is_null(), "{observed}");
@@ -21368,77 +21871,211 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_v2_approval_restores_passive_continuation_without_submission() {
-        let adapter = Arc::new(SyntheticAdapter::new());
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter.clone()],
-            Arc::new(SyntheticAuthorizer),
-            EngineOptions::default(),
-        )
-        .unwrap();
-        let request = ordinary_request("interrupted-approval");
-        let prepared = adapter
-            .prepare(&request.operation, &request.input)
-            .await
-            .unwrap();
-        let now = Utc::now();
-        let audit = ApprovalAudit {
-            source: Some(gofin_domain::AuthorizationSource::Development),
-            yolo_provenance: None,
-            mechanism: "synthetic".into(),
-            binding_hash: binding_hash(&gofin_domain::native_authorization_binding(&prepared))
-                .unwrap(),
-            challenge_nonce: "synthetic-recovery-nonce".into(),
-            approved_at: now.to_rfc3339(),
-            expires_at: (now + chrono::Duration::seconds(90)).to_rfc3339(),
-        };
-        let record = OperationRecord {
-            id: "interrupted-v2".into(),
-            request_id: request.request_id.clone(),
-            fingerprint: request_fingerprint(&request).unwrap(),
-            fingerprint_version: 1,
-            operation: request.operation.clone(),
-            input: request.input.clone(),
-            status: Status::AwaitingApproval,
-            created_at: now.to_rfc3339(),
-            updated_at: now.to_rfc3339(),
-            preview: Some(prepared),
-            approval: Some(audit),
-            authorization_source: None,
-            submission: None,
-            dispatch_evidence: None,
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        engine
-            .store
-            .lock()
-            .unwrap()
-            .create_request(
-                &record.id,
-                &record.request_id,
-                &record.fingerprint,
-                &record.operation,
-                None,
-                "awaiting_approval",
-                &to_value(&record).unwrap(),
-                &record.created_at,
+        for (expired, partial_registration, disabled_yolo, malformed_expiry) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+            let authorizer: Arc<dyn Authorizer> = if disabled_yolo {
+                Arc::new(YoloGateAuthorizer {
+                    enabled: Arc::new(AtomicBool::new(false)),
+                    generation: Arc::new(AtomicUsize::new(0)),
+                    disable_after_authorize: false,
+                })
+            } else {
+                approvals.clone()
+            };
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
             )
             .unwrap();
-        engine.recover_interrupted().unwrap();
-        let restored = engine.load_record(&record.id).unwrap();
-        let view = engine.operation_view(&restored).unwrap();
-        assert!(
-            view.pointer("/outcome/next_action/continuation_token")
+            let request = ordinary_request("interrupted-approval");
+            let prepared = adapter
+                .prepare(&request.operation, &request.input)
+                .await
+                .unwrap();
+            let now = Utc::now();
+            let audit = ApprovalAudit {
+                source: Some(if disabled_yolo {
+                    gofin_domain::AuthorizationSource::Yolo
+                } else {
+                    gofin_domain::AuthorizationSource::Development
+                }),
+                yolo_provenance: disabled_yolo.then(|| gofin_domain::YoloAuthorizationProvenance {
+                    revision: 7,
+                    generation: "SYNTHETIC-yolo-generation-0".into(),
+                    checked_at: now.to_rfc3339(),
+                }),
+                mechanism: "synthetic".into(),
+                binding_hash: binding_hash(&gofin_domain::native_authorization_binding(&prepared))
+                    .unwrap(),
+                challenge_nonce: "synthetic-recovery-nonce".into(),
+                approved_at: (now - chrono::Duration::seconds(if expired { 180 } else { 0 }))
+                    .to_rfc3339(),
+                expires_at: if malformed_expiry {
+                    "invalid historical expiry".into()
+                } else {
+                    (now + chrono::Duration::seconds(if expired { -90 } else { 90 })).to_rfc3339()
+                },
+            };
+            let record = OperationRecord {
+                id: "interrupted-v2".into(),
+                request_id: request.request_id.clone(),
+                fingerprint: request_fingerprint(&request).unwrap(),
+                fingerprint_version: 1,
+                operation: request.operation.clone(),
+                input: request.input.clone(),
+                status: Status::AwaitingApproval,
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+                preview: Some(prepared),
+                approval: Some(audit),
+                authorization_source: None,
+                submission: None,
+                dispatch_evidence: None,
+                position_baseline: None,
+                effects: None,
+                last_reconciliation_evidence: None,
+                error: None,
+                run_id: None,
+            };
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .create_request(
+                    &record.id,
+                    &record.request_id,
+                    &record.fingerprint,
+                    &record.operation,
+                    None,
+                    "awaiting_approval",
+                    &to_value(&record).unwrap(),
+                    &record.created_at,
+                )
+                .unwrap();
+            if partial_registration {
+                let audit = record.approval.as_ref().unwrap();
+                let prepared = record.preview.as_ref().unwrap();
+                let authority = json!({
+                    "audit": audit,
+                    "intent": gofin_domain::native_authorization_binding(prepared),
+                    "prepared": prepared,
+                });
+                engine
+                    .store
+                    .lock()
+                    .unwrap()
+                    .register_action_authority(
+                        &record.id,
+                        &audit.expires_at,
+                        &audit.challenge_nonce,
+                        &authority,
+                        &audit.expires_at,
+                    )
+                    .unwrap();
+            }
+            engine.recover_interrupted().unwrap();
+            let restored = engine.load_record(&record.id).unwrap();
+            if malformed_expiry {
+                assert_eq!(restored, record);
+                assert!(
+                    engine
+                        .store
+                        .lock()
+                        .unwrap()
+                        .latest_action_continuation(&record.id)
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+                continue;
+            }
+            let view = engine.operation_view(&restored).unwrap();
+            assert!(
+                view.pointer("/outcome/next_action/continuation_token")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                "{view}"
+            );
+            assert_eq!(
+                restored.approval, record.approval,
+                "recovery preserves the original audit and expiry"
+            );
+            assert_eq!(
+                restored.status,
+                if expired {
+                    Status::Expired
+                } else {
+                    Status::AwaitingApproval
+                }
+            );
+            assert!(restored.submission.is_none());
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+            let token = view
+                .pointer("/outcome/next_action/continuation_token")
                 .and_then(Value::as_str)
-                .is_some(),
-            "{view}"
-        );
-        assert!(restored.submission.is_none());
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+                .unwrap()
+                .to_owned();
+            engine.recover_interrupted().unwrap();
+            assert_eq!(
+                engine
+                    .operation_view(&engine.load_record(&record.id).unwrap())
+                    .unwrap(),
+                view
+            );
+            if expired || disabled_yolo {
+                assert_eq!(view["outcome"]["next_action"]["code"], "reauthorize");
+                assert_eq!(view["outcome"]["retry_approval"], "required");
+                let invocation = gofin_domain::execution_progress::Invocation::new(
+                    std::time::Duration::from_secs(10),
+                );
+                if let Ok(denied) = invocation
+                    .scope(engine.continue_operation(&record.id, &token))
+                    .await
+                {
+                    assert!(
+                        denied.get("submission").is_none_or(Value::is_null),
+                        "{denied}"
+                    );
+                    assert!(
+                        denied
+                            .pointer("/stage/submission")
+                            .is_none_or(Value::is_null),
+                        "{denied}"
+                    );
+                }
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+                if disabled_yolo {
+                    continue;
+                }
+                let result = invocation
+                    .scope(engine.reauthorize_operation(&record.id, &token, record.input.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(result["reauthorization"], "approved", "{result}");
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+                let repeated = invocation
+                    .scope(engine.reauthorize_operation(&record.id, &token, record.input.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(repeated["id"], record.id);
+                assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(view["outcome"]["next_action"]["code"], "continue");
+            }
+        }
     }
 
     #[tokio::test]

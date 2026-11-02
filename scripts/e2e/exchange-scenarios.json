@@ -233,6 +233,52 @@
     ]
   },
   {
+    "id": "kraken-funding-v1",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Kraken Funding-v1 USDC withdrawal with included fee, independently verified ERC20 receipt, and exact proceeds returned to usable venue credit",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-funding-v1-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-funding-v1-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--lib",
+          "kraken_deposit::tests::positive_spot::funding_v1_roundtrip::funding_v1_usdc_included_fee_roundtrip_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
     "id": "kraken-perpetual",
     "group": "exchange",
     "environment": "mock",

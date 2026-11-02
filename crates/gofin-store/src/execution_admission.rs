@@ -824,9 +824,20 @@ impl Store {
             return Err(StoreError::OperationNotFound);
         }
         // Include indexed pre-migration replacements without reading unrelated history.
-        let legacy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o WHERE (CASE WHEN json_valid(o.record_json) THEN coalesce(json_extract(o.record_json,'$.preview.binding.__gofin_replacement.parent_operation_id'),json_extract(o.record_json,'$.preview.binding.__fin_replacement.parent_operation_id')) END)=?1 AND o.id<>?2 AND (o.status NOT IN ('failed','rejected','expired','cancelled') OR EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=o.id) OR EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=o.id)))",params![parent_id,child_id],|r|r.get(0))?;
-        if legacy {
-            return Err(StoreError::ReplacementInProgress);
+        let legacy_ids = {
+            let mut statement = tx.prepare("SELECT o.id FROM operations o WHERE (CASE WHEN json_valid(o.record_json) THEN coalesce(json_extract(o.record_json,'$.preview.binding.__gofin_replacement.parent_operation_id'),json_extract(o.record_json,'$.preview.binding.__fin_replacement.parent_operation_id')) END)=?1 AND o.id<>?2 AND NOT EXISTS(SELECT 1 FROM replacement_claims c WHERE c.child_operation_id=o.id) AND NOT EXISTS(SELECT 1 FROM released_replacement_claims r WHERE r.child_operation_id=o.id) AND (o.status NOT IN ('failed','rejected','expired','cancelled') OR EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=o.id) OR EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=o.id))")?;
+            statement
+                .query_map(params![parent_id, child_id], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for id in legacy_ids {
+            if !verified_terminal_replacement_tx(&tx, &id)? {
+                return Err(StoreError::ReplacementInProgress);
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO released_replacement_claims(child_operation_id) VALUES (?1)",
+                [&id],
+            )?;
         }
         let current: Option<(String,String)> = tx.query_row("SELECT child_operation_id,submission_json FROM replacement_claims WHERE parent_operation_id=?1", [parent_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         if let Some((child, saved)) = current {
@@ -874,40 +885,14 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record: Option<String> = tx.query_row("SELECT record_json FROM operations WHERE id=?1 AND status IN ('completed','failed','cancelled')",[child_id],|r|r.get(0)).optional()?;
-        let Some(raw) = record else {
+        if !verified_terminal_replacement_tx(&tx, child_id)? {
             return Err(StoreError::ExecutionConflict);
-        };
-        let record: Value = serde_json::from_str(&raw)?;
-        let proof: gofin_domain::VerifiedEffects = serde_json::from_value(
-            record
-                .get("effects")
-                .cloned()
-                .ok_or(StoreError::ExecutionConflict)?,
-        )?;
-        if proof.evidence["replacement_terminal_no_live_remainder"] != true
-            || gofin_domain::verified_effect_digest(&proof).ok().as_deref()
-                != Some(proof.proof_digest.as_str())
-        {
-            return Err(StoreError::ExecutionConflict);
-        }
-        let durable: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
-                [child_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let Some((kind, reference, data)) = durable else {
-            return Err(StoreError::SubmissionConflict);
-        };
-        if proof.submission.kind != kind
-            || proof.submission.reference != reference
-            || proof.submission.data != serde_json::from_str::<Value>(&data)?
-        {
-            return Err(StoreError::SubmissionConflict);
         }
         let changed = tx.execute(
+            "INSERT OR IGNORE INTO released_replacement_claims(child_operation_id) SELECT child_operation_id FROM replacement_claims WHERE child_operation_id=?1",
+            [child_id],
+        )?;
+        tx.execute(
             "DELETE FROM replacement_claims WHERE child_operation_id=?1",
             [child_id],
         )?;
@@ -1011,6 +996,58 @@ impl Store {
         tx.commit()?;
         Ok(next)
     }
+    /// Expire an abandoned standalone approval and release its nonce together.
+    /// The action lease excludes dispatch; journal checks and the record CAS
+    /// ensure that neither a submission nor a child stage has been admitted.
+    pub fn expire_unsubmitted_approval(
+        &mut self,
+        lease: &StageInvocationLease,
+        expected: &Value,
+        now: &str,
+    ) -> Result<bool> {
+        if !self.owns_action_lease(lease) {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let now_time =
+            DateTime::parse_from_rfc3339(now).map_err(|_| StoreError::ExecutionConflict)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: Option<String> = tx.query_row("SELECT record_json FROM operations WHERE id=?1 AND status='awaiting_approval' AND run_id IS NULL", [&lease.action_id], |r| r.get(0)).optional()?;
+        let Some(raw) = raw else { return Ok(false) };
+        let mut record: Value = serde_json::from_str(&raw)?;
+        if &record != expected || record.get("submission").is_some_and(|v| !v.is_null()) {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let expiry = record
+            .pointer("/approval/expires_at")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::ExecutionConflict)?;
+        let expiry =
+            DateTime::parse_from_rfc3339(expiry).map_err(|_| StoreError::ExecutionConflict)?;
+        if expiry > now_time {
+            return Ok(false);
+        }
+        let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM submission_admissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM stage_attempts st WHERE st.action_id=?1 AND (st.operation_id IS NOT NULL AND st.operation_id<>?1 OR EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=st.operation_id) OR EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=st.operation_id)))", [&lease.action_id], |r| r.get(0))?;
+        if blocked {
+            return Err(StoreError::ExecutionConflict);
+        }
+        record["status"] = Value::String("expired".into());
+        record["updated_at"] = Value::String(now.into());
+        record["last_reconciliation_evidence"] =
+            serde_json::json!({"engine_predispatch_failure":true,"approval_expired":true});
+        tx.execute(
+            "UPDATE operations SET status='expired',record_json=?2,updated_at=?3 WHERE id=?1",
+            params![lease.action_id, record.to_string(), now],
+        )?;
+        tx.execute(
+            "DELETE FROM evm_nonce_claims WHERE operation_id=?1",
+            [&lease.action_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Release only a conclusively unsubmitted claim. A persisted submission
     /// or an attempt still being prepared is never eligible for reuse.
     pub fn release_evm_nonce_if_unsubmitted(&mut self, operation_id: &str) -> Result<bool> {
@@ -1018,7 +1055,7 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let submitted: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM submission_admissions WHERE operation_id=?1)",
             [operation_id],
             |r| r.get(0),
         )?;
@@ -1152,6 +1189,79 @@ impl Store {
         if serde_json::from_str::<Value>(&existing.0)? != *authority || existing.1 != expires_at {
             return Err(StoreError::ExecutionConflict);
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restore only missing recovery metadata after approval was saved but
+    /// admission setup was interrupted. Historical expiry is retained: this
+    /// token permits review, never admission under an expired authority.
+    pub fn restore_unsubmitted_action_authority(
+        &mut self,
+        action_id: &str,
+        expected_record: &Value,
+        authority: &Value,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM operations WHERE id=?1 AND status='awaiting_approval'",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        let record: gofin_domain::OperationRecord = serde_json::from_str(&raw)?;
+        let audit = record
+            .approval
+            .as_ref()
+            .ok_or(StoreError::ExecutionConflict)?;
+        if serde_json::to_value(&record)? != *expected_record
+            || record.id != action_id
+            || record.run_id.is_some()
+            || record.submission.is_some()
+            || authority.get("audit") != Some(&serde_json::to_value(audit)?)
+            || authority.get("prepared") != Some(&serde_json::to_value(&record.preview)?)
+            || DateTime::parse_from_rfc3339(&audit.expires_at).is_err()
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let has_execution: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1) OR EXISTS(SELECT 1 FROM stage_attempts WHERE action_id=?1) OR EXISTS(SELECT 1 FROM action_continuations WHERE action_id=?1)",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        if has_execution {
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO logical_actions(action_id,deadline) VALUES (?1,?2)",
+            params![action_id, audit.expires_at],
+        )?;
+        let deadline: String = tx.query_row(
+            "SELECT deadline FROM logical_actions WHERE action_id=?1",
+            [action_id],
+            |r| r.get(0),
+        )?;
+        if deadline != audit.expires_at {
+            return Err(StoreError::ExecutionConflict);
+        }
+        tx.execute("INSERT OR IGNORE INTO action_authorities(action_id,authority_id,authority_json,audit_json,expires_at) VALUES (?1,?2,?3,?4,?5)", params![action_id,audit.challenge_nonce,authority.to_string(),serde_json::to_string(audit)?,audit.expires_at])?;
+        let existing: (String, String) = tx.query_row("SELECT authority_json,expires_at FROM action_authorities WHERE action_id=?1 AND authority_id=?2", params![action_id,audit.challenge_nonce], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        if serde_json::from_str::<Value>(&existing.0)? != *authority
+            || existing.1 != audit.expires_at
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let digest = Sha256::digest(serde_json::to_vec(&(
+            "gofin-action-continuation-v1",
+            action_id,
+            1_i64,
+        ))?);
+        let token = format!("action-continuation-v1-{}", hex::encode(digest));
+        tx.execute(
+            "INSERT INTO action_continuations(token,action_id,generation) VALUES (?1,?2,1)",
+            params![token, action_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1423,6 +1533,9 @@ impl Store {
                 return Err(StoreError::SubmissionConflict);
             }
         }
+        let admission_record =
+            super::get_record_tx(&tx, operation)?.ok_or(StoreError::OperationNotFound)?;
+        super::amendments::validate_mutation_admission_tx(&tx, operation, &admission_record)?;
         persist_submission_tx(&tx, operation, submission, timestamp, Some(approval_audit))?;
         tx.execute(
             "UPDATE stage_attempts SET state='admitted' WHERE token=?1",
@@ -1595,7 +1708,9 @@ impl Store {
             "UPDATE operations SET status=?2,record_json=?3,updated_at=?4 WHERE id=?1",
             params![
                 id,
-                failed["status"].as_str().unwrap(),
+                failed["status"]
+                    .as_str()
+                    .ok_or(StoreError::ExecutionConflict)?,
                 failed.to_string(),
                 at
             ],
@@ -1713,6 +1828,101 @@ impl Store {
         tx.commit()?;
         Ok((claimed, true))
     }
+    /// Bind an explicit revised input to a preapproval token while retaining the
+    /// original request identity and a durable snapshot of the previous record.
+    pub fn claim_revised_preapproval_continuation(
+        &mut self,
+        lease: &StageInvocationLease,
+        token: &str,
+        input: &Value,
+        input_hash: &str,
+    ) -> Result<(PreapprovalContinuation, bool)> {
+        if !self.owns_action_lease(lease) || input_hash.is_empty() {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_preapproval(&tx, token)?.ok_or(StoreError::ExecutionConflict)?;
+        if current.action_id != lease.action_id {
+            return Err(StoreError::ExecutionConflict);
+        }
+        if current.input_hash.is_some() {
+            let stored: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT input_hash,input_json FROM preapproval_revisions WHERE token=?1",
+                    [token],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if stored.as_ref().is_none_or(|(hash, json)| {
+                hash != input_hash
+                    || serde_json::from_str::<Value>(json).ok().as_ref() != Some(input)
+            }) {
+                return Err(StoreError::ExecutionConflict);
+            }
+            tx.commit()?;
+            return Ok((current, false));
+        }
+        if current.generation > 1 {
+            let allowed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM preapproval_continuations WHERE action_id=?1 AND generation=?2 AND retryable=1 AND result_json IS NOT NULL)", params![current.action_id,current.generation-1], |r|r.get(0))?;
+            if !allowed {
+                return Err(StoreError::ExecutionConflict);
+            }
+        }
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [&current.action_id],
+            |r| r.get(0),
+        )?;
+        let mut record: Value = serde_json::from_str(&raw)?;
+        let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM logical_actions WHERE action_id=?1 UNION ALL SELECT 1 FROM operations WHERE id=?1 AND run_id IS NOT NULL)", [&current.action_id], |r|r.get(0))?;
+        if blocked
+            || record.get("id").and_then(Value::as_str) != Some(current.action_id.as_str())
+            || record
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            || !matches!(
+                record.get("status").and_then(Value::as_str),
+                Some("failed" | "rejected" | "expired")
+            )
+            || record.get("approval").is_some_and(|v| !v.is_null())
+            || record.get("submission").is_some_and(|v| !v.is_null())
+            || record
+                .get("authorization_source")
+                .is_some_and(|v| !v.is_null())
+            || record.get("run_id").is_some_and(|v| !v.is_null())
+            || record.pointer("/last_reconciliation_evidence/engine_predispatch_failure")
+                != Some(&Value::Bool(true))
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        tx.execute("INSERT INTO preapproval_revisions(token,input_json,input_hash,prior_record_json) VALUES (?1,?2,?3,?4)",params![token,input.to_string(),input_hash,raw])?;
+        record["input"] = input.clone();
+        record["status"] = Value::String("awaiting_approval".into());
+        record["error"] = Value::Null;
+        let updated = chrono::Utc::now().to_rfc3339();
+        record["updated_at"] = Value::String(updated.clone());
+        tx.execute("UPDATE operations SET status='awaiting_approval',record_json=?2,updated_at=?3 WHERE id=?1",params![current.action_id,record.to_string(),updated])?;
+        tx.execute(
+            "UPDATE preapproval_continuations SET input_hash=?2 WHERE token=?1",
+            params![token, input_hash],
+        )?;
+        let generation = current
+            .generation
+            .checked_add(1)
+            .ok_or(StoreError::ExecutionConflict)?;
+        let next = preapproval_token(&current.action_id, generation)?;
+        tx.execute(
+            "INSERT INTO preapproval_continuations(token,action_id,generation) VALUES (?1,?2,?3)",
+            params![next, current.action_id, generation],
+        )?;
+        let claimed = read_preapproval(&tx, token)?.ok_or(StoreError::ExecutionConflict)?;
+        tx.commit()?;
+        Ok((claimed, true))
+    }
+
     /// Atomically record an interrupted, still-unapproved attempt and publish
     /// its precreated successor. No old token can initiate another prompt.
     pub fn interrupt_preapproval_continuation(
@@ -1796,7 +2006,9 @@ impl Store {
             "UPDATE operations SET status=?2,record_json=?3,updated_at=?4 WHERE id=?1",
             params![
                 current.action_id,
-                failed["status"].as_str().unwrap(),
+                failed["status"]
+                    .as_str()
+                    .ok_or(StoreError::ExecutionConflict)?,
                 failed.to_string(),
                 at
             ],
@@ -1867,10 +2079,304 @@ impl Store {
     }
 }
 
+// A historical release can be reconstructed only from terminal, digest-valid
+// evidence correlated with the child's durable submission identity.
+fn verified_terminal_replacement_tx(
+    tx: &rusqlite::Transaction<'_>,
+    child_id: &str,
+) -> Result<bool> {
+    let row: Option<(String, String, String, String)> = tx.query_row("SELECT o.record_json,s.kind,s.reference,s.data_json FROM operations o JOIN submissions s ON s.operation_id=o.id WHERE o.id=?1 AND o.status IN ('completed','failed','cancelled')", [child_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((raw, kind, reference, data)) = row else {
+        return Ok(false);
+    };
+    let Ok(record) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(false);
+    };
+    let Some(effects) = record.get("effects") else {
+        return Ok(false);
+    };
+    let Ok(proof) = serde_json::from_value::<gofin_domain::VerifiedEffects>(effects.clone()) else {
+        return Ok(false);
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&data) else {
+        return Ok(false);
+    };
+    Ok(
+        proof.evidence["replacement_terminal_no_live_remainder"] == true
+            && gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+                == Some(proof.proof_digest.as_str())
+            && proof.submission.kind == kind
+            && proof.submission.reference == reference
+            && proof.submission.data == data,
+    )
+}
+
 #[cfg(test)]
 mod permit_admission_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn released_replacement_history_allows_next_claim_but_active_claim_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        for (id, status, record) in [
+            ("parent", "pending", json!({})),
+            (
+                "old",
+                "failed",
+                json!({"preview":{"binding":{"__gofin_replacement":{"parent_operation_id":"parent"}}}}),
+            ),
+            ("next", "prepared", json!({})),
+            ("other", "prepared", json!({})),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO operations VALUES (?1,?1,'f','op',?2,NULL,?3,'t','t')",
+                    params![id, status, record.to_string()],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO submissions VALUES ('parent','order','ref','{}')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO submissions VALUES ('old','order','old-ref','{}')",
+                [],
+            )
+            .unwrap();
+        let mut proof: gofin_domain::VerifiedEffects = serde_json::from_value(json!({"evidence_version":1,"submission":{"kind":"order","reference":"old-ref","data":{}},"effects":[],"evidence":{"replacement_terminal_no_live_remainder":true},"observed_at":"2026-01-01T00:00:02Z","proof_digest":""})).unwrap();
+        proof.proof_digest = gofin_domain::verified_effect_digest(&proof).unwrap();
+        let old_record = json!({"preview":{"binding":{"__gofin_replacement":{"parent_operation_id":"parent"}}},"effects":proof});
+        store
+            .conn
+            .execute(
+                "UPDATE operations SET record_json=?1 WHERE id='old'",
+                [old_record.to_string()],
+            )
+            .unwrap();
+        let submission = gofin_domain::Submission {
+            kind: "order".into(),
+            reference: "ref".into(),
+            data: json!({}),
+        };
+        assert!(
+            store
+                .claim_replacement("parent", "next", &submission)
+                .unwrap()
+        );
+        drop(store);
+        let mut reopened = Store::open(&path).unwrap();
+        assert!(matches!(
+            reopened.claim_replacement("parent", "other", &submission),
+            Err(StoreError::ReplacementInProgress)
+        ));
+    }
+
+    #[test]
+    fn expired_approval_release_is_atomic_and_requires_lease_and_no_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let original = json!({"id":"op","status":"awaiting_approval","approval":{"expires_at":"2026-01-01T00:00:00Z"},"submission":null});
+        store.conn.execute("INSERT INTO operations VALUES ('op','op','f','op','awaiting_approval',NULL,?1,'t','t')", [original.to_string()]).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO logical_actions VALUES ('op','2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.claim_evm_nonce("signer", "op", 7).unwrap(), 7);
+        let lease = store.try_acquire_action_lease("op").unwrap();
+        let other = Store::open(&path).unwrap();
+        assert!(matches!(
+            other.try_acquire_action_lease("op"),
+            Err(StoreError::ActionLeaseHeld)
+        ));
+        assert!(
+            !store
+                .expire_unsubmitted_approval(&lease, &original, "2025-12-31T23:59:59Z")
+                .unwrap()
+        );
+        store
+            .conn
+            .execute("INSERT INTO submission_admissions VALUES ('op','t')", [])
+            .unwrap();
+        assert!(matches!(
+            store.expire_unsubmitted_approval(&lease, &original, "2026-01-01T00:00:01Z"),
+            Err(StoreError::ExecutionConflict)
+        ));
+        store
+            .conn
+            .execute(
+                "DELETE FROM submission_admissions WHERE operation_id='op'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store
+                .expire_unsubmitted_approval(&lease, &original, "2026-01-01T00:00:01Z")
+                .unwrap()
+        );
+        let status: String = store
+            .conn
+            .query_row("SELECT status FROM operations WHERE id='op'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "expired");
+        let count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM evm_nonce_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mutation_admission_serializes_only_shared_original_and_checks_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admission.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let intent = serde_json::to_value(gofin_domain::FinancialIntent::default()).unwrap();
+        let scope = json!({"intent":intent,"binding":{},"valuation":null});
+        let preview = |binding: Value, expected: Value| json!({"operation":"synthetic.write","input":{},"binding":binding,"summary":"test","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","valuation":null,"intent":{"debits":[],"maximum_costs":[],"expected":expected,"locks":[]},"operation_version":1});
+        for id in ["parent", "other-parent"] {
+            let p = preview(json!({}), json!([]));
+            let record = json!({"id":id,"status":"submitted","preview":p});
+            store
+                .conn
+                .execute(
+                    "INSERT INTO operations VALUES (?1,?1,'f','op','submitted',NULL,?2,'t','t')",
+                    params![id, record.to_string()],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute("INSERT INTO submissions VALUES (?1,'order',?1,'{}')", [id])
+                .unwrap();
+        }
+        let mut tokens = Vec::new();
+        for (id, parent) in [
+            ("first", "parent"),
+            ("second", "parent"),
+            ("unrelated", "other-parent"),
+        ] {
+            let parent_submission = json!({"kind":"order","reference":parent,"data":{}});
+            let binding = json!({"__gofin_mutation_baselines":{parent:scope}});
+            let p = preview(
+                binding,
+                json!([{"kind":"submission_amendment","operation_id":parent,"submission":parent_submission,"revision":scope}]),
+            );
+            let record = json!({"id":id,"status":"awaiting_approval","preview":p});
+            store.conn.execute("INSERT INTO operations VALUES (?1,?1,'f','op','awaiting_approval',NULL,?2,'t','t')",params![id,record.to_string()]).unwrap();
+            store
+                .register_action_authority(
+                    id,
+                    "2099-01-01T00:00:00Z",
+                    "auth",
+                    &json!({"native":"terms"}),
+                    "2099-01-01T00:00:00Z",
+                )
+                .unwrap();
+            let stage = store
+                .issue_stage_continuation(id, "standalone", "auth")
+                .unwrap();
+            store.claim_stage_attempt(&stage.token, id, &p).unwrap();
+            tokens.push(stage.token);
+        }
+        let row = |id: &str| SubmissionRow {
+            kind: "edit".into(),
+            reference: id.into(),
+            data: json!({}),
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["first", "second"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let path = path.clone();
+                let token = tokens[index].clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut connection = Store::open(&path).unwrap();
+                    barrier.wait();
+                    let result = connection.admit_stage_submission(
+                        &token,
+                        &SubmissionRow {
+                            kind: "edit".into(),
+                            reference: id.into(),
+                            data: json!({}),
+                        },
+                        "2026-01-01T00:00:00Z",
+                        &json!({"native":"terms"}),
+                    );
+                    (index, id, result)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|(_, _, r)| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, _, r)| matches!(r, Err(StoreError::ConcurrentReservation)))
+                .count(),
+            1
+        );
+        let (winner, winner_id, _) = results.iter().find(|(_, _, r)| r.is_ok()).unwrap();
+        let loser = 1 - *winner;
+        let changed_scope = json!({"intent":intent,"binding":{"price":"new"},"valuation":null});
+        let revision = json!({"amendment_operation_id":winner_id,"amendment_submission":{"kind":"edit","reference":winner_id,"data":{}},"scope":changed_scope,"successor":null,"proof_digest":"proof"});
+        store.conn.execute("INSERT INTO operation_amendments(original_operation_id,revision,amendment_operation_id,revision_json,proof_json) VALUES ('parent',1,?1,?2,'{}')", params![winner_id,revision.to_string()]).unwrap();
+        assert!(matches!(
+            store.admit_stage_submission(
+                &tokens[loser],
+                &row("retry"),
+                "2026-01-01T00:00:00Z",
+                &json!({"native":"terms"})
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        store
+            .admit_stage_submission(
+                &tokens[2],
+                &row("three"),
+                "2026-01-01T00:00:00Z",
+                &json!({"native":"terms"}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn admitted_nonce_is_not_released_even_without_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("store.sqlite")).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO operations VALUES ('op','op','f','op','expired',NULL,'{}','t','t')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.claim_evm_nonce("signer", "op", 7).unwrap(), 7);
+        store
+            .conn
+            .execute("INSERT INTO submission_admissions VALUES ('op','t')", [])
+            .unwrap();
+        assert!(matches!(
+            store.release_evm_nonce_if_unsubmitted("op"),
+            Err(StoreError::ExecutionConflict)
+        ));
+    }
+
     #[test]
     fn permit_candidate_requires_valid_typed_template_for_any_changed_bytes() {
         let approved = json!({"chain_id":1,"sender":"owner","nonce":7,"calldata":"0x0000"});

@@ -181,9 +181,7 @@ impl OutcomeFacts {
             ) && (matches!(self.dispatch, Dispatch::NotDispatched | Dispatch::Rejected)
                 || self.duplicate_execution_excluded);
         let retry_approval = replay_safe.then_some({
-            if approval_valid
-                && matches!(self.dispatch, Dispatch::NotDispatched | Dispatch::Rejected)
-            {
+            if approval_valid && self.dispatch == Dispatch::NotDispatched {
                 RetryApproval::Covered
             } else {
                 RetryApproval::Required
@@ -199,6 +197,9 @@ impl OutcomeFacts {
                 "The attempt did not execute; check whether a new approval is required before retrying.",
             ),
             Phase::Done => ("none", "No further action is needed."),
+            Phase::Failed if self.transfer == Some(TransferState::ReturnedToSource) => {
+                ("none", "No further action is needed.")
+            }
             _ => (
                 "wait_and_check",
                 "Check this operation again; do not submit it again.",
@@ -228,26 +229,6 @@ impl OutcomeFacts {
     }
 }
 
-/// Economic terms are reviewed separately from each exact candidate payload.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TermEnforcement {
-    Enforced,
-    Estimate,
-    AfterExecution,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct NativeIntentTerm {
-    pub name: String,
-    pub value: Value,
-    pub enforcement: TermEnforcement,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct NativeIntent {
-    pub operation: String,
-    pub terms: Vec<NativeIntentTerm>,
-    pub expires_at: String,
-}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ExecutionStage {
     pub id: String,

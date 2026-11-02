@@ -68,7 +68,7 @@
       "id": "jupiter-swaps",
       "group": "solana",
       "environment": "surfpool",
-      "description": "Execute a Meta-Aggregator USDT-to-USDC round trip through a synthetic order and execute backend with real local SPL settlement.",
+      "description": "Execute four dependent Meta-Aggregator USDT/USDC swaps through a synthetic order and execute backend, with only the first input funded and real local SPL settlement.",
       "requires": [
         "surfpool",
         "solana",

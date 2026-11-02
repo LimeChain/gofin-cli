@@ -3243,7 +3243,7 @@ impl Adapter for SolanaWalletAdapter {
                     "Keep the operation unresolved and inspect its original journal record.",
                 ));
             }
-            let evidence = json!({"state":"not_dispatched","reason_code":reason_code,"reason":reason,"message_sha256":expected_hash,"submission_reference":submission.reference});
+            let evidence = json!({"state":"not_dispatched","outcome_dispatch":"not_dispatched","outcome_replay_safe":true,"definitive_nonexecution":true,"reason_code":reason_code,"reason":reason,"message_sha256":expected_hash,"submission_reference":submission.reference});
             let verified = VerifiedEffects {
                 evidence_version: 1,
                 submission: submission.clone(),

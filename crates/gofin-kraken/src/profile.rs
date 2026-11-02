@@ -575,6 +575,20 @@ fn validate_rejection(evidence: &Value, endpoint: KrakenEndpoint, digest: &str) 
 
 #[async_trait]
 impl ExchangeProfile for KrakenProfile {
+    fn pre_admission_reuse_window(
+        &self,
+        prepared: &gofin_domain::PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        // Funding-v1 preparation already resolves the exact account, route,
+        // recipient, fee and available cash. Avoid doing that full traversal
+        // twice after approval; the engine still repeats it under the resource
+        // lock immediately before admission. This is not a longer preview TTL.
+        (self.product == KrakenProduct::Spot
+            && prepared.operation
+                == KrakenEndpoint::KrakenFundingPostFundingV1Withdrawals.operation()
+            && prepared.binding["funding"]["api_version"] == "funding-v1")
+            .then_some(std::time::Duration::from_secs(90))
+    }
     fn supports_approved_reprepare(&self, prepared: &PreparedOperation) -> bool {
         self.product == KrakenProduct::Spot && prepared.operation == "kraken.add-order"
     }

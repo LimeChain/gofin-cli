@@ -77,6 +77,13 @@ def read_execution_evidence(path, scenario_id):
     evidence = json.loads(path.read_text())
     if evidence.get("scenario") != scenario_id:
         raise ValueError("Execution evidence belongs to a different scenario")
+    validate_execution_evidence(evidence, bool(re.fullmatch(r"outcome\.a[0-9]+(?:\..+)?", scenario_id)))
+    return evidence
+
+
+def validate_execution_evidence(evidence, require_probes):
+    if not isinstance(evidence, dict):
+        raise ValueError("Execution evidence must be an object")
     for key in ("approval_count", "external_submission_count", "intervention_count"):
         if type(evidence.get(key)) is not int or evidence[key] < 0:
             raise ValueError(f"Execution evidence needs a nonnegative {key}")
@@ -86,14 +93,18 @@ def read_execution_evidence(path, scenario_id):
         raise ValueError("Execution evidence must report remaining external uncertainty")
     if "blocked_unrelated_activity" not in evidence:
         raise ValueError("Execution evidence must report the unrelated-admission probe")
-    if re.fullmatch(r"outcome\.a[0-9]+", scenario_id) and evidence["blocked_unrelated_activity"] is not False:
+    if require_probes and evidence["blocked_unrelated_activity"] is not False:
         raise ValueError("Acceptance evidence requires successful same-account and different-account admission probes")
-    if re.fullmatch(r"outcome\.a[0-9]+", scenario_id):
+    if require_probes:
         probes = execution_probes(evidence)
         for scope in ("same_account", "different_account"):
             if not any(probe["scope"] == scope for probe in probes):
                 raise ValueError(f"Acceptance evidence has no observed {scope} admission")
-    return evidence
+    components = evidence.get("components", [])
+    if not isinstance(components, list):
+        raise ValueError("Evidence components must be an array")
+    for component in components:
+        validate_execution_evidence(component, require_probes)
 
 
 def execution_probes(evidence):

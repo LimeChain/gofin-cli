@@ -3046,25 +3046,32 @@ impl KrakenProfile {
             {
                 return crate::unresolved_consumption::proven_cost_overrun(
                     submission,
-                    if all_terminal && binding["conditionalChildrenPending"] != true {
+                    if !all_terminal || binding["conditionalChildrenPending"] == true {
+                        Status::Pending
+                    } else if any_fill && receipt_satisfied {
                         Status::Completed
                     } else {
-                        Status::Pending
+                        Status::Failed
                     },
                     &effects,
                     json!({"code":"KRAKEN_FEE_BOUND_EXCEEDED","asset":code,"actualFeeAtoms":total,"orders":evidence,"proofEvents":proof_events}),
                 );
             }
         }
+        let live_order = evidence
+            .iter()
+            .any(|entry| entry["order"]["status"] == "open");
         if binding["conditionalChildrenPending"] == true {
             all_terminal = false;
         }
         if !all_terminal && !any_fill {
-            return Ok(unresolved(
+            let mut result = unresolved(
                 Status::Pending,
                 "The native orders remain open with no verified fills; principal and fee reservations remain held.",
                 json!({"orders":evidence}),
-            ));
+            );
+            result.evidence["outcome_live_order"] = json!(live_order);
+            return Ok(result);
         }
         if all_terminal && !any_fill {
             effects.clear();
@@ -3079,7 +3086,7 @@ impl KrakenProfile {
                 Status::Failed
             },
             effects,
-            json!({"orders":evidence,"proofEvents":proof_events,"coverage":"Exact order identities and all referenced custody ledger trade legs; no balance-difference settlement."}),
+            json!({"orders":evidence,"outcome_live_order":live_order,"proofEvents":proof_events,"coverage":"Exact order identities and all referenced custody ledger trade legs; no balance-difference settlement."}),
         )
     }
 }

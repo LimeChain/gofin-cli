@@ -537,13 +537,35 @@ impl EthereumAdapter {
         } else {
             shares
         };
-        require(
-            allowance >= required
-                && allowance < U256::MAX
-                && (operation == "morpho.deposit" || allowance <= maximum_shares),
-            "ALLOWANCE_INSUFFICIENT",
-            "A finite allowance to the reviewed VaultBundlesV1 must cover this action; withdrawal share allowance must not exceed max_shares.",
-        )?;
+        if allowance < required
+            || allowance == U256::MAX
+            || (operation != "morpho.deposit" && allowance > maximum_shares)
+        {
+            let token = if operation == "morpho.deposit" {
+                &state.asset
+            } else {
+                &state.shares
+            };
+            return Err(GoFinError::new(
+                "ALLOWANCE_INSUFFICIENT",
+                "validation",
+                "A finite allowance to the reviewed VaultBundlesV1 must cover this action; withdrawal share allowance must not exceed max_shares.",
+                "Read wallet.allowance for the reported token and spender, then use wallet.approve with a finite amount within the reported bounds and preview this action again. Allowance amounts in details are atomic units; wallet.approve takes decimal token units.",
+            ).with_details(json!({
+                "wallet": r.wallet,
+                "chain_id": self.config.chain_id,
+                "network": r.network,
+                "vault": state.vault,
+                "token": token,
+                "spender": lower_address(bundles),
+                "spender_verification": "reviewed_runtime_code_at_observation_block",
+                "observed_block": state.block,
+                "current_allowance_atoms": allowance.to_string(),
+                "required_allowance_atoms": required.to_string(),
+                "recommended_allowance_atoms": required.to_string(),
+                "maximum_allowance_atoms": if operation == "morpho.deposit" { None } else { Some(maximum_shares.to_string()) },
+            })));
+        }
         // The baseline and prepared preview share the same observation instant.
         // Capturing a later wall-clock time here makes the baseline appear to
         // come from the future to the independent engine freshness validator.

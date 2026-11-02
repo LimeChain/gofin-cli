@@ -3140,42 +3140,28 @@ impl ExchangeProfile for BinanceProfile {
         }
     }
 
-    async fn prepare_with_context(
-        &self,
-        operation: &str,
-        input: &Value,
-        context: &gofin_domain::PreparationContext,
-    ) -> Result<PreparedOperation, GoFinError> {
-        if operation == "binance.futures.order-place" {
-            return self
-                .trading_prepare_with_anchor(operation, input, context)
-                .await;
-        }
-        self.prepare(operation, input).await
-    }
-
     async fn refresh_prepared(
         &self,
         prepared: &PreparedOperation,
     ) -> Result<PreparedOperation, GoFinError> {
-        let mut current = if prepared.operation == "binance.futures.order-place" {
-            let mut context = gofin_domain::PreparationContext::default();
-            if let Some(anchor) = prepared.binding.get("priorAnchor") {
-                context
-                    .positions
-                    .push(serde_json::from_value(anchor.clone()).map_err(|_| {
-                        error(
-                            "PREVIEW_INVALID",
-                            "submission",
-                            "The trusted derivative anchor is invalid.",
-                        )
-                    })?);
+        let mut current = self.prepare(&prepared.operation, &prepared.input).await?;
+        // Retain the approved observation only when the refreshed native exposure
+        // still matches; positionBefore remains independently checked by refresh.
+        if prepared.operation == "binance.futures.order-place"
+            && current.binding["positionBefore"] == prepared.binding["positionBefore"]
+        {
+            if let Some(baseline) = prepared.binding.get(gofin_domain::BASELINE_ANCHORS_KEY) {
+                current.binding[gofin_domain::BASELINE_ANCHORS_KEY] = baseline.clone();
+            } else if let Some(binding) = current.binding.as_object_mut() {
+                binding.remove(gofin_domain::BASELINE_ANCHORS_KEY);
             }
-            self.trading_prepare_with_anchor(&prepared.operation, &prepared.input, &context)
-                .await?
-        } else {
-            self.prepare(&prepared.operation, &prepared.input).await?
-        };
+        }
+        // Preserve the reconciliation contract of submissions prepared by older versions.
+        if prepared.operation == "binance.futures.order-place"
+            && let Some(anchor) = prepared.binding.get("priorAnchor")
+        {
+            current.binding["priorAnchor"] = anchor.clone();
+        }
         let plan_metadata = prepared
             .binding
             .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
@@ -5040,7 +5026,7 @@ impl BinanceProfile {
         let Some(verifier) = verifier else {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
+                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","outcome_transfer":"in_transit","destinationReceipt":"unverified","sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
                 verified: None,
             });
         };
@@ -5050,7 +5036,7 @@ impl BinanceProfile {
         let Some(tx_hash) = tx_hash else {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","reason":"Binance reports completion but no usable transaction identifier is available."}),
+                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","outcome_transfer":"in_transit","destinationReceipt":"unverified","reason":"Binance reports completion but no usable transaction identifier is available."}),
                 verified: None,
             });
         };
@@ -5090,7 +5076,7 @@ impl BinanceProfile {
             };
             return Ok(Reconciliation {
                 status,
-                evidence: json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Selected-chain receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
+                evidence: json!({"withdrawal":base_evidence,"outcome_transfer":"in_transit","recipient":receipt.evidence,"reason":"Selected-chain receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
                 verified: None,
             });
         }

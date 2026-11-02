@@ -31,6 +31,9 @@ struct ApprovalPresentationTests {
             missing["input"] = [:] as [String: Any]
             guard case .failure(.invalid) = typedFinancialApprovalReason(envelope(missing)) else { fatalError("Approval without wallet accepted") }
         }
+        let order: [String: Any] = ["version":2, "action":"place-order", "service":"hyperliquid", "market":"SOL/USDC:USDC", "input":["account":["name":"evm-dev", "domain":"hyperliquid"]], "other_details":"buy 0.28 SOL market ≤103.85 (or better) TIF ioc max notional 30 USDC"]
+        guard case .success(let orderReason) = typedFinancialApprovalReason(envelope(order)) else { fatalError("Order review rejected") }
+        assert(orderReason == "place order on hyperliquid in SOL/USDC:USDC from evm-dev (hyperliquid); buy 0.28 SOL market ≤103.85 (or better) TIF ioc max notional 30 USDC", orderReason)
         let leg: [String: Any] = ["amount":"1.25", "asset":asset, "account":["name":"wallet", "domain":"chain"]]
         let partialTransfer: [String: Any] = ["version":2, "action":"account-transfer", "service":"Example",
             "input":["asset":asset, "account":["name":"source"]],

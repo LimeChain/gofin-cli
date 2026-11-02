@@ -150,6 +150,12 @@ async fn available_wallet_funds_can_fund_a_new_action_while_withdrawal_correlati
     let input=json!({"requestId":"a17-withdraw","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.010","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"});
     let withdrawal=client.call(args(&["execute","binance.withdraw","--input",&input.to_string(),"--id","a17-withdraw","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"a17-withdraw".into(),operation:"binance.withdraw".into(),input,run_id:None}},true).await;
     assert_eq!(withdrawal["outcome"]["transfer"],"source_pending","{withdrawal}");
+    // Binance reports completion while independent receipt correlation remains unavailable.
+    { let mut state=venue.state.lock().unwrap(); state.withdrawal_history[0]["status"]=json!(6); state.withdrawal_history[0]["txId"]=json!(format!("0x{}", "ee".repeat(32))); }
+    let withdrawal_id=withdrawal["id"].as_str().unwrap();
+    let in_transit=client.call(args(&["status",withdrawal_id,"--json"]),BrokerRequest::Status{id:withdrawal_id.into()},true).await;
+    assert_eq!(in_transit["outcome"]["transfer"],"in_transit","{in_transit}");
+    assert_eq!(in_transit["submission"],withdrawal["submission"]);
     assert_eq!(*wallet_balance.lock().unwrap(),"0.009");
     let mut probes=Vec::new();
     for (scope,id,from,to) in [("same_account","a17-same",MAIN,CHILD_A),("different_account","a17-other",CHILD_B,MAIN)] {
@@ -163,7 +169,7 @@ async fn available_wallet_funds_can_fund_a_new_action_while_withdrawal_correlati
     let funded=client.call(args(&["execute","binance.deposit","--input",&input.to_string(),"--id","scoped-deposit-forward","--json"]),BrokerRequest::Execute{request:OperationRequest{request_id:"scoped-deposit-forward".into(),operation:"binance.deposit".into(),input,run_id:None}},true).await;
     assert!(funded["submission"].is_object(),"{funded}"); assert_eq!(rpc.accepted.load(Ordering::SeqCst),1);
     let id=withdrawal["id"].as_str().unwrap(); let later=client.call(args(&["status",id,"--json"]),BrokerRequest::Status{id:id.into()},true).await;
-    assert_eq!(later["outcome"]["transfer"],"source_pending","{later}"); assert_eq!(later["submission"],withdrawal["submission"]);
+    assert_eq!(later["outcome"]["transfer"],"in_transit","{later}"); assert_eq!(later["submission"],withdrawal["submission"]);
     let after=counters(); let probe_approvals:usize=probes.iter().map(|p|p["approval_count"].as_u64().unwrap() as usize).sum(); let probe_writes:usize=probes.iter().map(|p|p["external_submission_count"].as_u64().unwrap() as usize).sum();
     if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") { let mut evidence=json!({"scenario":"outcome.a17.binance","approval_count":after.0-before_action.0-probe_approvals,"external_submission_count":after.1-before_action.1-probe_writes,"intervention_count":0,"remaining_external_uncertainty":true,"destination_balance":"0.009 ETH observed independently","funded_action_submission":funded["submission"]}); outcome_evidence::attach_probes(&mut evidence,&probes); std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap(); }
 }

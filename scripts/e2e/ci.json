@@ -13,7 +13,8 @@
     "coinbase-exchange-orders",
     "coinbase-international-orders",
     "hyperliquid-spot",
-    "hyperliquid-perpetual"
+    "hyperliquid-perpetual",
+    "kraken-funding-v1"
   ],
   "evm": [
     "morpho-v2-ethereum",
@@ -70,6 +71,7 @@
     "outcome.a14",
     "outcome.a19",
     "outcome.a16",
-    "outcome.a15"
+    "outcome.a15",
+    "outcome.a11"
   ]
 }

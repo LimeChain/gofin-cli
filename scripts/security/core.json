@@ -129,7 +129,20 @@
       "yolo_disable_blocks_unadmitted_write_but_admitted_identity_recovers",
       "concurrent_requests_deduplicate_identity_without_cross_action_budget",
       "unsubmitted_attempt_can_continue_with_original_approval_once",
-      "claimed_unsubmitted_attempt_recovers_under_exclusive_lease"
+      "claimed_unsubmitted_attempt_recovers_under_exclusive_lease",
+      "standalone_touch_id_revalidation_after_prompt_deadline_keeps_all_checks",
+      "standalone_touch_id_expiry_still_blocks_late_admission",
+      "standalone_touch_id_promotion_rejects_invalid_short_responses",
+      "standalone_touch_id_continuation_after_restart_preserves_original_expiry",
+      "standalone_touch_id_explicit_reauthorization_gets_fresh_window_once",
+      "standalone_touch_id_does_not_extend_candidate_expiry",
+      "compound_short_prompt_preserves_only_reviewed_deadline_after_valid_response",
+      "revised_preapproval_input_keeps_original_identity_and_is_idempotent_after_restart",
+      "preapproval_failure_overrides_unsubmitted_prepared_transfer_observation",
+      "rejected_revised_preapproval_replays_its_successor_without_prompt",
+      "transmitted_rejection_requires_new_approval",
+      "mutation_baseline_is_broker_captured_and_survives_adapter_refresh",
+      "compound_bridge_lookup_preserves_terminal_owner_and_rejects_ambiguity"
     ]
   },
   {
@@ -164,7 +177,10 @@
       "a_second_unresolved_recovery_child_is_rejected_even_with_another_request_id",
       "unknown_v4_database_is_rejected_without_ddl_or_row_changes",
       "partial_or_foreign_version_ten_shape_is_rejected_without_schema_rewrite",
-      "nonce_files_reject_symlinks_hardlinks_and_loose_permissions"
+      "nonce_files_reject_symlinks_hardlinks_and_loose_permissions",
+      "released_replacement_history_allows_next_claim_but_active_claim_blocks",
+      "expired_approval_release_is_atomic_and_requires_lease_and_no_admission",
+      "mutation_admission_serializes_only_shared_original_and_checks_snapshot"
     ]
   },
   {
@@ -338,7 +354,10 @@
     "reason": "Independent processes cannot reuse an occupied nonce; abandoned unsubmitted claims require the original action lease.",
     "tests": [
       "evm_nonce_claims_are_cross_connection_unique_and_idempotent",
-      "recovered_nonce_claim_requires_action_lease_and_no_submission"
+      "recovered_nonce_claim_requires_action_lease_and_no_submission",
+      "revised_preapproval_is_durable_and_bound_to_one_input",
+      "revised_preapproval_rejects_prior_authority_or_submission",
+      "revision_schema_upgrade_recovers_interrupted_transaction_and_preserves_token"
     ]
   }
 ]
