@@ -542,14 +542,19 @@ impl Authorizer for SpotApproval {
                 if buy { "USDC" } else { "ETH" }
             );
             assert_eq!(principal.account.as_ref().unwrap().name, "main");
+            let intent: gofin_domain::FinancialIntent =
+                serde_json::from_value(challenge.binding["financial_intent"].clone())
+                    .expect("bound native financial intent");
             assert!(
-                details.contains(if buy {
-                    "Deducted cost ≤: 0.00003 ETH"
-                } else {
-                    "Deducted cost ≤: 0.05 USDC"
+                intent.maximum_costs.iter().any(|bound| {
+                    bound.treatment == gofin_domain::CostTreatment::DeductedFromCredit
+                        && bound.amount.asset.reference == if buy { "ETH" } else { "USDC" }
+                        && bound.amount.atoms.to_decimal(bound.amount.asset.decimals)
+                            == if buy { "0.00003" } else { "0.05" }
                 }),
-                "{details}"
+                "{intent:?}"
             );
+            assert!(!details.contains("Deducted cost ≤"), "{details}");
             if details.contains("MARKET") {
                 assert_eq!(
                     principal.amount.as_deref(),
@@ -576,12 +581,17 @@ impl Authorizer for SpotApproval {
             }
         }
         #[cfg(target_os = "macos")]
-        native_approval::assert_review_renders(
+        let reason = native_approval::assert_review_renders(
             challenge.review.clone().expect("typed review"),
             &challenge.purpose,
             &challenge.operation_id,
             challenge.binding.clone(),
             &challenge.summary,
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            !reason.contains("Deducted cost ≤") && !reason.contains("Fee ≤"),
+            "{reason}"
         );
         SyntheticApproval(AtomicUsize::new(0))
             .authorize(challenge)
