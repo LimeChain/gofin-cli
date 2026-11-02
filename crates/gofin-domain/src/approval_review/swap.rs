@@ -107,51 +107,13 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             Quantity::from_u64(bps).to_decimal(2)
         ));
     }
-    if let Some(bps) = prepared.input["maximum_platform_fee_bps"].as_u64() {
-        clauses.push(format!(
-            "platform fee ≤{}%",
-            Quantity::from_u64(bps).to_decimal(2)
-        ));
-    }
-    for cost in &prepared.intent.maximum_costs {
-        if cost.amount.atoms.is_zero() {
-            continue;
-        }
-        clauses.push(format!(
-            "fees ≤{} {}",
-            cost.amount.atoms.to_decimal(cost.amount.asset.decimals),
-            super::prepared_asset_label(prepared, &cost.amount.asset)
-        ));
-    }
     for effect in &prepared.intent.expected {
-        match effect {
-            EffectConstraint::AccountFundingBudget {
-                asset,
-                maximum_debit,
-                ..
-            } => {
-                clauses.push(format!(
-                    "account funding ≤{} {}",
-                    maximum_debit.to_decimal(asset.decimals),
-                    super::prepared_asset_label(prepared, asset)
-                ));
-            }
-            EffectConstraint::OptionalAccountFunding { asset, .. } => {
-                // Use the approved aggregate cap, not the provider's current rent estimate.
-                let cap = prepared.binding["maximum_account_funding_lamports"]
-                    .as_u64()
-                    .ok_or_else(|| {
-                        GoFinError::validation(
-                            "Swap review lacks its approved account funding cap.",
-                        )
-                    })?;
-                clauses.push(format!(
-                    "account funding ≤{} {}",
-                    Quantity::from_u64(cap).to_decimal(asset.decimals),
-                    super::prepared_asset_label(prepared, asset)
-                ));
-            }
-            _ => {}
+        if let EffectConstraint::OptionalAccountFunding { .. } = effect {
+            prepared.binding["maximum_account_funding_lamports"]
+                .as_u64()
+                .ok_or_else(|| {
+                    GoFinError::validation("Swap review lacks its approved account funding cap.")
+                })?;
         }
     }
     if prepared

@@ -281,6 +281,18 @@
         "--",
         "--exact",
         "--ignored"
+      ],
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "cctp_lifecycle",
+        "compound_cctp_native_review_covers_all_stages_once",
+        "--",
+        "--exact"
       ]
     ],
     "expected_tests": 1,

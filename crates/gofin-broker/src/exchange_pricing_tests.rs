@@ -321,7 +321,8 @@ async fn native_spot_order_previews_preserve_material_terms_through_approval() {
             }
         };
         assert!(details.contains(material));
-        assert!(details.contains("Fee ≤: 0.01 BNB"));
+        assert!(!details.contains("Fee ≤"));
+        assert!(!prepared.intent.maximum_costs.is_empty());
         #[cfg(target_os = "macos")]
         {
             let reason = native_approval::assert_prepared_renders(&prepared);
@@ -331,14 +332,9 @@ async fn native_spot_order_previews_preserve_material_terms_through_approval() {
                 "{reason}"
             );
             assert!(
-                reason.contains(if side == "BUY" {
-                    "Deducted cost ≤: 0.02 APT"
-                } else {
-                    "Deducted cost ≤: 0.2 USDC"
-                }),
+                !reason.contains("Deducted cost ≤") && !reason.contains("Fee ≤"),
                 "{reason}"
             );
-            assert!(reason.contains("Fee ≤: 0.01 BNB"), "{reason}");
             assert!(reason.contains(&format!("{side} {kind}")), "{reason}");
             assert!(!reason.contains("binance:uid:"), "{reason}");
         }

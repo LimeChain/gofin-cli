@@ -82,12 +82,11 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             super::prepared_asset_label(prepared, &asset)
         ));
         if prepared.operation == "wallet.permit2.approve" {
-            let expiration = binding
+            let _expiration = binding
                 .get("after")
                 .and_then(|v| v.get("expiration"))
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| GoFinError::validation("Permit2 review lacks its expiration."))?;
-            details.push(format!("Expires at Unix {expiration}"));
         }
         if let Some(fees) = review.other_details.take() {
             details.push(fees);
@@ -145,7 +144,7 @@ mod tests {
         };
         let details = approval_review(&p).unwrap().other_details.unwrap();
         assert!(details.contains("Allowance: 5 USDC"));
-        assert!(details.contains("Expires at Unix 1700000000"));
+        assert!(!details.contains("Expires"));
         let mut missing = p;
         missing.binding["after"]["amount"] = json!(null);
         assert!(approval_review(&missing).is_err());

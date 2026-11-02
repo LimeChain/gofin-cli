@@ -699,29 +699,20 @@ func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, Fi
     }
     if action != "execute-plan" && (description != nil || (review["step_count"] != nil && !(review["step_count"] is NSNull)) || (review["valid_for_seconds"] != nil && !(review["valid_for_seconds"] is NSNull))) { return .failure(.invalid) }
     if let details = details { result += "; \(details)" }
-    var hasTerms = false
     if let rawTerms = review["terms"] {
         guard let terms = rawTerms as? [[String: Any]] else { return .failure(.invalid) }
-        hasTerms = !terms.isEmpty
         for term in terms {
             guard Set(term.keys) == Set(["label", "value", "enforcement"]),
-                  let label = safe(term["label"], maximum: 100),
-                  let value = safe(term["value"], maximum: 200),
+                  safe(term["label"], maximum: 100) != nil,
+                  safe(term["value"], maximum: 200) != nil,
                   let enforcement = term["enforcement"] as? String else { return .failure(.invalid) }
-            let classification: String
             switch enforcement {
-            case "enforced": classification = "enforced"
-            case "estimate": classification = "estimate"
-            case "after_execution": classification = "checked after execution"
+            case "enforced", "estimate", "after_execution": break
             default: return .failure(.invalid)
             }
-            result += "; \(label) [\(classification)]: \(value)"
         }
     }
-    // New intent reviews include all classified terms, like the existing full
-    // resolution review. Never truncate material quantities to fit a synopsis.
-    let maximum = hasTerms ? 1024 : authenticationReasonMaximumCharacters
-    guard result.count <= maximum else { return .failure(.tooLong) }
+    guard result.count <= authenticationReasonMaximumCharacters else { return .failure(.tooLong) }
     // These are warnings about separate actions, never additional authority.
     // Skip malformed historical entries as a whole so damaged history cannot
     // block the current approval or partially display an amount or identity.

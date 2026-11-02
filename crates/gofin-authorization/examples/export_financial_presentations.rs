@@ -12,7 +12,7 @@ fn main() {
         let mut input = leg;
         input["asset"]["name"] = json!("ORE");
         input["asset"]["identifier"]["reference"] = json!("synthetic-ore-address");
-        let mut review = json!({"version":2,"action":action,"service":"Example","market":"market","input":input,"output":output,"other_details":"fee cap 0.01 USDC"});
+        let mut review = json!({"version":2,"action":action,"service":"Example","market":"market","input":input,"output":output,"other_details":"reference: 42"});
         if action == "execute-plan" {
             review["description"] = json!("Plan");
             review["step_count"] = json!(1);

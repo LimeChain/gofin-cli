@@ -263,7 +263,7 @@ case .failure(let failure):
     }
     *api.token_metadata.lock().unwrap() =
         json!([{ "id": ore_mint, "symbol": "ORE", "decimals": 11 }]);
-    for (cap, displayed) in [(0, "0 SOL"), (5_000_000, "0.005 SOL")] {
+    for cap in [0, 5_000_000] {
         let response = runtime
             .handle(BrokerRequest::Preview {
                 operation: "jupiter.swap".into(),
@@ -331,11 +331,13 @@ case .failure(let failure):
             String::from_utf8_lossy(&output.stderr)
         );
         let reason = String::from_utf8(output.stdout).unwrap();
-        assert!(reason.contains(displayed), "{reason}");
         assert!(reason.contains("0.02 SOL"), "{reason}");
         assert!(reason.contains("for at least 1.99 ORE"), "{reason}");
         assert!(reason.contains("solana-rehearsal (Solana)"), "{reason}");
-        assert!(reason.contains("fees ≤0.00001 SOL"), "{reason}");
+        assert!(
+            !reason.to_lowercase().contains("fee") && !reason.to_lowercase().contains("funding"),
+            "{reason}"
+        );
     }
     assert_eq!(approvals.load(Ordering::SeqCst), 0);
     assert!(rpc.0.lock().unwrap().transactions.is_empty());

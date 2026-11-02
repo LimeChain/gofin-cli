@@ -3,6 +3,9 @@
 //! Build gofin-dev with GOFIN_DEV_BUILD_ID=synthetic-cctp-build, then set GOFIN_CCTP_CLI
 //! to its absolute path to include the public CLI and development socket transport.
 //! GOFIN_CCTP_BUILD_ID selects another explicitly built development binary identity.
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
 #[path = "support/outcome_evidence.rs"]
 mod outcome_evidence;
 
@@ -746,10 +749,36 @@ impl UsdPriceSource for Prices {
     }
 }
 #[derive(Default)]
-struct Approvals(AtomicUsize);
+struct Approvals(
+    AtomicUsize,
+    AtomicBool,
+    Mutex<Vec<gofin_domain::approval_review::ApprovalReview>>,
+);
 #[async_trait]
 impl Authorizer for Approvals {
+    fn requires_financial_review(&self) -> bool {
+        self.1.load(Ordering::SeqCst)
+    }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        if self.requires_financial_review() {
+            self.2
+                .lock()
+                .unwrap()
+                .push(c.review.clone().expect("financial review required"));
+            #[cfg(target_os = "macos")]
+            {
+                let reason = native_approval::assert_review_renders(
+                    c.review.clone().unwrap(),
+                    &c.purpose,
+                    &c.operation_id,
+                    c.binding.clone(),
+                    &c.summary,
+                );
+                assert!(reason.contains("10"), "{reason}");
+                assert!(!reason.to_lowercase().contains("fee"), "{reason}");
+                assert!(!reason.to_lowercase().contains("deadline"), "{reason}");
+            }
+        }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic".into(),
@@ -1324,6 +1353,118 @@ impl Harness {
 mod owned_fork;
 #[path = "support/cctp_stack_refresh.rs"]
 mod stack_refresh;
+#[tokio::test]
+async fn compound_cctp_native_review_covers_all_stages_once() {
+    Box::pin(async {
+        let h = Harness::new();
+        h.approvals.1.store(true, Ordering::SeqCst);
+        let (id, transfer) = h.start_compound("native-review").await;
+        assert_eq!(h.status(&transfer).await["state"], "in_transit");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        {
+            let reviews = h.approvals.2.lock().unwrap();
+            let review = &reviews[0];
+            assert_eq!(review.service, "cctp");
+            assert_eq!(review.input.as_ref().unwrap().amount.as_deref(), Some("10"));
+            assert_eq!(
+                review.output.as_ref().unwrap().amount.as_deref(),
+                Some("10")
+            );
+            assert_eq!(
+                review
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .account
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                "model-wallet"
+            );
+            assert_eq!(
+                review
+                    .output
+                    .as_ref()
+                    .unwrap()
+                    .account
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                h.wallet.to_lowercase()
+            );
+        }
+        h.chain.lock().unwrap().attestation_ready = true;
+        let waiting = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        let token = waiting
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let completed = h
+            .call(
+                args(&["operations", "continue", &id, "--token", &token, "--json"]),
+                BrokerRequest::ContinueOperation {
+                    id: id.clone(),
+                    token: token.clone(),
+                },
+            )
+            .await;
+        assert_eq!(completed["outcome"]["phase"], "done", "{completed}");
+        let replay = h
+            .call(
+                args(&["operations", "continue", &id, "--token", &token, "--json"]),
+                BrokerRequest::ContinueOperation {
+                    id: id.clone(),
+                    token,
+                },
+            )
+            .await;
+        assert_eq!(replay["id"], id, "{replay}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        let observed = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(observed["outcome"]["phase"], "done", "{observed}");
+        let input = observed["input"].clone();
+        let repeated = h
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.execute",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    "native-review",
+                    "--json",
+                ]),
+                BrokerRequest::Execute {
+                    request: OperationRequest {
+                        request_id: "native-review".into(),
+                        operation: "bridge.execute".into(),
+                        input,
+                        run_id: None,
+                    },
+                },
+            )
+            .await;
+        assert_eq!(repeated["id"], id, "{repeated}");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+    })
+    .await
+}
+
 #[tokio::test]
 async fn known_canonical_mint_settles_without_destination_log_scan() {
     let h = Harness::new();

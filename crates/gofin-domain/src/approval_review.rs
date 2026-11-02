@@ -151,33 +151,6 @@ fn too_large() -> GoFinError {
 
 impl ApprovalReview {
     pub fn validate(&self) -> Result<()> {
-        // Swift renders each classified term and may repeat leg text in its
-        // synopsis. Bound that rendering before requesting native approval.
-        if !self.terms.is_empty() {
-            let count = |s: &str| s.graphemes(true).count();
-            let mut upper = 200
-                + count(&self.service)
-                + self.market.as_deref().map_or(0, count)
-                + self.other_details.as_deref().map_or(0, count)
-                + self.description.as_deref().map_or(0, count);
-            for leg in [&self.input, &self.output].into_iter().flatten() {
-                upper += 2
-                    * (leg.amount.as_deref().map_or(0, count)
-                        + leg.asset.as_ref().map_or(0, |a| count(&a.name))
-                        + leg
-                            .account
-                            .as_ref()
-                            .map_or(0, |a| count(&a.name) + a.domain.as_deref().map_or(0, count)));
-            }
-            upper += self
-                .terms
-                .iter()
-                .map(|t| count(&t.label) + count(&t.value) + 32)
-                .sum::<usize>();
-            if upper > 1024 {
-                return Err(too_large());
-            }
-        }
         if self.terms.iter().any(|term| {
             !valid_text(&term.label, false)
                 || !valid_text(&term.value, false)
@@ -635,31 +608,6 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
             _ => {}
         }
     }
-    let costs = prepared
-        .intent
-        .maximum_costs
-        .iter()
-        .map(|c| {
-            let label = match c.treatment {
-                crate::CostTreatment::VenueCalculatedAdditionalDebit => {
-                    "Venue fee not capped; reserve"
-                }
-                crate::CostTreatment::IncludedInDebit => "Incl. cost ≤",
-                crate::CostTreatment::DeductedFromCredit => "Deducted cost ≤",
-                crate::CostTreatment::AdditionalDebit => "Fee ≤",
-            };
-            format!(
-                "{label}: {} {}",
-                c.amount.atoms.to_decimal(c.amount.asset.decimals),
-                prepared_asset_label(prepared, &c.amount.asset)
-            )
-        })
-        .collect::<Vec<_>>();
-    let details = if costs.is_empty() {
-        None
-    } else {
-        Some(costs.join("; "))
-    };
     let mut review = ApprovalReview {
         version: 2,
         action,
@@ -667,7 +615,7 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         market: None,
         input,
         output,
-        other_details: details,
+        other_details: None,
         description: None,
         step_count: None,
         valid_for_seconds: None,
@@ -955,9 +903,9 @@ mod tests {
             amount: debit.amount,
             treatment: crate::CostTreatment::IncludedInDebit,
         }];
-        let details = approval_review(&p).unwrap().other_details.unwrap();
-        assert!(details.contains("Incl. cost ≤: 1.2345 USDC"), "{details}");
-        assert!(!details.contains("Fee"), "{details}");
+        let review = approval_review(&p).unwrap();
+        assert!(review.other_details.is_none());
+        assert_eq!(p.intent.maximum_costs.len(), 1);
     }
     #[test]
     fn derives_review_from_typed_intent_and_binds_it() {

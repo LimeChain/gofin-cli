@@ -1,9 +1,75 @@
 //! Bridge presentation is derived from the frozen quote and finite bounds.
 use super::{ApprovalAccount, ApprovalLeg, ApprovalReview, swap};
-use crate::{Amount, GoFinError, PreparedOperation, Result};
+use crate::{Amount, EffectConstraint, GoFinError, PreparedOperation, Result};
 use serde_json::Value;
 
 pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Result<()> {
+    if prepared.binding.get("compound_bridge") == Some(&Value::Bool(true)) {
+        let scope = prepared
+            .binding
+            .pointer("/scope/fixed/bridge_execute_scope")
+            .ok_or_else(|| GoFinError::validation("Bridge review lacks its bound scope."))?;
+        let recipient = scope
+            .get("recipient")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GoFinError::validation("Bridge destination is missing."))?;
+        let provider = prepared
+            .binding
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GoFinError::validation("Bridge provider is missing."))?;
+        let (source, destination, debit, credit, maximum, minimum) = prepared
+            .intent
+            .expected
+            .iter()
+            .find_map(|effect| match effect {
+                EffectConstraint::Transfer {
+                    from,
+                    to,
+                    debit_asset,
+                    credit_asset,
+                    maximum_debit,
+                    minimum_credit,
+                } => Some((
+                    from,
+                    to,
+                    debit_asset,
+                    credit_asset,
+                    maximum_debit,
+                    minimum_credit,
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| GoFinError::validation("Bridge review lacks its bound transfer."))?;
+        let alias = prepared
+            .input
+            .pointer("/intent/wallet")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&source.0);
+        review.input = Some(super::leg(debit, maximum, source));
+        review.output = Some(super::leg(credit, minimum, destination));
+        review
+            .input
+            .as_mut()
+            .unwrap()
+            .account
+            .as_mut()
+            .unwrap()
+            .name = alias.into();
+        review
+            .output
+            .as_mut()
+            .unwrap()
+            .account
+            .as_mut()
+            .unwrap()
+            .name = recipient.into();
+        review.service = provider.into();
+        return Ok(());
+    }
     let quote = prepared
         .binding
         .get("quote")
