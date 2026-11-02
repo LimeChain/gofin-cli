@@ -875,7 +875,9 @@ primary RPC cooldown before signing, then rechecks freshness and authorization.
 A longer cooldown fails preparation without submitting a transaction.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
-For a coherent sequence, the agent invokes logical actions. A declared compound action has one native approval and an explicit reviewed deadline. Do preparation before approval, then let the broker refresh candidates within the approved terms. Observe the original identity after interruption and use its returned continuation token for unfinished stages. Status is bounded; no background runner advances work after the invocation ends.
+The Touch ID prompt allows up to 90 seconds to respond. A successful standalone financial approval then allows submission for 30 minutes from the approval time, subject to all existing balance, allowance, nonce, simulation and financial-bound checks. Quotes and transaction candidates retain their own freshness limits. Continuing an action or restarting GoFin does not reset its approval window; previously stored approvals retain their original expiry.
+
+For a coherent sequence, the agent invokes logical actions. A declared compound action has one native approval and an explicit reviewed deadline, rather than the standalone 30-minute window. Do preparation before approval, then let the broker refresh candidates within the approved terms. Observe the original identity after interruption and use its returned continuation token for unfinished stages. Status is bounded; no background runner advances work after the invocation ends.
 
 See the [responsiveness checks and human verification steps](testing/responsiveness.md).
 

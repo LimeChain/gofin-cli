@@ -425,8 +425,12 @@ impl Engine {
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::AwaitingApproval,
         );
-        let audit = self.authorizer.authorize(&challenge).await?;
-        validate_approval(&audit, &challenge, self.clock.now())?;
+        let mut audit = self.authorizer.authorize(&challenge).await?;
+        let approved_now = self.clock.now();
+        validate_approval(&audit, &challenge, approved_now)?;
+        if !adapter.is_compound_action(&candidate) {
+            promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+        }
         validate_financial_approval_source(&audit)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
         let mut updated = action.clone();
@@ -460,8 +464,8 @@ impl Engine {
                 &input_hash,
                 &challenge.nonce,
                 &authority,
-                &challenge.expires_at,
-                &challenge.expires_at,
+                &audit.expires_at,
+                &audit.expires_at,
                 &to_value(&action)?,
                 &to_value(&updated)?,
                 &result,

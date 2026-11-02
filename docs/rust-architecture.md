@@ -1055,7 +1055,12 @@ though they were cumulative snapshots.
 
 ## Independent action clocks
 
-Standalone approval duration is independent of candidate expiry. Compound actions
+The native biometric challenge lasts at most 90 seconds. A newly validated
+standalone financial approval grants 30 minutes from its approval timestamp,
+independently of candidate expiry. The persisted execution deadline is not
+recomputed during observation, continuation or restart; historical approvals
+retain their original expiry. Nonce, balance, allowance, simulation and final
+admission checks remain required after approval. Compound actions
 require an explicit reviewed deadline covering all declared stages. A refresh
 changes neither that deadline nor consumed authority. Fresh quotes, blockhashes,
 nonces and fee estimates remain within approved native terms. Invocation deadlines

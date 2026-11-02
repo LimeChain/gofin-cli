@@ -1924,13 +1924,17 @@ impl Engine {
             gofin_domain::execution_progress::emit(
                 gofin_domain::execution_progress::Stage::AwaitingApproval,
             );
-            let audit = match &route {
+            let mut audit = match &route {
                 ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
                 ExecutionRoute::Configuration(authorizer) => {
                     authorizer.authorize_configuration(&challenge).await?
                 }
             };
-            validate_approval(&audit, &challenge, self.clock.now())?;
+            let approved_now = self.clock.now();
+            validate_approval(&audit, &challenge, approved_now)?;
+            if matches!(&route, ExecutionRoute::Financial) && !compound_action {
+                promote_standalone_touch_id_approval(&mut audit, &challenge, approved_now)?;
+            }
             (audit, Some(challenge))
         };
         record.approval = Some(audit.clone());
@@ -16352,6 +16356,39 @@ fn validate_approval(
             "Request fresh approval for the current operation.",
         ));
     }
+    Ok(())
+}
+
+/// Derive only new standalone Touch ID execution authority after the short
+/// challenge response has been independently validated. Stored historical
+/// audits are never passed through this function during recovery.
+fn promote_standalone_touch_id_approval(
+    audit: &mut ApprovalAudit,
+    challenge: &AuthorizationChallenge,
+    instant: DateTime<Utc>,
+) -> Result<()> {
+    if audit.source != Some(gofin_domain::AuthorizationSource::TouchId) {
+        return Ok(());
+    }
+    let approved = parse_time(&audit.approved_at)?;
+    let prompt_deadline = parse_time(&challenge.expires_at)?;
+    if parse_time(&audit.expires_at)? != prompt_deadline
+        || instant >= prompt_deadline
+        || approved > instant
+        || approved + chrono::Duration::milliseconds(1)
+            < prompt_deadline - chrono::Duration::seconds(90)
+    {
+        return Err(GoFinError::new(
+            "INVALID_APPROVAL",
+            "approval",
+            "The native response is outside its original prompt interval.",
+            "Request fresh approval for this exact operation.",
+        ));
+    }
+    audit.expires_at = approved
+        .checked_add_signed(chrono::Duration::minutes(30))
+        .ok_or_else(|| GoFinError::validation("Approval expiry is out of range."))?
+        .to_rfc3339();
     Ok(())
 }
 

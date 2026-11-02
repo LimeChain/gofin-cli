@@ -129,7 +129,13 @@
       "yolo_disable_blocks_unadmitted_write_but_admitted_identity_recovers",
       "concurrent_requests_deduplicate_identity_without_cross_action_budget",
       "unsubmitted_attempt_can_continue_with_original_approval_once",
-      "claimed_unsubmitted_attempt_recovers_under_exclusive_lease"
+      "claimed_unsubmitted_attempt_recovers_under_exclusive_lease",
+      "standalone_touch_id_revalidation_after_prompt_deadline_keeps_all_checks",
+      "standalone_touch_id_expiry_still_blocks_late_admission",
+      "standalone_touch_id_promotion_rejects_invalid_short_responses",
+      "standalone_touch_id_continuation_after_restart_preserves_original_expiry",
+      "standalone_touch_id_explicit_reauthorization_gets_fresh_window_once",
+      "standalone_touch_id_does_not_extend_candidate_expiry"
     ]
   },
   {
