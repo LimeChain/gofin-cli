@@ -789,6 +789,7 @@ impl HyperliquidProfile {
         let mut receipts = Vec::new();
         let mut digests = BTreeMap::new();
         let mut pending = false;
+        let mut live_order = false;
         let mut any_fill = false;
         let mut dispatch_rejections = Vec::new();
         let mut discrepancies = Vec::new();
@@ -920,6 +921,7 @@ impl HyperliquidProfile {
                 ));
             }
             pending |= !terminal;
+            live_order |= native_status == "open" && !remaining.is_zero();
             any_fill |= !total.size.is_zero();
             let cash_resource = match binding.account_mode.as_ref() {
                 Some(mode) => mode.cash_resource(
@@ -1187,7 +1189,7 @@ impl HyperliquidProfile {
         } else {
             Status::Failed
         };
-        let mut evidence = json!({"method":"owner-client-id-and-immutable-fill-receipts","orders":receipts,"fills":raw_fills,"dispatch_rejections":dispatch_rejections.clone(),"partial_outcome":if dispatch_rejections.is_empty(){Value::Null}else{json!({"kind":"mixed_batch","rejected_children":dispatch_rejections})}});
+        let mut evidence = json!({"outcome_live_order":live_order,"method":"owner-client-id-and-immutable-fill-receipts","orders":receipts,"fills":raw_fills,"dispatch_rejections":dispatch_rejections.clone(),"partial_outcome":if dispatch_rejections.is_empty(){Value::Null}else{json!({"kind":"mixed_batch","rejected_children":dispatch_rejections})}});
         // Only owner/client-ID correlated terminal order observations prove
         // that every replacement has no live remainder. A failed status or
         // an absent order alone is not such evidence.

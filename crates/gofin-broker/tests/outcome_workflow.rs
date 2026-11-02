@@ -1501,7 +1501,7 @@ async fn legacy_hyperliquid_favorable_fill_is_observed_without_new_trade() {
 #[tokio::test]
 async fn legacy_journals_remain_observable_and_do_not_block_new_writes() {
     Box::pin(async {
-        let fixtures=["schema25.sqlite","schema25-attestations.sqlite","schema25-grants.sqlite","schema25-partial-bridge.sqlite","schema25-bridge-stages.sqlite","schema25-over-limit.sqlite","schema25-cost-attention.sqlite","schema25-reservation-released.sqlite"];
+        let fixtures=["schema25.sqlite","schema25-attestations.sqlite","schema25-grants.sqlite","schema25-partial-bridge.sqlite","schema25-bridge-stages.sqlite","schema25-over-limit.sqlite","schema25-cost-attention.sqlite","schema25-reservation-released.sqlite","schema25-hyperliquid-sell.sqlite"];
         let mut admission_probes=Vec::new();
         let mut main_counts=(0,0);
         for name in fixtures {
@@ -1511,7 +1511,8 @@ async fn legacy_journals_remain_observable_and_do_not_block_new_writes() {
             let chain=Arc::new(Chain {chain_id:1,store_path:path.clone(),counters:counters.clone(),prepared:Mutex::new(Vec::new()),stall_first_response:AtomicBool::new(false),release_first_response:AtomicBool::new(false),transactions:Mutex::new(BTreeMap::new()),hash:Mutex::new(None),multiple:true,price_unavailable:false,receipt_ready:AtomicBool::new(false),sender_balance:Mutex::new(U256::from(100_000_000_000_000_000u64)),second_balance:Mutex::new(U256::from(100_000_000_000_000_000u64)),recipient_balance:Mutex::new(U256::ZERO)});
             let endpoint=Endpoint::with_visibility(chain.clone(),true,true);let client=Client::new(broker(&path,vec![endpoint.url.clone()],chain),directory.path()).await;
             let records=Store::open(&path).unwrap().list_typed_records().unwrap();
-            for saved in &records {let id=saved["id"].as_str().unwrap();let observed=client.call(BrokerRequest::Status{id:id.into()}).await;assert_eq!(observed["id"],id,"{name}");assert_eq!(observed["submission"],saved["submission"],"{name}");assert_eq!(observed["outcome"]["version"],1);assert_eq!(observed["outcome"]["replay_safe"],false,"legacy history is not nonexecution proof: {name}: {observed}");assert!(observed["outcome"]["phase"].is_string());}
+            for saved in &records {let id=saved["id"].as_str().unwrap();let observed=client.call(BrokerRequest::Status{id:id.into()}).await;assert_eq!(observed["id"],id,"{name}");assert_eq!(observed["submission"],saved["submission"],"{name}");assert_eq!(observed["approval"],saved["approval"],"{name}");assert_eq!(observed["outcome"]["version"],1);assert_eq!(observed["outcome"]["replay_safe"],false,"legacy history is not nonexecution proof: {name}: {observed}");assert!(observed["outcome"]["phase"].is_string());}
+            // Retirement is an interface-level rejection; this does not prove that any specific stored grant was loaded.
             let retired=OperationRequest {request_id:"retired-attempt".into(),operation:"wallet.transfer".into(),input:json!({}),run_id:None};
             let response=Box::pin(client.runtime.handle(BrokerRequest::ExecutePlanStep{plan_id:"synthetic-plan".into(),step_id:"step".into(),request:retired.clone()})).await;
             assert!(!response.ok);assert_eq!(response.error.unwrap().code,"EXECUTION_INTERFACE_RETIRED");

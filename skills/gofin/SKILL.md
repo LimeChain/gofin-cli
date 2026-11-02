@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.21.0"
+  version: "1.22.0"
   openclaw:
     requires:
       bins: [gofin]
@@ -72,6 +72,8 @@ after execution. A requested hard bound must never silently become an estimate.
 Missing optional valuation is unavailable, not zero, and is not by itself an
 execution blocker. Protocol-critical quotes and venue rules still need their
 required evidence.
+
+Before execution, state the material terms in chat as relevant: amounts, destinations, outcome bounds, fees and fee caps, uncapped venue fee risks, and the approval or action deadline. Do this also under Yolo; do not add a separate confirmation when the human’s intent is clear. Distinguish enforced bounds from estimates and post-execution checks.
 
 The agent orchestrates the workflow and lets the broker manage required authority.
 Request each logical action under its native economic terms. A compound action may

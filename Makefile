@@ -104,6 +104,8 @@ test-native-approval:
 	  cargo test --locked -p gofin-broker --lib native_spot_order_previews_preserve_material_terms_through_approval && \
 	  cargo test --locked -p gofin-broker --test cctp_lifecycle compound_cctp_native_review_covers_all_stages_once -- --exact && \
 	  cargo test --locked -p gofin-broker --test cctp_lifecycle expired_action_reauthorizes_remaining_mint_without_replaying_source -- --exact && \
+	  cargo test --locked -p gofin-broker --test cctp_lifecycle failed_compound_mint_requires_fresh_approval_and_preserves_burn -- --exact && \
+	  cargo test --locked -p gofin-broker --test base_canonical_lifecycle failed_compound_base_finalize_reauthorizes_only_remaining_stage -- --exact && \
 	  cargo test --locked -p gofin-broker --test cctp_lifecycle expired_unapproved_cctp_revises_deadline_on_original_action_once -- --exact && \
 	  cargo test --locked -p gofin-ethereum --lib wallet_approval_native_review_identifies_the_granting_wallet; \
 	else \

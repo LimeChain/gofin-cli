@@ -3335,7 +3335,7 @@ async fn reconcile_exchange_order(
         event_digests,
         position_orders: vec![],
     };
-    let evidence = json!({"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"allFillsSettled":all_fills_settled,"withinAuthorizedBounds":within_bounds});
+    let evidence = json!({"outcome_live_order":matches!(status_text.as_str(), "open" | "active"),"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"allFillsSettled":all_fills_settled,"withinAuthorizedBounds":within_bounds});
     let mut verified = None;
     if !effects.is_empty() || status.terminal() {
         let mut bundle = VerifiedEffects {
@@ -5424,7 +5424,7 @@ async fn reconcile_international_authoritative(
         event_digests,
         position_orders: vec![],
     };
-    let evidence = json!({"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"withinAuthorizedBounds":within});
+    let evidence = json!({"outcome_live_order":working,"order":order,"reconciledOrderId":order_id,"proofEvents":proof_events,"settlement_progress":progress,"fillCount":fills.len(),"baseTotal":base_total,"quoteTotal":quote_total,"feeTotal":fee_total,"withinAuthorizedBounds":within});
     let mut verified = None;
     if !effects.is_empty() || status.terminal() {
         let mut bundle = VerifiedEffects {

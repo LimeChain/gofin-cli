@@ -1307,6 +1307,20 @@ mod non_dispatch_expiry_tests {
         }
     }
 
+    #[test]
+    fn no_send_proof_records_definitive_nonexecution() {
+        let (_, record, _) = record_fixture("SOLANA_BLOCKHASH_EXPIRED");
+        let proof = verify_not_dispatched(
+            record.submission.as_ref().unwrap(),
+            "SOLANA_BLOCKHASH_EXPIRED",
+            "not sent",
+        )
+        .unwrap();
+        assert_eq!(proof.evidence["outcome_dispatch"], "not_dispatched");
+        assert_eq!(proof.evidence["definitive_nonexecution"], true);
+        assert_eq!(proof.evidence["outcome_replay_safe"], true);
+    }
+
     #[tokio::test]
     async fn verified_not_dispatched_lifetime_expiry_returns_bound_attestation() {
         let (adapter, record, rpc) = record_fixture("SOLANA_BLOCKHASH_EXPIRED");
@@ -3156,7 +3170,7 @@ pub(crate) fn verify_not_dispatched(
     reason_code: &str,
     reason: &str,
 ) -> Result<gofin_domain::VerifiedEffects> {
-    let evidence = json!({"state":"not_dispatched","reason_code":reason_code,"reason":reason,"financial_effects":[]});
+    let evidence = json!({"state":"not_dispatched","outcome_dispatch":"not_dispatched","outcome_replay_safe":true,"definitive_nonexecution":true,"reason_code":reason_code,"reason":reason,"financial_effects":[]});
     let mut verified = gofin_domain::VerifiedEffects {
         evidence_version: 1,
         submission: submission.clone(),

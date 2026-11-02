@@ -2290,6 +2290,128 @@ async fn expired_action_reauthorizes_remaining_mint_without_replaying_source() {
     .await
 }
 
+#[tokio::test]
+async fn failed_compound_mint_requires_fresh_approval_and_preserves_burn() {
+    Box::pin(async {
+        let h = Harness::new();
+        let (id, transfer) = h.start_compound("failed-compound-mint").await;
+        let before = h.state.transfer(&transfer).unwrap().unwrap();
+        let initial_source_balance = h.chain.lock().unwrap().source_balance;
+        let allowance = h.chain.lock().unwrap().allowance;
+        {
+            let mut state = h.chain.lock().unwrap();
+            state.attestation_ready = true;
+            state.revert_next = Some(42161);
+        }
+        let _ = h.continue_compound(&id).await;
+        let failed = h
+            .call(
+                args(&["status", &id, "--json"]),
+                BrokerRequest::Status { id: id.clone() },
+            )
+            .await;
+        assert_eq!(
+            failed["outcome"]["next_action"]["code"], "reauthorize",
+            "{failed}"
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+        // A failed-looking stage without its correlated receipt cannot create
+        // a replacement identity or ask for a new approval.
+        let transfer_before_recovery = h.state.transfer(&transfer).unwrap().unwrap();
+        let parent = h.engine.status(&id, false).await.unwrap();
+        let mut prior = Vec::new();
+        for step in &transfer_before_recovery.steps {
+            if let Some(operation_id) = &step.operation_id {
+                prior.push(h.engine.status(operation_id, false).await.unwrap());
+            }
+        }
+        let failed_stage = prior
+            .iter_mut()
+            .find(|stage| stage.status == Status::Failed)
+            .unwrap();
+        failed_stage.effects = None;
+        let error = h
+            .bridge
+            .prepare_remaining_action(
+                &parent,
+                &failed["input"],
+                &prior,
+                &gofin_domain::PreparationContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert_eq!(
+            h.state.transfer(&transfer).unwrap().unwrap().steps,
+            transfer_before_recovery.steps
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        let token = failed
+            .pointer("/outcome/next_action/continuation_token")
+            .and_then(Value::as_str)
+            .unwrap();
+        let mut input = failed["input"].clone();
+        input["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+        let mut insufficient = input.clone();
+        let destination_cap = insufficient["bounds"]["fee_caps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|cap| cap["asset"]["network"] == "ethereum:42161")
+            .unwrap();
+        destination_cap["maximum"] = json!("29999999999999");
+        let error = h.reauthorization_error(&id, token, insufficient).await;
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "FEE_LIMIT" | "BRIDGE_CUMULATIVE_FEE_LIMIT" | "STAGE_FEE_CAP_EXCEEDED"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.chain.lock().unwrap().broadcasts,
+            BTreeMap::from([(1, 2), (42161, 1)])
+        );
+        let result = h
+            .call(
+                args(&[
+                    "operations",
+                    "reauthorize",
+                    &id,
+                    "--token",
+                    token,
+                    "--input",
+                    &input.to_string(),
+                    "--json",
+                ]),
+                BrokerRequest::ReauthorizeOperation {
+                    id: id.clone(),
+                    token: token.into(),
+                    input,
+                },
+            )
+            .await;
+        assert_eq!(result["reauthorization"], "approved", "{result}");
+        assert_eq!(h.status(&transfer).await["state"], "completed");
+        assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
+        let state = h.chain.lock().unwrap();
+        assert_eq!(state.broadcasts, BTreeMap::from([(1, 2), (42161, 2)]));
+        assert_eq!(state.source_balance, initial_source_balance);
+        assert_eq!(state.allowance, allowance);
+        assert_eq!(state.destination_balance, U256::from(10_000_000));
+        drop(state);
+        let after = h.state.transfer(&transfer).unwrap().unwrap();
+        assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
+        assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
+    })
+    .await
+}
+
 async fn external_mint(h: &Harness) {
     use gofin_evm::EnvelopeSigner;
     let (message, attestation) = h.chain.lock().unwrap().attested().unwrap();

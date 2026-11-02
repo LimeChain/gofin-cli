@@ -13,7 +13,8 @@
     "coinbase-exchange-orders",
     "coinbase-international-orders",
     "hyperliquid-spot",
-    "hyperliquid-perpetual"
+    "hyperliquid-perpetual",
+    "kraken-funding-v1"
   ],
   "evm": [
     "uniswap-api-amm",

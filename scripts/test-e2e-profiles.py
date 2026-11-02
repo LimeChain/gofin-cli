@@ -40,8 +40,8 @@ class Profiles(unittest.TestCase):
         self.assertLess(ci_ids, full_ids)
         self.assertTrue({name for names in self.required.values() for name in names} <= full_ids)
         self.assertEqual({group: len(names) for group, names in self.ci.items()},
-                         {"core": 2, "exchange": 10, "evm": 6, "bridge": 9,
-                          "solana": 3, "papertrade": 2, "outcome": 27})
+                         {"core": 2, "exchange": 11, "evm": 6, "bridge": 9,
+                          "solana": 3, "papertrade": 2, "outcome": 28})
 
     def test_group_and_explicit_selection(self):
         for group, names in self.ci.items():

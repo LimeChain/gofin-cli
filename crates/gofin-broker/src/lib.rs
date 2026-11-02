@@ -1211,8 +1211,7 @@ pub fn annotate_execution_discovery(definition: &mut Definition) {
             "wallet.transfer" => {
                 json!({"mode":"conditional", "supported_when":"EVM wallet selected", "otherwise":"exact_binding"})
             }
-            "swap.execute" | "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
-            | "jupiter.swap" | "kraken.add-order" => {
+            "swap.execute" | "jupiter.swap" | "kraken.add-order" => {
                 json!({"mode":"within_approved_native_terms"})
             }
             "bridge.execute" => {
@@ -4805,8 +4804,8 @@ impl BrokerRuntime {
                 self.engine
                     .operations()?
                     .iter()
-                    .map(|record| self.engine.operation_view_isolated(record))
-                    .collect(),
+                    .map(|record| self.engine.operation_view(record))
+                    .collect::<Result<Vec<_>, _>>()?,
             )),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
@@ -6749,7 +6748,7 @@ mod tests {
                     definition.name.as_str(),
                     "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
                 ) {
-                    assert_eq!(refresh["mode"], "within_approved_native_terms");
+                    assert_eq!(refresh["mode"], "exact_binding");
                     assert_eq!(
                         definition.semantics["authorization"]["terms"]["minimum_output"],
                         if definition.name == "uniswap.swap" {

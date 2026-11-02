@@ -297,7 +297,6 @@ pub(super) fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 fn amendment_scope(prepared: &PreparedOperation) -> Result<Option<(String, BTreeSet<ResourceId>)>> {
     let Some(binding) = prepared.binding.product_get("__gofin_amendment")? else {
         return Ok(None);
@@ -347,7 +346,6 @@ fn amendment_scope(prepared: &PreparedOperation) -> Result<Option<(String, BTree
     Ok(Some((parent_id.unwrap().to_owned(), locks)))
 }
 
-#[cfg(test)]
 #[cfg(test)]
 fn protection_parent_scope(
     prepared: &PreparedOperation,
@@ -563,7 +561,6 @@ fn unpriced(prepared: &PreparedOperation) -> bool {
     })
 }
 
-#[cfg(test)]
 #[cfg(test)]
 fn unpriced_exchange(prepared: &PreparedOperation) -> bool {
     prepared
@@ -1151,7 +1148,6 @@ impl Engine {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 pub(super) fn validate_boundary_candidate_policy(
     prepared: &PreparedOperation,

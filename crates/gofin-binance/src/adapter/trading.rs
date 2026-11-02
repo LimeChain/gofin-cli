@@ -2109,7 +2109,7 @@ impl BinanceProfile {
         if matches!(outcome, "NEW" | "PARTIALLY_FILLED" | "PENDING_CANCEL") {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"clientOrderId":submission.reference,"order":order}),
+                evidence: json!({"clientOrderId":submission.reference,"order":order,"outcome_live_order":true}),
                 verified: None,
             });
         }
@@ -2250,7 +2250,7 @@ impl BinanceProfile {
                 "Fill history does not account for the full terminal order; do not replay it.",
             ));
         }
-        if filled.is_zero() && (!futures || binding["positionBefore"] == "0") {
+        if filled.is_zero() {
             let evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"noFill":true,"outcome_replay_safe":true});
             return Ok(Reconciliation {
                 status: Status::Failed,
@@ -2317,9 +2317,11 @@ impl BinanceProfile {
                 -BigInt::from(base_total.clone())
             };
             if post.clone() - prior.clone() != expected_change {
-                return Ok(unknown(
-                    "Derivative exposure does not match the exact proven fills.",
-                ));
+                return Ok(Reconciliation {
+                    status: Status::Unknown,
+                    evidence: json!({"reason":"The correlated fills are complete, but the aggregate derivative position changed by a different amount; the difference may reflect concurrent activity and prevents a reliable position anchor.", "clientOrderId":submission.reference, "orderId":id.as_str(), "venueOutcome":outcome, "executedQty":order["executedQty"], "cumulativeQuote":order["cumQuote"], "tradeIds":seen, "positionBeforeAtoms":prior.to_string(), "positionAfterAtoms":post.to_string(), "expectedChangeAtoms":expected_change.to_string()}),
+                    verified: None,
+                });
             }
             let delta = post.abs() - prior.abs();
             let end = Utc::now().timestamp_millis();

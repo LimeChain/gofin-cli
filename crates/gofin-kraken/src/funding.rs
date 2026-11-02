@@ -3164,7 +3164,11 @@ impl KrakenProfile {
                             atoms: charged.clone(),
                         },
                         category: "kraken_failed_withdrawal_fee".into(),
-                        treatment: CostTreatment::IncludedInDebit,
+                        treatment: if b.fee_asset == b.asset {
+                            CostTreatment::IncludedInDebit
+                        } else {
+                            CostTreatment::AdditionalDebit
+                        },
                     },
                 ];
                 return crate::unresolved_consumption::proven_cost_overrun(
@@ -3194,7 +3198,11 @@ impl KrakenProfile {
                             atoms: charged.clone(),
                         },
                         category: "kraken_failed_withdrawal_fee".into(),
-                        treatment: CostTreatment::IncludedInDebit,
+                        treatment: if b.fee_asset == b.asset {
+                            CostTreatment::IncludedInDebit
+                        } else {
+                            CostTreatment::AdditionalDebit
+                        },
                     },
                 ]
             };

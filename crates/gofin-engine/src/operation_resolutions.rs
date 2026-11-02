@@ -12,15 +12,6 @@ fn unavailable(message: &str) -> GoFinError {
 }
 
 impl Engine {
-    /// Isolate corrupt auxiliary history to this operation in collection views.
-    pub fn operation_view_isolated(&self, record: &OperationRecord) -> Value {
-        self.operation_view(record).unwrap_or_else(|_| {
-            let mut value = to_value(record).unwrap_or_else(|_| json!({"id":record.id,"operation":record.operation}));
-            value["outcome"] = json!({"version":1,"phase":"unconfirmed","dispatch":"uncertain","result":"unknown","reporting":"unavailable","replay_safe":false,"attention":{"kind":"none"},"next_action":{"code":"wait_and_check","message":"Some history is unreadable; observe this original operation without replay."},"observed_at":record.updated_at});
-            value["history_incomplete"] = json!(true);
-            value
-        })
-    }
     pub fn operation_view(&self, record: &OperationRecord) -> Result<Value> {
         let mut value = to_value(record)?;
         let (observations, incomplete_observations) = self
@@ -82,7 +73,12 @@ impl Engine {
                     next.reporting = facts.reporting.clone();
                 }
                 if matches!(next.attention, Attention::None)
-                    && !matches!(facts.attention, Attention::None)
+                    && (matches!(facts.attention, Attention::Discrepancy { .. })
+                        || (matches!(facts.attention, Attention::ActionRequired { .. })
+                            && !matches!(
+                                observation.source.as_str(),
+                                "adapter" | "adapter_live_order" | "bridge_destination"
+                            )))
                 {
                     next.attention = facts.attention.clone();
                 }
@@ -174,6 +170,7 @@ impl Engine {
             facts.dispatch = gofin_domain::outcome::Dispatch::Dispatched;
         }
         if record.submission.is_none()
+            && !(record.operation == "bridge.execute" && record.input.get("intent").is_some())
             && matches!(
                 record.status,
                 Status::Failed | Status::Rejected | Status::Expired | Status::Cancelled
@@ -244,11 +241,12 @@ impl Engine {
                         )
                     })
                 });
+        let horizon_anchor = observation_horizon_anchor(&observations, &facts, &submitted_at);
         let heuristic_horizon = adapter_horizon
             .filter(|_| has_dispatch)
             .and_then(|h| chrono::Duration::from_std(h).ok())
             .and_then(|h| {
-                parse_time(&submitted_at)
+                parse_time(horizon_anchor)
                     .ok()
                     .and_then(|at| at.checked_add_signed(h))
             })
@@ -286,10 +284,34 @@ impl Engine {
             )
         {
             // Polling guidance is advisory; it is not evidence of nonexecution.
-            facts.next_check_after = Some(record.updated_at.clone());
+            let now = self.clock.now();
+            let next = (now.timestamp() / 30 + 2) * 30;
+            facts.next_check_after =
+                chrono::DateTime::from_timestamp(next, 0).map(|at| at.to_rfc3339());
         }
         let horizon_passed = explicit_horizon || heuristic_horizon;
         let mut projected = facts.project(horizon_passed, approval_valid);
+        // A correlated verified terminal receipt with no outstanding transfer is
+        // final even when it proves effects that make replay unsafe.
+        if projected.phase == gofin_domain::outcome::Phase::Failed
+            && !projected.replay_safe
+            && matches!(
+                projected.transfer,
+                Some(
+                    gofin_domain::outcome::TransferState::Credited
+                        | gofin_domain::outcome::TransferState::Available
+                        | gofin_domain::outcome::TransferState::ReturnedToSource
+                )
+            )
+            && record.effects.as_ref().is_some_and(|proof| {
+                record.submission.as_ref() == Some(&proof.submission)
+                    && verified_effect_digest(proof).ok().as_deref()
+                        == Some(proof.proof_digest.as_str())
+            })
+        {
+            projected.next_action.code = "none".into();
+            projected.next_action.message = "No further action is needed.".into();
+        }
         if incomplete_observations {
             projected.replay_safe = false;
             projected.retry_approval = None;
@@ -388,7 +410,13 @@ impl Engine {
                 )
             });
         let failed_current_authority = attempts.iter().any(|attempt| {
-            attempt.state == "failed"
+            (attempt.state == "failed"
+                || (attempt.state == "rejected"
+                    && attempt
+                        .operation_id
+                        .as_deref()
+                        .and_then(|id| self.load_record(id).ok())
+                        .is_some_and(|r| r.submission.is_some())))
                 && admission
                     .approval
                     .as_ref()
@@ -420,7 +448,7 @@ impl Engine {
                         | gofin_domain::outcome::TransferState::ReturnedToSource
                 )
             );
-        if projected.next_action.code != "act_at_venue"
+        if (projected.next_action.code != "act_at_venue" || (compound && failed_current_authority))
             && !incomplete_observations
             && ((has_passive_continuation
                 && (!approval_valid
@@ -451,7 +479,7 @@ impl Engine {
             };
         }
         let reauthorized_failed = attempts.last().is_some_and(|attempt| {
-            attempt.state == "failed"
+            matches!(attempt.state.as_str(), "failed" | "rejected")
                 && admission
                     .approval
                     .as_ref()
@@ -712,7 +740,7 @@ impl Engine {
             if is_internal_attempt {
                 continue;
             }
-            let view = self.operation_view_isolated(&record);
+            let view = self.operation_view(&record)?;
             let phase = view.pointer("/outcome/phase").and_then(Value::as_str);
             let transfer_open = matches!(
                 view.pointer("/outcome/transfer").and_then(Value::as_str),
@@ -811,6 +839,31 @@ impl Engine {
         let result =
             self.apply_reconciliation_with_baselines(record, reconciliation, vec![], expected)?;
         self.operation_view(&result)
+    }
+}
+
+// Only an affirmative, correlated live-order observation renews the horizon.
+// Generic pending polls may merely report a missing receipt.
+fn observation_horizon_anchor<'a>(
+    observations: &'a [gofin_domain::outcome::OutcomeObservation],
+    facts: &gofin_domain::outcome::OutcomeFacts,
+    submitted_at: &'a str,
+) -> &'a str {
+    if facts.dispatch == gofin_domain::outcome::Dispatch::Dispatched
+        && matches!(
+            facts.result,
+            gofin_domain::outcome::OutcomeResult::Pending
+                | gofin_domain::outcome::OutcomeResult::Partial
+        )
+    {
+        observations
+            .iter()
+            .rev()
+            .find(|observation| observation.source == "adapter_live_order")
+            .map(|observation| observation.facts.observed_at.as_str())
+            .unwrap_or(submitted_at)
+    } else {
+        submitted_at
     }
 }
 
@@ -1579,6 +1632,99 @@ mod outcome_projection_tests {
         }
     }
     #[test]
+    fn ambiguous_polls_do_not_extend_the_observation_horizon() {
+        use gofin_domain::outcome::{Dispatch, OutcomeObservation, OutcomeResult};
+        let record: OperationRecord = serde_json::from_value(json!({"id":"order","request_id":"r","fingerprint":"f","fingerprint_version":1,"operation":"test.order","input":{},"status":"pending","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-20T00:00:00Z","preview":null,"approval":null,"submission":null,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null})).unwrap();
+        let mut facts = outcome_facts(&record);
+        facts.dispatch = Dispatch::Dispatched;
+        facts.result = OutcomeResult::Pending;
+        let start = "2026-01-01T00:00:00Z";
+        let observations = vec![OutcomeObservation {
+            facts: facts.clone(),
+            source: "adapter".into(),
+        }];
+        assert_eq!(
+            observation_horizon_anchor(&observations, &facts, start),
+            start
+        );
+        let mut live = facts.clone();
+        live.observed_at = "2026-01-10T00:00:00Z".into();
+        let observations = vec![
+            OutcomeObservation {
+                facts: live.clone(),
+                source: "adapter_live_order".into(),
+            },
+            OutcomeObservation {
+                facts,
+                source: "adapter".into(),
+            },
+        ];
+        assert_eq!(
+            observation_horizon_anchor(&observations, &live, start),
+            live.observed_at
+        );
+        live.result = OutcomeResult::Unknown;
+        assert_eq!(
+            observation_horizon_anchor(&observations, &live, start),
+            start
+        );
+    }
+    #[test]
+    fn later_adapter_observation_clears_venue_action_required() {
+        use gofin_domain::outcome::{Attention, Dispatch, OutcomeFacts, OutcomeResult, Reporting};
+        let record: OperationRecord = serde_json::from_value(json!({
+            "id":"attention", "request_id":"r", "fingerprint":"f", "fingerprint_version":1,
+            "operation":"test.withdraw", "input":{}, "status":"pending", "created_at":now(),
+            "updated_at":now(), "preview":null, "approval":null, "submission":null,
+            "effects":null, "last_reconciliation_evidence":null, "error":null, "run_id":null
+        }))
+        .unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .create_request(
+                &record.id,
+                &record.request_id,
+                &record.fingerprint,
+                &record.operation,
+                None,
+                "pending",
+                &to_value(&record).unwrap(),
+                &record.created_at,
+            )
+            .unwrap();
+        let mut facts = OutcomeFacts {
+            dispatch: Dispatch::Uncertain,
+            result: OutcomeResult::Pending,
+            transfer: None,
+            attention: Attention::ActionRequired {
+                venue: "venue".into(),
+                reason: "confirm".into(),
+                where_to_act: "email".into(),
+            },
+            reporting: Reporting::Unavailable,
+            duplicate_execution_excluded: false,
+            next_check_after: None,
+            observed_at: now(),
+        };
+        store
+            .append_outcome_observation(&record.id, &facts, "adapter")
+            .unwrap();
+        facts.attention = Attention::None;
+        store
+            .append_outcome_observation(&record.id, &facts, "adapter")
+            .unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(NoApproval),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let outcome = &engine.operation_view(&record).unwrap()["outcome"];
+        assert_eq!(outcome["attention"]["kind"], "none");
+        assert_eq!(outcome["phase"], "in_progress");
+    }
+    #[test]
     fn persisted_engine_discrepancy_is_recomputed_without_erasing_proof() {
         use gofin_domain::outcome::{Attention, Dispatch, OutcomeFacts, OutcomeResult, Reporting};
         let asset = json!({"network":"synthetic","reference":"USD","decimals":6});
@@ -2060,14 +2206,23 @@ mod outcome_projection_tests {
             );
             assert_eq!(
                 engine.operation_view(&changed).unwrap()["outcome"]["transfer"],
-                Value::Null
+                if operation == "hyperliquid.account.withdraw" {
+                    json!("source_pending")
+                } else {
+                    Value::Null
+                },
+                "{operation}: {path}"
             );
         }
         record.effects.as_mut().unwrap().submission.reference = "different".into();
         assert!(!verified_venue_withdrawal_received(&record));
         assert_eq!(
             engine.operation_view(&record).unwrap()["outcome"]["transfer"],
-            Value::Null
+            if operation == "hyperliquid.account.withdraw" {
+                json!("source_pending")
+            } else {
+                Value::Null
+            }
         );
     }
     #[test]

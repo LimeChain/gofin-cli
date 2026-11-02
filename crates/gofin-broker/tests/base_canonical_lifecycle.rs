@@ -848,7 +848,7 @@ impl Harness {
                     .asset_id(),
                     kind: FeeKind::Gas,
                     maximum: Quantity::new("10000000000000000").unwrap(),
-                    maximum_usd_micros: Some(20_000_000),
+                    maximum_usd_micros: None,
                 })
                 .collect(),
             ..Default::default()
@@ -1212,6 +1212,106 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn failed_compound_base_finalize_reauthorizes_only_remaining_stage() {
+    let h = Harness::new();
+    let mut bounds = h.bounds();
+    for cap in &mut bounds.fee_caps {
+        cap.maximum_usd_micros = None;
+    }
+    bounds.input = Some(gofin_bridge::AmountInterval {
+        minimum: Quantity::from_u64(1_000_000_000_000),
+        maximum: Quantity::from_u64(1_000_000_000_000),
+    });
+    bounds.maximum_source_debit = Some(Quantity::from_u64(1_000_000_000_000));
+    bounds.minimum_net_receipt = Some(
+        gofin_bridge::EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .amount(Quantity::from_u64(1_000_000_000_000)),
+    );
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":{"minimum":"1000000000000","maximum":"1000000000000"}},"allowedProviders":["base_canonical"],"actionDeadline":chrono::Utc::now().timestamp() as u64 + 600,"bounds":bounds});
+    let request = OperationRequest {
+        request_id: "base-failed-compound-final".into(),
+        operation: "bridge.execute".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let invocation =
+        gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(30));
+    let action = invocation
+        .scope(Box::pin(h.engine.execute(request)))
+        .await
+        .unwrap();
+    let transfer_id = action.preview.as_ref().unwrap().binding["transfer_id"]
+        .as_str()
+        .unwrap();
+    let before = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        before.steps[0].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    assert_eq!(
+        before.steps[1].state,
+        gofin_domain::BridgeStepState::Settled
+    );
+    {
+        let mut state = h.chain.lock().unwrap();
+        state.mature = true;
+        state.revert_next = Some(1);
+    }
+    let view = h.engine.operation_view(&action).unwrap();
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    let _ = invocation
+        .scope(Box::pin(h.engine.continue_operation(&action.id, token)))
+        .await
+        .unwrap();
+    let failed = h.engine.status(&action.id, true).await.unwrap();
+    let view = h.engine.operation_view(&failed).unwrap();
+    assert_eq!(
+        view["outcome"]["next_action"]["code"], "reauthorize",
+        "{view}"
+    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(8453, 1), (1, 2)])
+    );
+    let token = view
+        .pointer("/outcome/next_action/continuation_token")
+        .and_then(Value::as_str)
+        .unwrap();
+    let mut revised = input;
+    revised["actionDeadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+    let result = invocation
+        .scope(Box::pin(
+            h.engine.reauthorize_operation(&action.id, token, revised),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result["reauthorization"], "approved", "{result}");
+    let _ = h.engine.status(&action.id, true).await.unwrap();
+    let after = h.state.transfer(transfer_id).unwrap().unwrap();
+    assert_eq!(
+        after.state,
+        gofin_domain::BridgeTransferState::Completed,
+        "result={result} transfer={after:?}"
+    );
+    assert_eq!(after.steps[0].operation_id, before.steps[0].operation_id);
+    assert_eq!(after.steps[1].operation_id, before.steps[1].operation_id);
+    assert!(!after.settlement_proofs.is_empty());
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(8453, 1), (1, 3)])
+    );
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

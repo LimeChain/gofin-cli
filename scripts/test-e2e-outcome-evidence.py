@@ -68,6 +68,15 @@ class OutcomeEvidenceTests(unittest.TestCase):
             with self.subTest(probes=probes), self.assertRaises(ValueError):
                 self.check(admission_probes=probes)
 
+    def test_aggregate_cannot_hide_missing_or_blocked_component_probes(self):
+        good = self.check()
+        for changes in [dict(admission_probes=[]), dict(blocked_unrelated_activity=True),
+                        dict(intervention_count=1), dict(remaining_external_uncertainty=None)]:
+            bad = dict(good, scenario="outcome.a2.venue", **changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.check(components=[good, bad])
+        self.check(components=[dict(good, scenario="outcome.a2.venue")])
+
     def test_aggregation_preserves_counts_uncertainty_and_rejects_missing_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / name for name in ("a.json", "b.json")]

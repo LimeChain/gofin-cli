@@ -615,12 +615,11 @@ either deployment.
 
 Wallet authority includes the reviewed EVM networks and Solana mainnet-beta.
 Base (`8453`) can provide solver identity evidence; Relay Chain (`537713`) is an
-observer-only settlement network and cannot sign a transfer. One grant binds
-one persisted transfer and its finite approval,
+observer-only settlement network and cannot sign a transfer. One compound action binds one persisted transfer and its finite approval,
 allowance-reset and deposit steps. Each step remains a separate immutable
 operation. A quote refresh can replace only an unsubmitted quote inside the
 approved identities, amount interval, receipt floor and caps; it does not renew
-grant expiry. Preparing an expired unsubmitted source step performs one bounded
+the action deadline. Preparing an expired unsubmitted source step performs one bounded
 refresh through that same persisted-transfer path before constructing the candidate.
 Settled allowance children remain settled; failed refreshes preserve the saved
 transfer and do not reset engine candidate retry accounting. A source deposit
@@ -1056,8 +1055,8 @@ though they were cumulative snapshots.
 ## Independent action clocks
 
 The native biometric challenge lasts at most 90 seconds. A newly validated
-standalone financial approval grants 30 minutes from its approval timestamp,
-independently of candidate expiry. The persisted execution deadline is not
+standalone Touch ID financial approval grants 30 minutes from its approval timestamp,
+independently of candidate expiry. Development approvals retain their own expiry. The persisted execution deadline is not
 recomputed during observation, continuation or restart; historical approvals
 retain their original expiry. Nonce, balance, allowance, simulation and final
 admission checks remain required after approval. Compound actions

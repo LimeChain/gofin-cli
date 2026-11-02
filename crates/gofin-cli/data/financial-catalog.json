@@ -12493,8 +12493,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -12503,6 +12501,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -16191,8 +16199,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -16201,6 +16207,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -21298,8 +21314,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -21308,6 +21322,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -55092,8 +55116,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -55102,6 +55124,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -59223,8 +59255,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -59233,6 +59263,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -63253,8 +63293,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -63263,6 +63301,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -66943,8 +66991,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -66953,6 +66999,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -70710,8 +70766,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -70720,6 +70774,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -74528,8 +74592,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -74538,6 +74600,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -78209,8 +78281,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -78219,6 +78289,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -81934,8 +82014,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -81944,6 +82022,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -85671,8 +85759,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -85681,6 +85767,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -89357,8 +89453,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -89367,6 +89461,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -93045,8 +93149,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -93055,6 +93157,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -96767,8 +96879,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -96777,6 +96887,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -100878,8 +100998,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -100888,6 +101006,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -104699,8 +104827,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -104709,6 +104835,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -108977,8 +109113,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -108987,6 +109121,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -119108,8 +119252,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -119118,6 +119260,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -122841,8 +122993,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -122851,6 +123001,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -126829,8 +126989,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -126839,6 +126997,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -130509,8 +130677,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -130519,6 +130685,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -134223,8 +134399,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -134233,6 +134407,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -138426,8 +138610,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -138436,6 +138618,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -145887,8 +146079,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -145897,6 +146087,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -149690,8 +149890,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -149700,6 +149898,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -153755,8 +153963,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -153765,6 +153971,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -157452,8 +157668,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -157462,6 +157676,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -161374,8 +161598,6 @@
             {
               "enum": [
                 "touch_id",
-                "bounded_grant",
-                "named_plan",
                 "yolo",
                 "development"
               ],
@@ -161384,6 +161606,16 @@
             {
               "const": "sudo",
               "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            },
+            {
+              "const": "bounded_grant",
+              "description": "Historical audit value; cannot authorize new financial work.",
+              "type": "string"
+            },
+            {
+              "const": "named_plan",
+              "description": "Historical audit value; cannot authorize new financial work.",
               "type": "string"
             }
           ]
@@ -177980,7 +178212,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -181148,7 +181381,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -183523,7 +183757,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",
@@ -188179,7 +188414,8 @@
       "authorization": {
         "candidate": "Every exact payload must remain within the original approved native terms",
         "candidate_refresh": {
-          "mode": "within_approved_native_terms"
+          "expired_candidate": "Changed payload requires new approval",
+          "mode": "exact_binding"
         },
         "concrete_terms": "preview.review.terms labels each concrete term; provider selection can change enforcement",
         "continuation": "Use the original operation ID and broker-issued token; successful stages never repeat",

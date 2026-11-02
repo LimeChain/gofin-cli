@@ -5524,11 +5524,36 @@ impl Adapter for BridgeAdapter {
         let transfer_id = original_preview.binding["transfer_id"]
             .as_str()
             .ok_or_else(internal_error)?;
-        let transfer = self
+        let mut transfer = self
             .state()?
             .transfer(transfer_id)
             .map_err(store_error)?
             .ok_or_else(internal_error)?;
+        // Only a terminal, correlated receipt for the exact failed destination
+        // stage permits planning a new recovery identity. Never replay the
+        // original submission or create a new source step.
+        let failed_stage = |step: &gofin_domain::BridgeStepLink| {
+            step.kind.is_destination_stage()
+                && step.state == BridgeStepState::NeedsAttention
+                && completed.iter().any(|stage| {
+                    stage.status == Status::Failed
+                        && step.operation_id.as_deref() == Some(stage.id.as_str())
+                        && stage.effects.as_ref().is_some_and(|proof| {
+                            stage.submission.as_ref() == Some(&proof.submission)
+                                && gofin_domain::verified_effect_digest(proof).ok().as_deref()
+                                    == Some(proof.proof_digest.as_str())
+                        })
+                })
+        };
+        if transfer.steps.iter().any(failed_stage) {
+            self.bridge_recovery(&json!({"transferId":transfer_id}))
+                .await?;
+            transfer = self
+                .state()?
+                .transfer(transfer_id)
+                .map_err(store_error)?
+                .ok_or_else(internal_error)?;
+        }
         if !transfer
             .steps
             .iter()
@@ -5539,24 +5564,22 @@ impl Adapter for BridgeAdapter {
             ));
         }
         if transfer.steps.iter().any(|step| {
-            matches!(
-                step.state,
-                BridgeStepState::Submitted | BridgeStepState::NeedsAttention
-            )
+            step.state == BridgeStepState::Submitted
+                || (step.state == BridgeStepState::NeedsAttention && !failed_stage(step))
         }) {
             return Err(GoFinError::validation(
                 "Observe the submitted bridge stage before revising its remaining scope.",
             ));
         }
         for stage in completed {
-            if stage.status != Status::Completed
-                || !transfer.steps.iter().any(|step| {
-                    step.state == BridgeStepState::Settled
-                        && step.operation_id.as_deref() == Some(stage.id.as_str())
-                })
-            {
+            if !transfer.steps.iter().any(|step| {
+                step.operation_id.as_deref() == Some(stage.id.as_str())
+                    && ((stage.status == Status::Completed
+                        && step.state == BridgeStepState::Settled)
+                        || (stage.status == Status::Failed && failed_stage(step)))
+            }) {
                 return Err(GoFinError::validation(
-                    "Completed stage identity differs from the persisted bridge.",
+                    "Prior stage identity or verified terminal evidence differs from the persisted bridge.",
                 ));
             }
         }
@@ -8949,6 +8972,18 @@ fn bridge_timing_guidance(
     })
 }
 
+fn bridge_candidate_violation(
+    message: &str,
+    violation: gofin_domain::boundaries::BoundaryViolation,
+) -> GoFinError {
+    let mut error = gofin_domain::boundaries::violation_error(message, violation);
+    error.code = "CANDIDATE_OUT_OF_SCOPE".into();
+    error.stage = "submission".into();
+    error.message = format!("{message} Nothing was submitted by this candidate.");
+    error.next_action = "Request a fresh candidate within the current approval; review changed terms only if no in-scope candidate exists. Preserve previously submitted stages.".into();
+    error
+}
+
 fn validate_bridge_execute_candidate(
     spec: &gofin_domain::boundaries::BoundarySpec,
     prepared: &PreparedOperation,
@@ -9041,14 +9076,14 @@ fn validate_bridge_execute_candidate(
     let selected_bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
         .map_err(|_| GoFinError::validation("Nominated bridge bounds are malformed."))?;
     if !candidate_in_scope || selected_bounds != bounds {
-        return Err(gofin_domain::boundaries::violation_error(
+        return Err(bridge_candidate_violation(
             "Nominated bridge quote changes the approved intent or exceeds its finite bounds.",
             gofin_domain::boundaries::BoundaryViolation {
                 constraint: "fixed_scope".into(),
                 approved_bound: spec.fixed.clone(),
                 candidate_value: prepared.binding.clone(),
                 evidence_time: Some(prepared.observed_at.clone()),
-                reauthorization_required: true,
+                reauthorization_required: false,
                 reconciliation_required: false,
             },
         ));
@@ -9073,15 +9108,15 @@ fn validate_bridge_boundary(
             })
         })
     {
-        return Err(gofin_domain::boundaries::violation_error(
+        return Err(bridge_candidate_violation(
             "Bridge candidate changes fixed transfer or route identity.",
             gofin_domain::boundaries::BoundaryViolation {
                 constraint: "fixed_scope".into(),
                 approved_bound: spec.fixed.clone(),
                 candidate_value: prepared.binding.clone(),
                 evidence_time: Some(prepared.observed_at.clone()),
-                reauthorization_required: true,
-                reconciliation_required: true,
+                reauthorization_required: false,
+                reconciliation_required: false,
             },
         ));
     }
@@ -12573,7 +12608,21 @@ mod tests {
 
         let mut changed_provider = prepared.clone();
         changed_provider.binding["quote"]["provider"] = json!("arbitrum_canonical");
-        assert!(validate_bridge_execute_candidate(&spec, &changed_provider).is_err());
+        let rejected = validate_bridge_execute_candidate(&spec, &changed_provider).unwrap_err();
+        assert_eq!(rejected.code, "CANDIDATE_OUT_OF_SCOPE");
+        assert!(
+            rejected
+                .message
+                .contains("Nothing was submitted by this candidate")
+        );
+        assert_eq!(
+            rejected.details.as_ref().unwrap()["boundary_violation"]["reauthorization_required"],
+            false
+        );
+        assert_eq!(
+            rejected.details.as_ref().unwrap()["boundary_violation"]["reconciliation_required"],
+            false
+        );
 
         let mut changed_source_asset = prepared.clone();
         changed_source_asset.binding["quote"]["intent"]["source"]["token"] =

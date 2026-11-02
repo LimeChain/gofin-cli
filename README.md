@@ -126,8 +126,7 @@ Provider setup is covered in [connections and usage](docs/usage.md#connections-a
 - **Protected setup and administration:** macOS 13+ on Apple Silicon or Intel,
   administrator access, and Apple Terminal or a human-operated macOS system
   OpenSSH session. SSH over Tailscale is supported; the client may use any OS.
-- **Financial execution:** fresh Touch ID by default, existing bounded authority,
-  or explicitly enabled protected Yolo.
+- **Financial execution:** per-action Touch ID by default or explicitly enabled protected Yolo.
 - **Prebuilt runtime:** no Rust, Swift, Node.js or npm required.
 - **Source builds:** the pinned Rust toolchain; macOS native builds also need
   Apple’s Command Line Tools and Swift. See the [contributor guide](CONTRIBUTING.md).

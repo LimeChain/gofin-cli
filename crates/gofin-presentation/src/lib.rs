@@ -1406,13 +1406,7 @@ fn render_outcome(value: &Value) -> Option<String> {
     let headline = match phase {
         "done" if outcome["result"] == "cancelled" => "Cancelled",
         "done" => "Executed",
-        _ if matches!(
-            outcome["dispatch"].as_str(),
-            Some("not_dispatched" | "rejected")
-        ) =>
-        {
-            "Not submitted"
-        }
+        _ if matches!(outcome["dispatch"].as_str(), Some("not_dispatched")) => "Not submitted",
         "failed" => "Failed",
         "needs_you" => "Needs your attention",
         "unconfirmed" => "Unconfirmed",
@@ -1424,7 +1418,15 @@ fn render_outcome(value: &Value) -> Option<String> {
         outcome["dispatch"].as_str(),
         Some("not_dispatched" | "rejected")
     ) {
-        line(&mut output, 0, "Nothing was submitted.");
+        line(
+            &mut output,
+            0,
+            if outcome["dispatch"] == "rejected" {
+                "Nothing executed."
+            } else {
+                "Nothing was submitted."
+            },
+        );
         if let Some(reason) = value["error"]["message"].as_str() {
             line(&mut output, 0, &safe_text(reason));
         }
@@ -2914,10 +2916,10 @@ mod tests {
                 "replay_safe":true,"retry_approval":"covered","attention":{"kind":"none"},
                 "next_action":{"code":"continue","message":"Continue the original action."}}});
         let output = render_human("status", &value, false);
-        assert!(output.contains("Nothing was submitted"));
+        assert!(output.contains("Nothing executed"));
         assert!(output.contains("Fresh quote exceeds the approved fee cap"));
         assert!(output.contains("current approval"));
-        assert!(!output.contains(": Failed"));
+        assert!(output.contains(": Failed"));
         value["outcome"]["retry_approval"] = json!("required");
         assert!(!render_human("status", &value, false).contains("current approval"));
         value["outcome"]["dispatch"] = json!("uncertain");

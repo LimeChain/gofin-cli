@@ -20,7 +20,10 @@ pub(super) fn validate_parent_stage(
     if adapter.is_compound_action(parent) {
         adapter.validate_stage_candidate(parent, stage_id, candidate)
     } else if stage_id == "standalone" {
-        adapter.validate_approved_candidate(parent, candidate)
+        adapter.validate_approved_candidate(
+            &strip_plan_metadata(parent),
+            &strip_plan_metadata(candidate),
+        )
     } else {
         Err(GoFinError::validation(
             "Invalid standalone attempt identity.",
@@ -356,7 +359,9 @@ impl Engine {
         }
         let original = self.approved_action(&action)?;
         let context = PreparationContext::default();
-        let candidate = if adapter.is_compound_action(&original) {
+        let linked = self.amendment_preparation_context(&input)?;
+        let compound_context = self.compound_preparation_context(&input)?;
+        let mut candidate = if adapter.is_compound_action(&original) {
             bounded_evidence(
                 &action.operation,
                 "remaining action preparation",
@@ -369,10 +374,38 @@ impl Engine {
                 &action.operation,
                 "reauthorization preparation",
                 PREFLIGHT_TIMEOUT,
-                adapter.prepare_with_context(&action.operation, &input, &context),
+                async {
+                    if let Some(linked_compound) = &compound_context {
+                        adapter
+                            .prepare_with_compound_context(
+                                &action.operation,
+                                &input,
+                                &context,
+                                linked_compound,
+                            )
+                            .await
+                    } else {
+                        adapter
+                            .prepare_with_linked_context(
+                                &action.operation,
+                                &input,
+                                &context,
+                                &linked,
+                            )
+                            .await
+                    }
+                },
             )
             .await?
         };
+        stamp_mutation_baselines(&mut candidate, &linked, compound_context.as_ref())?;
+        let mut candidate_record = action.clone();
+        candidate_record.preview = Some(candidate.clone());
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_mutation_candidate(&action.id, &to_value(&candidate_record)?)
+            .map_err(map_store)?;
         validate_prepared(&candidate, &action.operation, self.clock.now())?;
         let mut no_new_costs = candidate.clone();
         no_new_costs.intent.maximum_costs.clear();
@@ -1175,7 +1208,7 @@ impl Engine {
             &candidate.operation,
             "stage nonce observation",
             PREFLIGHT_TIMEOUT,
-            adapter.evm_nonce_scope(&candidate),
+            adapter.evm_nonce_scope(&strip_plan_metadata(&candidate)),
         )
         .await?
         {
@@ -1187,7 +1220,8 @@ impl Engine {
                 .claim_evm_nonce(&scope, &child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
-            nonce_candidate = adapter.apply_claimed_evm_nonce(&candidate, nonce)?;
+            nonce_candidate =
+                adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
             validate_parent_stage(
                 parent_adapter.as_ref(),
                 &parent,
@@ -1199,7 +1233,7 @@ impl Engine {
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&nonce_candidate),
+            adapter.revalidate(&strip_plan_metadata(&nonce_candidate)),
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &current)?;
@@ -1216,6 +1250,7 @@ impl Engine {
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &finalized)?;
         validate_stage_fee_caps(&parent, &finalized, &prior)?;
         candidate = finalized;
+        carry_mutation_baselines(&parent, &mut candidate)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
         child.preview = Some(candidate.clone());
         child.updated_at = self.clock.now().to_rfc3339();
@@ -1294,8 +1329,10 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated =
-            gofin_domain::RevalidatedOperation::after_revalidation(candidate, self.clock.clone())?;
+        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+            strip_plan_metadata(&candidate),
+            self.clock.clone(),
+        )?;
         let result = adapter
             .submit_revalidated(&validated, journal.clone())
             .await;
@@ -1406,7 +1443,7 @@ impl Engine {
             &candidate.operation,
             "stage nonce observation",
             PREFLIGHT_TIMEOUT,
-            adapter.evm_nonce_scope(&candidate),
+            adapter.evm_nonce_scope(&strip_plan_metadata(&candidate)),
         )
         .await?
         {
@@ -1418,19 +1455,19 @@ impl Engine {
                 .claim_evm_nonce(&scope, child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
-            candidate = adapter.apply_claimed_evm_nonce(&candidate, nonce)?;
+            candidate = adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
         }
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&candidate),
+            adapter.revalidate(&strip_plan_metadata(&candidate)),
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage.stage_id, &current)?;
         validate_stage_fee_caps(&parent, &current, &prior)?;
         validate_prepared(&current, &current.operation, self.clock.now())?;
-        let finalized = bounded_evidence(
+        let mut finalized = bounded_evidence(
             &current.operation,
             "stage finalization",
             PREFLIGHT_TIMEOUT,
@@ -1446,6 +1483,7 @@ impl Engine {
         )?;
         validate_stage_fee_caps(&parent, &finalized, &prior)?;
         gofin_domain::execution_progress::ensure_invocation_active()?;
+        carry_mutation_baselines(&parent, &mut finalized)?;
         child.preview = Some(finalized.clone());
         child.updated_at = self.clock.now().to_rfc3339();
         self.store
@@ -1484,8 +1522,10 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated =
-            gofin_domain::RevalidatedOperation::after_revalidation(finalized, self.clock.clone())?;
+        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+            strip_plan_metadata(&finalized),
+            self.clock.clone(),
+        )?;
         let result = adapter
             .submit_revalidated(&validated, journal.clone())
             .await;
@@ -1919,7 +1959,15 @@ impl Engine {
             ) {
                 return Ok(None);
             }
-            if attempt.state == "failed" && attempt.authority_id == authority_id {
+            if (attempt.state == "failed"
+                || (attempt.state == "rejected"
+                    && attempt
+                        .operation_id
+                        .as_deref()
+                        .and_then(|id| self.load_record(id).ok())
+                        .is_some_and(|r| r.submission.is_some())))
+                && attempt.authority_id == authority_id
+            {
                 return Err(GoFinError::new(
                     "STAGE_FAILED",
                     "preflight",
@@ -1975,12 +2023,13 @@ impl Engine {
                         // Exact adapters own refresh of their approved durable
                         // identities. A new preparation may allocate a different
                         // venue idempotency key even for identical input.
-                        adapter.revalidate(parent).await
+                        adapter.revalidate(&strip_plan_metadata(parent)).await
                     }
                 },
             )
             .await?;
             financial_plans::carry_action_deadline(parent, &mut candidate)?;
+            carry_mutation_baselines(parent, &mut candidate)?;
             ("standalone".to_owned(), candidate)
         };
         validate_parent_stage(adapter.as_ref(), parent, &stage_id, &candidate)?;

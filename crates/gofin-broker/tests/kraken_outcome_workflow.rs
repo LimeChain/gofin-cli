@@ -594,6 +594,12 @@ fn partial_kraken_cancellation_retains_fills_without_blocking_other_orders() {
             let edit=execute(&client,"edit",E::KrakenPrivatePostAmendOrder,json!({"requestId":"edit","account":"spot","operationId":id,"originalSubmission":original["submission"],"txid":"ORDER-1","order_qty":"0.01","limit_price":"21000","maximumFees":{"XXBT":"0.0001","ZUSD":"1"}})).await;
             assert!(edit["submission"].is_object(), "{edit}");
             assert_eq!(edit["outcome"]["dispatch"],"uncertain", "{edit}");
+            let approvals_before_replacement=approval.0.load(Ordering::SeqCst);
+            let writes_before_replacement=venue.writes.load(Ordering::SeqCst);
+            let replacement=execute(&client,"edit-again",E::KrakenPrivatePostAmendOrder,json!({"requestId":"edit-again","account":"spot","operationId":id,"originalSubmission":original["submission"],"txid":"ORDER-1","order_qty":"0.01","limit_price":"22000","maximumFees":{"XXBT":"0.0001","ZUSD":"1"}})).await;
+            assert!(replacement["submission"].is_null(), "uncertain amendment must block a replacement: {replacement}");
+            assert_eq!(venue.writes.load(Ordering::SeqCst),writes_before_replacement);
+            assert_eq!(approval.0.load(Ordering::SeqCst),approvals_before_replacement);
             let live=status(&client,id).await;
             assert_eq!(live["outcome"]["result"],"partial", "{live}");
             let cancel=execute(&client,"cancel",E::KrakenPrivatePostCancelOrder,json!({"requestId":"cancel","account":"spot","operationId":id,"originalSubmission":original["submission"],"txid":"ORDER-1"})).await;

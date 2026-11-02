@@ -236,7 +236,7 @@ pub(crate) fn verify_expired_without_inclusion(
     bundle(
         submission,
         vec![],
-        json!({"state":"expired_without_inclusion","signature":signature,"message_sha256":message_sha256,"reason":reason,"proof":proof,"financial_effects":[]}),
+        json!({"state":"expired_without_inclusion","outcome_replay_safe":true,"signature":signature,"message_sha256":message_sha256,"reason":reason,"proof":proof,"financial_effects":[]}),
     )
 }
 pub(crate) fn verify_failed(
@@ -666,6 +666,7 @@ mod tests {
             verified_effect_digest(&verified).unwrap()
         );
         assert_eq!(verified.evidence["state"], "expired_without_inclusion");
+        assert_eq!(verified.evidence["outcome_replay_safe"], true);
         assert!(verified.evidence.get("no_network_send").is_none());
         for (field, value) in [
             ("message_sha256", json!("other")),

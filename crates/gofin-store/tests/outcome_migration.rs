@@ -262,7 +262,7 @@ fn interrupted_schema28_transaction_restarts_without_losing_history() {
     drop(Store::open(&path).unwrap());
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE evm_nonce_claims; DROP TABLE action_continuations; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=27; BEGIN IMMEDIATE; CREATE TABLE action_continuations(token TEXT); ROLLBACK;").unwrap();
+        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE evm_nonce_claims; DROP TABLE action_continuations; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=27; BEGIN IMMEDIATE; CREATE TABLE action_continuations(token TEXT); ROLLBACK;").unwrap();
     }
     let store = Store::open(&path).unwrap();
     assert!(store.get_record("pending-withdrawal").unwrap().is_some());
@@ -337,7 +337,7 @@ fn nonce_projection_backfills_legacy_submissions_without_reading_unrelated_histo
     drop(store);
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=29;").unwrap();
+        conn.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; DROP TABLE reauthorization_claims; DROP TABLE submission_admissions; DROP TABLE evm_definitive_rejections; DROP TABLE evm_submission_nonces; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=29;").unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(

@@ -2649,17 +2649,14 @@ impl EvmRuntime {
             .get("dispatch_block")
             .and_then(Value::as_u64)
             .filter(|block| *block < height);
-        let (mut low, mut high) = if let Some(block) = lower {
-            // Only use this bound if its canonical post-state has not yet
-            // consumed the nonce; otherwise the replacement may predate it.
-            if nonce_at(block).await? <= transaction.nonce {
-                (block + 1, height)
-            } else {
-                (0, height)
-            }
-        } else {
-            (0, height)
-        };
+        // Old submissions and unavailable dispatch-block reads have no reliable
+        // lower bound. Search a recent window only when its post-state proves
+        // the nonce was still unused; otherwise leave the outcome unresolved.
+        let block = lower.unwrap_or_else(|| height.saturating_sub(4096));
+        if nonce_at(block).await? > transaction.nonce {
+            return Ok(None);
+        }
+        let (mut low, mut high) = (block.saturating_add(1), height);
         while low < high {
             let middle = low + (high - low) / 2;
             if nonce_at(middle).await? > transaction.nonce {

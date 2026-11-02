@@ -139,11 +139,11 @@ API wallets, delegated accounts, orders and other action families are excluded.
 
 GoFin persists one linked recovery child before approval or dispatch and signs a
 native `noop` with the exact original nonce. This child declares no financial
-effects and reserves only that nonce; ordinary authorization and rolling-budget
-checks still apply. The original financial reservations remain held. A strict,
+effects and reserves only that nonce; ordinary authorization and native-term
+checks still apply. The original financial outcome remains unresolved. A strict,
 submission-bound native `status: ok` / `response: {type: default}` acknowledgement
 completes the child. Reconciliation can then mark the original transfer failed
-with verified empty effects and release its holds. This follows the documented
+with verified empty effects without inventing financial effects. This follows the documented
 [Noop success contract](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#invalidate-pending-nonce-noop)
 and [per-signer nonce uniqueness rules](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets):
 accepting the same nonce for Noop proves it was unused by the original and is
@@ -167,7 +167,7 @@ nonce, amount and direction), hash, positive block, timestamp and error field
 must agree. Only the exact atomic class-transfer error `Insufficient balance for
 token transfer`, with no contradictory same-hash ledger effect, proves Failed
 with empty effects. Missing/malformed/unknown errors, conflicting transactions
-or a ledger effect keep the reservation. This is positive native rejection
+or a ledger effect keep the outcome unresolved. This is positive native rejection
 proof, not absence-of-history or balance inference. Other action families retain
 their existing proof contracts. Hyperliquid's [API server contract](https://hyperliquid.gitbook.io/hyperliquid-docs/hypercore/api-servers)
 states that submission replies return execution results after inclusion in a
@@ -222,7 +222,7 @@ The L1 USDC deposit is a separate fixed funding route, not a generic CCXT exchan
 
 The source transfer goes through GoFin's ordinary Ethereum `wallet.transfer` lifecycle, so its immutable submission and canonical receipt facts are persisted and reconciled without resubmission. A confirmed source transfer is funds-in-transit evidence, not usable Hyperliquid collateral. The broker scopes `hyperliquid.ledger` to the enrolled owner and inspects deposit rows, comparing USDC as exact six-decimal units; account-balance deltas are never used as transaction correlation. The live owner-scoped ledger represents a legacy deposit with the original Arbitrum transaction hash. GoFin requires one exact source-hash and amount match after validating the immutable source receipt; it never infers a join from balances or amount and time alone. For ledger formats carrying a native Hyperliquid hash, the typed Explorer `txDetails` fallback requires the exact `VoteEthDepositAction` owner, raw USDC amount and original `ethTxHash`. The [official Bridge2 watcher](https://github.com/hyperliquid-dex/contracts/blob/master/tests/bridge_watcher2.rs#L1473-L1498) constructs that signed action from the source receipt's transaction hash. History is bounded from the original durable operation time, so a credit remains eligible during later reconciliation. A unique exact match is required before the composite replaces the bridge-transfer destination with the Hyperliquid account credit. Synthetic proof tests cover both formats; live legacy deposit verification is recorded separately.
 
-Named-plan review checks the same owner, supported account mode, exact six-decimal amount, minimum deposit and positive ETH fee cap without reading future-funded balances or freezing a transaction. The plan fixes the deposit input and declared native-USDC predecessor credit. A verified CCTP mint may fund this step; a burn or pending attestation cannot. Concrete execution still checks funds, deployment, fees and simulation. Deposit timing contributes one 15-minute planning allowance for source submission plus account credit, before shared plan headroom; it is not a settlement promise. The broker assigns a stable request ID for each explicit plan attempt.
+A verified CCTP mint may fund a subsequent deposit; a burn or pending attestation cannot. Each new action requires its own native authority or protected Yolo. Concrete execution checks funds, deployment, fees and simulation.
 
 Withdrawals settle only after the original `withdraw3` action is found through typed Explorer details, the matching native ledger row is unique, and the fixed Bridge2 `RequestedWithdrawal` and `FinalizedWithdrawal` events match the owner, destination, nonce, message and net payout. The final Arbitrum receipt must be canonical and included in one sequenced block (without waiting for Ethereum inclusion or finality), and include one USDC transfer from Bridge2 to the requested destination for the event amount. Gross debit minus this exact net credit is the fee; venue acceptance and balance deltas do not complete settlement. The observer is installed only when an Arbitrum One adapter is configured. Synthetic verification does not establish live RPC or live withdrawal acceptance.
 
@@ -252,7 +252,7 @@ Supporting more quote assets needs two exact mappings. First, native
 network, reference, and decimals; a symbol or name cannot establish identity.
 Second, the profile pricing interface must return a fresh `AssetPrice` for that
 exact AssetId, and order accounting must carry the quote AssetId through
-principal, fee, reservation, and USD valuation effects. The existing single
+principal, fee and USD valuation effects. The existing single
 `usdc_price()` method and USDC-denominated order effects cannot safely be
 generalized by changing only a price lookup. A narrow first extension could
 support assets already registered in GoFin's exact external-asset map and fail
@@ -263,8 +263,7 @@ masquerade as an oracle or be inferred from token names.
 Native TWAP actions are perpetual-only and use explicit duration, randomization,
 side, size, and reduce-only fields. The operation requires the human/agent
 request to acknowledge native price risk. Turnover, fees, gross realized loss,
-and gross realized profit are explicit estimates used for GoFin review and
-reservation; Hyperliquid does not expose absolute lifetime ceilings for the
+and gross realized profit are explicit estimates used for GoFin review; Hyperliquid does not expose absolute lifetime ceilings for the
 schedule. GoFin keeps realized loss and profit as separate cumulative settlement
 legs so later profits cannot erase already consumed loss budget. An estimate
 overrun remains unresolved and does not cancel the venue-side schedule. The action
@@ -342,7 +341,7 @@ The following boundaries remain material even when automated checks pass:
   subaccount transfers and paid request-weight reservation, retain an uncertain
   outcome when the native action and financial ledger event cannot be joined by
   an authoritative immutable identity. A persisted acknowledgement, matching
-  amount, nearby timestamp or balance change cannot release their reservations.
+  amount, nearby timestamp or balance change cannot establish their outcomes.
   These typed action routes do not constitute verified terminal settlement.
 - Partial or canceled native TWAP schedules remain unresolved where REST does
   not prove the remaining schedule has stopped. Native pricing and cumulative

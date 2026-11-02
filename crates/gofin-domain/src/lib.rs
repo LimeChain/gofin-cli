@@ -1605,7 +1605,9 @@ pub enum AuthorizationSource {
     TouchId,
     /// Fresh sudo provenance and protected review for configuration only.
     Sudo,
+    /// Historical audit value; cannot authorize new financial work.
     BoundedGrant,
+    /// Historical audit value; cannot authorize new financial work.
     NamedPlan,
     Yolo,
     Development,

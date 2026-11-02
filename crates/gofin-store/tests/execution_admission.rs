@@ -1217,7 +1217,7 @@ fn verified_position_anchors_are_indexed_by_identity_and_exclude_current_attempt
     drop(store);
     {
         let old = rusqlite::Connection::open(&path).unwrap();
-        old.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
+        old.execute_batch("DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
@@ -1774,7 +1774,7 @@ fn migration_backfills_only_engine_attested_unsubmitted_failures() {
     }
     drop(store);
     let old = rusqlite::Connection::open(&path).unwrap();
-    old.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;").unwrap();
+    old.execute_batch("DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;").unwrap();
     drop(old);
     let store = Store::open(&path).unwrap();
     assert!(
@@ -1862,7 +1862,7 @@ fn meteora_v3_anchor_is_correlated_and_backfilled_on_schema39_restart() {
     assert_eq!(store.current_position_anchors(None).unwrap().len(), 1);
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
+    conn.execute_batch("DROP TABLE IF EXISTS released_replacement_claims; DROP TABLE IF EXISTS preapproval_revisions; DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
         .unwrap();
     drop(conn);
     let store = Store::open(&path).unwrap();
@@ -2258,7 +2258,7 @@ fn revision_schema_upgrade_recovers_interrupted_transaction_and_preserves_token(
         .unwrap();
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE preapproval_revisions; PRAGMA user_version=41; BEGIN; CREATE TABLE preapproval_revisions(token TEXT PRIMARY KEY, input_json TEXT NOT NULL, input_hash TEXT NOT NULL, prior_record_json TEXT NOT NULL); PRAGMA user_version=42; ROLLBACK;").unwrap();
+    conn.execute_batch("DROP TABLE released_replacement_claims; DROP TABLE preapproval_revisions; PRAGMA user_version=41; BEGIN; CREATE TABLE preapproval_revisions(token TEXT PRIMARY KEY, input_json TEXT NOT NULL, input_hash TEXT NOT NULL, prior_record_json TEXT NOT NULL); PRAGMA user_version=42; ROLLBACK;").unwrap();
     drop(conn);
     let store = Store::open(&path).unwrap();
     assert_eq!(store.get_record("action").unwrap(), Some(failed));

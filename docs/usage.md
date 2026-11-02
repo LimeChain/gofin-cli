@@ -875,7 +875,7 @@ primary RPC cooldown before signing, then rechecks freshness and authorization.
 A longer cooldown fails preparation without submitting a transaction.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
-The Touch ID prompt allows up to 90 seconds to respond. A successful standalone financial approval then allows submission for 30 minutes from the approval time, subject to all existing balance, allowance, nonce, simulation and financial-bound checks. Quotes and transaction candidates retain their own freshness limits. Continuing an action or restarting GoFin does not reset its approval window; previously stored approvals retain their original expiry.
+The Touch ID prompt allows up to 90 seconds to respond. A successful standalone Touch ID financial approval then allows submission for 30 minutes from the approval time, subject to all existing balance, allowance, nonce, simulation and financial-bound checks. Development approvals retain their own expiry. Quotes and transaction candidates retain their own freshness limits. Continuing an action or restarting GoFin does not reset its approval window; previously stored approvals retain their original expiry.
 
 If a request failed before any approval or submission and its compound deadline has expired, follow the returned `operations reauthorize` action with explicit revised input and a new deadline. This requests the first approval on the original operation ID. The broker binds that token to the revised input; repeating the original execute request or the same revised-input token observes existing work without submitting it again.
 

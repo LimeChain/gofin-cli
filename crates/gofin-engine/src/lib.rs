@@ -1753,7 +1753,7 @@ impl Engine {
         };
         let linked = self.amendment_preparation_context(&request.input)?;
         let compound = self.compound_preparation_context(&request.input)?;
-        let prepared = match preprepared {
+        let mut prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
@@ -1790,6 +1790,9 @@ impl Engine {
                 }
             },
         };
+        if matches!(&route, ExecutionRoute::Financial) {
+            stamp_mutation_baselines(&mut prepared, &linked, compound.as_ref())?;
+        }
         let has_venue_calculated_cost = prepared
             .intent
             .maximum_costs
@@ -1837,6 +1840,13 @@ impl Engine {
         )?;
         record.preview = Some(prepared.clone());
         record.updated_at = self.clock.now().to_rfc3339();
+        // Avoid prompting for an already conflicting or stale mutation; the
+        // same guard is repeated atomically at durable submission admission.
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_mutation_candidate(&record.id, &to_value(record)?)
+            .map_err(map_store)?;
         let amendment = self.validate_submission_amendment_for_attempt(
             &prepared,
             request.run_id.as_deref(),
@@ -2059,7 +2069,7 @@ impl Engine {
             )
             .await?;
             financial_plans::carry_action_deadline(&prepared, &mut fresh)?;
-            adapter.validate_approved_candidate(&prepared, &fresh)?;
+            adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &fresh)?;
             bounded_evidence(
                 &request.operation,
                 "revalidation",
@@ -2089,7 +2099,10 @@ impl Engine {
             &mut refreshed.binding,
         )?;
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
-        adapter.validate_approved_candidate(&prepared, &refreshed)?;
+        adapter.validate_approved_candidate(
+            &strip_plan_metadata(&prepared),
+            &strip_plan_metadata(&refreshed),
+        )?;
         if let Some(challenge) = &challenge {
             ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
@@ -2154,7 +2167,8 @@ impl Engine {
                         .map_err(map_store)?;
                     nonce_claimed = true;
                     current = adapter.apply_claimed_evm_nonce(&current, nonce)?;
-                    adapter.validate_approved_candidate(&prepared, &current)?;
+                    adapter
+                        .validate_approved_candidate(&strip_plan_metadata(&prepared), &current)?;
                 }
                 let mut latest = bounded_evidence(
                     &request.operation,
@@ -2169,7 +2183,7 @@ impl Engine {
                     &mut latest.binding,
                 )?;
                 validate_prepared(&latest, &request.operation, self.clock.now())?;
-                adapter.validate_approved_candidate(&prepared, &latest)?;
+                adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &latest)?;
                 if let Some(challenge) = &challenge {
                     ensure_approval_fresh(&audit, challenge, self.clock.now())?;
                 }
@@ -2187,6 +2201,7 @@ impl Engine {
             validate_prepared(&finalized, &request.operation, self.clock.now())?;
             refreshed = finalized;
         }
+        carry_mutation_baselines(&prepared, &mut refreshed)?;
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
             operation_id: record.id.clone(),
@@ -2938,7 +2953,21 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .append_outcome_observation(&record.id, &facts, "adapter")
+            .append_outcome_observation(
+                &record.id,
+                &facts,
+                if record
+                    .last_reconciliation_evidence
+                    .as_ref()
+                    .and_then(|e| e.get("outcome_live_order"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    "adapter_live_order"
+                } else {
+                    "adapter"
+                },
+            )
             .map_err(map_store)?;
         Ok(record)
     }
@@ -3409,8 +3438,48 @@ impl Engine {
             (report, candidates)
         };
         for value in candidates {
-            let record = from_value::<OperationRecord>(value)?;
-            self.recover_approved_action(&record)?;
+            let Ok(record) = from_value::<OperationRecord>(value) else {
+                continue;
+            };
+            if let Err(error) = self.recover_approved_action(&record) {
+                if error.code == "EXECUTION_CONFLICT" {
+                    continue;
+                }
+                return Err(error);
+            }
+            let expired = record.approval.as_ref().is_some_and(|audit| {
+                parse_time(&audit.expires_at).is_ok_and(|expiry| expiry <= self.clock.now())
+            });
+            let standalone = record.preview.as_ref().is_some_and(|preview| {
+                self.adapters
+                    .read()
+                    .ok()
+                    .and_then(|adapters| adapters.get(&record.operation).cloned())
+                    .is_some_and(|adapter| !adapter.is_compound_action(preview))
+            }) && !(record.operation == "bridge.execute"
+                && record.input.get("intent").is_some());
+            if expired && standalone && record.run_id.is_none() {
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                match store.try_acquire_action_lease(&record.id) {
+                    Ok(lease) => {
+                        match store.expire_unsubmitted_approval(
+                            &lease,
+                            &to_value(&record)?,
+                            &self.clock.now().to_rfc3339(),
+                        ) {
+                            Ok(_)
+                            | Err(StoreError::ExecutionConflict)
+                            | Err(StoreError::ActionLeaseHeld) => {}
+                            Err(error) => return Err(map_store(error)),
+                        }
+                    }
+                    Err(StoreError::ActionLeaseHeld | StoreError::ExecutionConflict) => {}
+                    Err(error) => return Err(map_store(error)),
+                }
+            }
         }
         Ok(report)
     }
@@ -4858,9 +4927,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 .preview
                 .as_ref()
                 .ok_or_else(|| internal("stage candidate missing"))?;
-            if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-                != binding_hash(&gofin_domain::native_authorization_binding(candidate))?
-            {
+            if binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(prepared),
+            ))? != binding_hash(&gofin_domain::native_authorization_binding(
+                &strip_plan_metadata(candidate),
+            ))? {
                 return Err(GoFinError::validation(
                     "The submitted payload differs from the claimed stage candidate.",
                 ));
@@ -4879,7 +4950,10 @@ impl SubmissionJournal for OperationSubmissionJournal {
             ));
         }
         if let Some(adapter) = &self.adapter {
-            adapter.validate_approved_candidate(approved, prepared)?;
+            adapter.validate_approved_candidate(
+                &strip_plan_metadata(approved),
+                &strip_plan_metadata(prepared),
+            )?;
         }
         let record = self
             .record
@@ -4889,9 +4963,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             .preview
             .as_ref()
             .ok_or_else(|| internal("submission candidate missing"))?;
-        if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-            != binding_hash(&gofin_domain::native_authorization_binding(exact_candidate))?
-        {
+        if binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(prepared),
+        ))? != binding_hash(&gofin_domain::native_authorization_binding(
+            &strip_plan_metadata(exact_candidate),
+        ))? {
             return Err(GoFinError::new(
                 "REQUEST_CHANGED",
                 "approval",
@@ -16850,6 +16926,77 @@ fn remaining_costs(
         .collect()
 }
 
+const MUTATION_BASELINES_KEY: &str = "__gofin_mutation_baselines";
+
+fn stamp_mutation_baselines(
+    candidate: &mut PreparedOperation,
+    linked: &gofin_domain::amendments::AmendmentContext,
+    compound: Option<&gofin_domain::compound_mutations::CompoundAmendmentContext>,
+) -> Result<()> {
+    let targets = gofin_domain::amendments::mutation_admission_targets(candidate)?;
+    let mut baselines = serde_json::Map::new();
+    for target in targets {
+        let context = compound
+            .and_then(|group| {
+                group
+                    .children
+                    .values()
+                    .find(|child| child.operation_id == target.operation_id)
+                    .map(|child| &child.context)
+            })
+            .or_else(|| {
+                (candidate.input.get("operationId").and_then(Value::as_str)
+                    == Some(target.operation_id.as_str()))
+                .then_some(linked)
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment context is missing.")
+            })?;
+        let scope = context
+            .effective_scope()
+            .cloned()
+            .or_else(|| {
+                context
+                    .original
+                    .as_ref()
+                    .map(|p| gofin_domain::amendments::AmendmentScope {
+                        intent: p.intent.clone(),
+                        binding: p.binding.clone(),
+                        valuation: p.valuation.clone(),
+                    })
+            })
+            .ok_or_else(|| {
+                GoFinError::validation("Protected original amendment scope is missing.")
+            })?;
+        baselines.insert(target.operation_id, to_value(&scope)?);
+    }
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if !baselines.is_empty() {
+        binding.insert(MUTATION_BASELINES_KEY.into(), Value::Object(baselines));
+    }
+    Ok(())
+}
+
+fn carry_mutation_baselines(
+    approved: &PreparedOperation,
+    candidate: &mut PreparedOperation,
+) -> Result<()> {
+    let marker = approved.binding.get(MUTATION_BASELINES_KEY).cloned();
+    let binding = candidate
+        .binding
+        .as_object_mut()
+        .ok_or_else(|| GoFinError::validation("Prepared binding must be an object."))?;
+    binding.remove(MUTATION_BASELINES_KEY);
+    if let Some(marker) = marker {
+        binding.insert(MUTATION_BASELINES_KEY.into(), marker);
+    }
+    Ok(())
+}
+
 /// Broker-owned journal markers must never cross the adapter API boundary.
 /// They are restored on the durable engine preview after validation.
 fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
@@ -16859,6 +17006,7 @@ fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
             binding,
             gofin_domain::financial_plans::PLAN_METADATA_KEY,
         );
+        binding.remove("__gofin_mutation_baselines");
     }
     candidate
 }
@@ -17417,6 +17565,12 @@ fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
 
 fn map_store(error: StoreError) -> GoFinError {
     match error {
+        StoreError::ExecutionConflict => GoFinError::new(
+            "EXECUTION_CONFLICT",
+            "admission",
+            "Operation state changed or this continuation was already claimed.",
+            "Inspect the original action and use its current continuation.",
+        ),
         StoreError::ActionLeaseHeld => GoFinError::new(
             "ACTION_BUSY",
             "admission",
@@ -17480,13 +17634,13 @@ fn map_store(error: StoreError) -> GoFinError {
         StoreError::ConcurrentReservation => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         ),
         StoreError::ConcurrentReservationAt { reason } => GoFinError::new(
             "RESOURCE_RESERVED",
             "budget",
-            "Operation state changed or another write holds a required resource reservation.",
+            "Operation state changed or another write is using a required resource.",
             "Reconcile the original submission before starting another write.",
         )
         .with_details(json!({"store_conflict_stage": reason})),
@@ -20705,7 +20859,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn definitive_rejection_can_reuse_valid_approval_for_one_new_attempt() {
+    async fn transmitted_rejection_requires_new_approval() {
         let adapter = Arc::new(RejectedOnceAdapter {
             inner: SyntheticAdapter::new(),
             submissions: AtomicUsize::new(0),
@@ -20724,7 +20878,8 @@ mod tests {
             .unwrap();
         let view = engine.operation_view(&original).unwrap();
         assert_eq!(view["outcome"]["dispatch"], "rejected");
-        assert_eq!(view["outcome"]["retry_approval"], "covered");
+        assert_eq!(view["outcome"]["retry_approval"], "required");
+        assert_eq!(view["outcome"]["next_action"]["code"], "reauthorize");
         let token = view
             .pointer("/outcome/next_action/continuation_token")
             .and_then(Value::as_str)
@@ -20733,11 +20888,10 @@ mod tests {
             gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
         let continued = invocation
             .scope(engine.continue_operation(&original.id, token))
-            .await
-            .unwrap();
-        assert_eq!(continued["stage"]["submission"]["reference"], "attempt-1");
+            .await;
+        assert!(continued.is_err());
         assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
     }
 
     struct FailedCostAdapter {
@@ -21051,6 +21205,53 @@ mod tests {
             "EXECUTION_INTERFACE_RETIRED"
         );
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn mutation_baseline_is_broker_captured_and_survives_adapter_refresh() {
+        let original: PreparedOperation = serde_json::from_value(json!({"operation":"test.order","input":{},"binding":{"identity":"original"},"summary":"order","checks":[],"warnings":[],"observed_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-01T00:01:00Z","operation_version":1,"intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":[]}})).unwrap();
+        let original_scope = gofin_domain::amendments::AmendmentScope {
+            intent: original.intent.clone(),
+            binding: original.binding.clone(),
+            valuation: original.valuation.clone(),
+        };
+        let context = gofin_domain::amendments::AmendmentContext {
+            original: Some(original.clone()),
+            ..Default::default()
+        };
+        let mut candidate = original.clone();
+        candidate.input = json!({"operationId":"owner"});
+        candidate.binding[MUTATION_BASELINES_KEY] = json!({"owner":{"forged":true}});
+        candidate
+            .intent
+            .expected
+            .push(EffectConstraint::SubmissionAmendment {
+                operation_id: "owner".into(),
+                submission: Submission {
+                    kind: "test".into(),
+                    reference: "original".into(),
+                    data: json!({}),
+                },
+                revision: Box::new(original_scope.clone()),
+            });
+        stamp_mutation_baselines(&mut candidate, &context, None).unwrap();
+        assert_eq!(
+            candidate.binding[MUTATION_BASELINES_KEY]["owner"],
+            json!(original_scope)
+        );
+        let adapter_candidate = strip_plan_metadata(&candidate);
+        assert!(
+            adapter_candidate
+                .binding
+                .get(MUTATION_BASELINES_KEY)
+                .is_none()
+        );
+        let mut refreshed = adapter_candidate;
+        carry_mutation_baselines(&candidate, &mut refreshed).unwrap();
+        assert_eq!(
+            refreshed.binding[MUTATION_BASELINES_KEY],
+            candidate.binding[MUTATION_BASELINES_KEY]
+        );
     }
 
     struct GroupedFixture(SyntheticAdapter);
@@ -21728,8 +21929,16 @@ mod tests {
                 "{view}"
             );
             assert_eq!(
-                restored, record,
-                "recovery must preserve the original audit and expiry"
+                restored.approval, record.approval,
+                "recovery preserves the original audit and expiry"
+            );
+            assert_eq!(
+                restored.status,
+                if expired {
+                    Status::Expired
+                } else {
+                    Status::AwaitingApproval
+                }
             );
             assert!(restored.submission.is_none());
             assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);

@@ -1039,6 +1039,10 @@ async fn explicit_cancellation_owns_no_fills_and_original_reconciles_partial_tra
         let original_request = request(input("synthetic-open-remainder", "BUY", futures), futures);
         let original = engine.execute(original_request.clone()).await.unwrap();
         assert_eq!(original.status, Status::Pending, "{original:?}");
+        assert_eq!(
+            original.last_reconciliation_evidence.as_ref().unwrap()["outcome_live_order"],
+            true
+        );
         assert!(original.effects.is_none());
         let identity = original.submission.clone().unwrap();
         let cancel_request = OperationRequest {

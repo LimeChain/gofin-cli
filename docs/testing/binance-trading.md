@@ -29,7 +29,7 @@ against a controlled Binance ledger and EVM receipt transport. It deposits USDC,
 buys with a filled limit order, trades native MARKET in both directions, observes
 and cancels GTC and maker-only resting orders (including a partial fill), sells
 the remainder and withdraws to the wallet. It verifies exact fees and balances,
-distinct durable submissions, venue holds, released reservations and the final
+distinct durable submissions, venue holds, proven effects and the final
 wallet receipt. The scenario also renders the broker-produced native reviews on
 macOS without requesting biometric authentication.
 
@@ -65,7 +65,7 @@ wallet deltas, exact fees/PnL, typed effects, durable settlement and duplicate
 prevention. Inject accepted-but-lost responses and restart before reconciliation.
 Correlated order/transfer identities recover without repeating the write. The
 standalone subaccount transfer API has no client ID: a lost response without a
-persisted venue receipt stays unresolved, retaining its reservation; GoFin must
+persisted venue receipt stays unresolved under its original identity; GoFin must
 not guess a matching history row or repeat that transfer. The subaccount scenario
 also verifies that a persisted receipt with delayed history recovers after
 restart. Its deliberately lost transfer response is a separate fault case after
@@ -76,11 +76,10 @@ changes, invalid reductions/reversals, insufficient collateral, venue filters,
 fee/loss bounds and incomplete proof. Synthetic approval and balances do not
 establish actual Binance access, Touch ID or production settlement.
 
-Resting and partially filled orders must retain their reservation. Cancellation
+Resting and partially filled orders must retain their original identities and observed fills. Cancellation
 and response-loss recovery must settle the original order's fills without
 repeating placement. MARKET orders must never display or verify an invented
-limit-price guarantee, and existing IOC/FOK boundary and plan authority must
-reject the new modes.
+limit-price guarantee, and existing IOC/FOK boundaries must reject the new modes.
 
 ## Live development
 
@@ -92,7 +91,7 @@ If closing or returning funds is requested, it is a required test leg. Refresh
 actual remaining exposure after partial fills; reconcile uncertain outcomes by
 the original ID. A successful submission is not proof of settlement.
 
-Margin reservations and execution loss bounds do not cap lifetime position loss.
+Margin requirements and execution loss bounds do not cap lifetime position loss.
 Cross margin can expose other futures collateral. Conservative SELL notional
 bounds may exceed practical test limits; report the actual limitation rather
 than enlarging explicit user limits or skipping the close.

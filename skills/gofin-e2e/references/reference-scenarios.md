@@ -49,7 +49,7 @@ Verify that the market order reaches a terminal state with an actual fill, then 
 
 Run each network-family row independently with at least three dependent swaps, for example **A → B → C → A**. Select assets and routes through current discovery. The final swap back to the starting asset is required; recovering the original quantity is not expected because of fees and price changes.
 
-- Use sequential CLI execution with native approval for each action. If the build under test supports named plans and the change concerns plans, require an actual ordered plan. PR #67 retires named plans; its swap scenario uses sequential actions. Record which mode passed; one mode does not prove the other. A compound action is not a substitute for a named plan or the full swap sequence.
+- Use sequential CLI execution with native approval for each action. Named plans are retired; a compound action does not substitute for the full swap sequence.
 - Verify permission handling and bounded allowances where applicable. Check exact asset identities and the actual token-account requirements of the selected routes.
 - Verify each swap's input debit and output credit against approved bounds. Each subsequent swap must use verified available proceeds from its predecessor, accounting for actual output, fees, gas and dust rather than a stale quoted amount or unrelated prefunding.
 - Require settlement before dependent execution. For Solana, require finalized inclusion and verified financial effects; for EVM, use the selected network's settlement rules.

@@ -5040,7 +5040,7 @@ impl BinanceProfile {
         let Some(verifier) = verifier else {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
+                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","outcome_transfer":"in_transit","destinationReceipt":"unverified","sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
                 verified: None,
             });
         };
@@ -5050,7 +5050,7 @@ impl BinanceProfile {
         let Some(tx_hash) = tx_hash else {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","reason":"Binance reports completion but no usable transaction identifier is available."}),
+                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","outcome_transfer":"in_transit","destinationReceipt":"unverified","reason":"Binance reports completion but no usable transaction identifier is available."}),
                 verified: None,
             });
         };
@@ -5090,7 +5090,7 @@ impl BinanceProfile {
             };
             return Ok(Reconciliation {
                 status,
-                evidence: json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Selected-chain receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
+                evidence: json!({"withdrawal":base_evidence,"outcome_transfer":"in_transit","recipient":receipt.evidence,"reason":"Selected-chain receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
                 verified: None,
             });
         }
