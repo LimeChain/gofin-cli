@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.20.1"
+  version: "1.21.0"
   openclaw:
     requires:
       bins: [gofin]
