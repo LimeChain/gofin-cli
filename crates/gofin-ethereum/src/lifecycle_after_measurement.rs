@@ -25,6 +25,88 @@ impl EvmRpc for Counted {
             .await
     }
 }
+/// Exact synthetic fact identity. Block-by-hash and numeric tags normalize to
+/// the same canonical test block; mutable sender-bearing simulations are separate.
+fn fact_key(method: &str, params: &Value) -> Option<String> {
+    let (target, data, tag) = match method {
+        "eth_call" if params[0].get("from").is_none() => (
+            params[0]["to"].as_str()?,
+            params[0]["data"].as_str()?,
+            &params[1],
+        ),
+        "eth_getCode" => (params[0].as_str()?, "code", &params[1]),
+        "eth_getStorageAt" => (params[0].as_str()?, params[1].as_str()?, &params[2]),
+        _ => return None,
+    };
+    let block = if let Some(hash) = tag["blockHash"].as_str() {
+        hash.to_ascii_lowercase()
+    } else {
+        let value = tag.as_str()?;
+        if let Some(hex) = value.strip_prefix("0x") {
+            match u64::from_str_radix(hex, 16) {
+                Ok(number) => blockhash(number),
+                Err(_) => value.to_owned(),
+            }
+        } else {
+            value.to_owned()
+        }
+    };
+    Some(format!(
+        "{method}|{}|{}|{block}",
+        target.to_ascii_lowercase(),
+        data.to_ascii_lowercase()
+    ))
+}
+#[test]
+fn exact_fact_identity_normalizes_block_tags_and_keeps_owner_and_target_distinct() {
+    let target = lower_address(addr(300));
+    let first = DataProvider::getUserReserveDataCall {
+        asset: addr(101),
+        user: addr(1),
+    }
+    .abi_encode();
+    let second = DataProvider::getUserReserveDataCall {
+        asset: addr(101),
+        user: addr(2),
+    }
+    .abi_encode();
+    let params =
+        |target: &str, data: &[u8], tag: Value| json!([{"to":target,"data":hex_bytes(data)},tag]);
+    let numeric = params(&target, &first, json!("0x14"));
+    let by_hash = params(
+        &target,
+        &first,
+        json!({"blockHash":blockhash(20),"requireCanonical":true}),
+    );
+    assert_eq!(
+        fact_key("eth_call", &numeric),
+        fact_key("eth_call", &by_hash)
+    );
+    assert_ne!(
+        fact_key("eth_call", &numeric),
+        fact_key("eth_call", &params(&target, &second, json!("0x14")))
+    );
+    assert_ne!(
+        fact_key("eth_call", &numeric),
+        fact_key("eth_call", &params(&target, &first, json!("0x15")))
+    );
+    assert_ne!(
+        fact_key("eth_call", &numeric),
+        fact_key(
+            "eth_call",
+            &params(&lower_address(addr(301)), &first, json!("0x14"))
+        )
+    );
+    assert!(
+        fact_key(
+            "eth_call",
+            &json!([{"to":target,"from":lower_address(addr(1)),"data":hex_bytes(&first)},"latest"])
+        )
+        .is_none()
+    );
+    assert!(fact_key("eth_getBlockByNumber", &json!(["0x14", false])).is_none());
+}
+
 #[derive(Clone, Copy)]
 struct Case {
     label: &'static str,
@@ -563,6 +645,7 @@ async fn after_action_and_read_http_counts() {
             scoped: false,
         },
     ];
+    let violations = Mutex::new(Vec::<Value>::new());
     let mut fixed_exposure_counts: BTreeMap<&str, [Vec<Counts>; 4]> = BTreeMap::new();
     for market_size in [2u64, 20, 50] {
         for case in cases {
@@ -609,6 +692,11 @@ async fn after_action_and_read_http_counts() {
             let worker_direct = direct.clone();
             let fault = Arc::new(AtomicUsize::new(0));
             let worker_fault = fault.clone();
+            let facts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let worker_facts = facts.clone();
+            let tracking = Arc::new(AtomicBool::new(true));
+            let worker_tracking = tracking.clone();
+            let phase_index = AtomicUsize::new(0);
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -657,6 +745,13 @@ async fn after_action_and_read_http_counts() {
                     let method = request["method"].as_str().unwrap();
                     let params = request["params"].clone();
                     let multicall = address(crate::collection::MULTICALL).unwrap();
+                    if worker_tracking.load(Ordering::SeqCst)
+                        && !(method == "eth_call"
+                            && params[0]["to"] == json!(lower_address(multicall)))
+                        && let Some(key) = fact_key(method, &params)
+                    {
+                        *worker_facts.lock().unwrap().entry(key).or_default() += 1;
+                    }
                     let result = if method == "eth_getCode"
                         && params[0] == json!(lower_address(multicall))
                     {
@@ -680,6 +775,11 @@ async fn after_action_and_read_http_counts() {
                         let mut rows = Vec::new();
                         for call in calls {
                             let subparams = json!([{"to":lower_address(call.target),"data":hex_bytes(&call.callData)},params[1]]);
+                            if worker_tracking.load(Ordering::SeqCst)
+                                && let Some(key) = fact_key("eth_call", &subparams)
+                            {
+                                *worker_facts.lock().unwrap().entry(key).or_default() += 1;
+                            }
                             rows.push(
                                 match handle.block_on(synthetic_reply(
                                     &worker_fixture,
@@ -732,6 +832,14 @@ async fn after_action_and_read_http_counts() {
             let mut adapter = adapter(fixture.clone());
             adapter.runtime = Arc::new(EvmRuntime::new(counted.clone(), 1, None));
             let measure = || {
+                let phase = phase_index.fetch_add(1, Ordering::SeqCst);
+                let duplicates = std::mem::take(&mut *facts.lock().unwrap())
+                    .into_iter()
+                    .filter(|(_, count)| *count > 1)
+                    .collect::<Vec<_>>();
+                if !duplicates.is_empty() {
+                    violations.lock().unwrap().push(json!({"market_size":market_size,"case":case.label,"phase_index":phase,"duplicates":duplicates}));
+                }
                 (
                     counted.logical.swap(0, Ordering::SeqCst),
                     physical.swap(0, Ordering::SeqCst),
@@ -925,8 +1033,16 @@ async fn after_action_and_read_http_counts() {
                         | "collateral_enable"
                 )
             {
-                fixture.latest.store(20, Ordering::SeqCst);
+                tracking.store(false, Ordering::SeqCst);
+                // Restore synthetic state at a newer block; never rewind a provider
+                // whose freshness tracking has already observed the receipt head.
+                let original_state = fixture.states.lock().unwrap().get(&20).unwrap().clone();
+                fixture.states.lock().unwrap().insert(24, original_state);
+                fixture.latest.store(24, Ordering::SeqCst);
                 for mode in 1..=3 {
+                    // A successful direct-fallback collection must also avoid
+                    // repeated exact facts. Failed injections are not a pass.
+                    tracking.store(mode == 3, Ordering::SeqCst);
                     fault.store(mode, Ordering::SeqCst);
                     let mut session = adapter
                         .operation_lifecycle(case.op, &input, None)
@@ -964,4 +1080,15 @@ async fn after_action_and_read_http_counts() {
             worker.join().unwrap();
         }
     }
+    let found = violations.into_inner().unwrap();
+    if !found.is_empty() {
+        eprintln!(
+            "DUPLICATE_FACTS_JSON={}",
+            serde_json::to_string(&found).unwrap()
+        );
+    }
+    assert!(
+        found.is_empty(),
+        "duplicate fact observations within a lifecycle phase"
+    );
 }

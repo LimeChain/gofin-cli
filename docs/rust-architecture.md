@@ -501,7 +501,7 @@ capability. The engine explicitly drives the following methods:
 | Phase | Adapter responsibility | Engine responsibility |
 | --- | --- | --- |
 | `collect` → `evaluate` | Acquire typed, attributed facts efficiently, including completeness evidence; synchronously interpret them to produce a candidate. | Select the operation and supply broker-owned context. |
-| `collect_final` → `finalize_candidate` | Acquire candidate-dependent transaction/simulation/price facts and purely finalize native financial terms. | Validate accounting and present the completed approval request. |
+| `collect_final` → `finalize_candidate` | Acquire candidate-dependent transaction/simulation facts and purely finalize native financial terms. | Validate accounting and present the completed approval request. |
 | Authorize | Supply protocol-specific terms through the prepared candidate. | Obtain or reuse valid authority; an adapter cannot grant it. |
 | `refresh` → `revalidate` → `confirm` → `finalize_validation` | Recollect necessary exact facts, purely recheck financial limits, collect exact frozen-transaction confirmation facts, and finalize validation. | Run this path after approval and separately under the resource lock; preserve approved deadlines/spelling and independently enforce authority. |
 | `execute` | Dispatch the immutable validated request through the runtime and journal handoff. | Persist submission identity and reservations before dispatch; bind the complete validated candidate, not only its calldata. |
@@ -518,7 +518,12 @@ Collection has dependency rounds. Aave first obtains verified provider and
 reserve identities, then collects dependent receipt, balance, index and risk
 facts. Reviewed sender-independent calls use verified Multicall3 at the pinned
 block. One block-bound collector is reused across rounds and anchors in that
-capture; historical blocks use their own collectors. The exact runtime bytecode
+capture; historical blocks use their own collectors. Exact target/calldata facts
+are memoized within a pass, including repeated entries in one batch and facts
+requested again by risk or anchor rounds. Results and mandatory failures retain
+their original ordering and meaning; no owner, sender or block identities are
+merged. Checked and unchecked reads share evidence only after the transport has
+enforced the stronger canonical block pin. The exact runtime bytecode
 must match the reviewed artifact. Missing or incompatible Multicall falls back
 to bounded direct reads; mandatory subcall failure or an incomplete result is an
 error, never an observed zero or a reason to hide a target revert. Snapshot
@@ -532,6 +537,14 @@ freezes the request before approval. Revalidation uses the frozen calldata
 without another MCP builder request. Simulation keeps its original sender and
 live runtime behavior; it is not an aggregate call. No capture-local evidence
 cache crosses approval or a preparation pass.
+
+Aave write preparation does not acquire optional display USD valuations:
+`valuation` is absent rather than refreshed during approval or admission.
+Protocol-intrinsic oracle evidence for health and explicit debt bounds remains
+mandatory. One uncached captured-block canonicality check follows the candidate's
+MCP preparation and exact simulation, catching a reorg during either operation.
+Initial captured headers are reused for anchor facts; independent end-of-pass
+canonicality checks remain live observations.
 
 MCP remains preferred for informational discovery and planning, and supplies
 independently validated unsigned transaction candidates. Replacing an exact RPC

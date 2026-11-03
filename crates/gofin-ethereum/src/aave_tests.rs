@@ -1859,3 +1859,57 @@ async fn aave_lifecycle_revalidates_with_no_io_in_pure_phases_and_preserves_dead
     assert_eq!(validated.action_deadline, prepared.action_deadline);
     assert_eq!(validated.binding, prepared.binding);
 }
+
+#[tokio::test]
+async fn reopened_zero_lineages_share_historical_header_bracket() {
+    struct HeaderProbe {
+        inner: Arc<Fixture>,
+        headers: std::sync::Mutex<Vec<Value>>,
+    }
+    #[async_trait]
+    impl EvmRpc for HeaderProbe {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_getBlockByNumber" {
+                self.headers.lock().unwrap().push(params.clone());
+            }
+            self.inner.request(method, params).await
+        }
+    }
+    let rpc = Arc::new(Fixture::new());
+    let mut a = adapter(rpc.clone());
+    let token = a.token(&lower_address(addr(101)), Some(20)).await.unwrap();
+    let supply = a
+        .snapshot_anchor(&token, addr(1), addr(110), PositionKind::Supply, 20)
+        .await
+        .unwrap();
+    let debt = a
+        .snapshot_anchor(&token, addr(1), addr(120), PositionKind::VariableDebt, 20)
+        .await
+        .unwrap();
+    let next = rpc.states.lock().unwrap().get(&20).unwrap().clone();
+    rpc.states.lock().unwrap().insert(21, next);
+    rpc.latest.store(21, std::sync::atomic::Ordering::SeqCst);
+    let probe = Arc::new(HeaderProbe {
+        inner: rpc,
+        headers: std::sync::Mutex::new(Vec::new()),
+    });
+    a.runtime = Arc::new(EvmRuntime::new(probe.clone(), 1, None));
+    let context = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![supply, debt],
+    };
+    a.prepare_with_context("aave.supply", &aave_input("aave.supply"), &context)
+        .await
+        .unwrap();
+    let headers = probe.headers.lock().unwrap();
+    assert_eq!(
+        headers.iter().filter(|params| params[0] == "0x14").count(),
+        2,
+        "one independent before/after bracket for both old anchors"
+    );
+    assert!(headers.iter().any(|params| params[0] == "latest"));
+    assert!(
+        headers.iter().any(|params| params[0] == "0x15"),
+        "new capture still has a numeric canonical recheck"
+    );
+}

@@ -470,13 +470,21 @@ mod tests {
         assert_eq!(collector.stats.aggregate_requests, 1);
         assert_eq!(collector.stats.direct_requests, 0);
         rpc.incomplete_aggregate.store(true, Ordering::SeqCst);
+        let repeated = collector.collect(calls.clone()).await;
+        assert!(repeated[0].is_ok());
+        assert_eq!(repeated[1].as_ref().unwrap_err().code, "TOKEN_CALL_FAILED");
+        assert_eq!(
+            collector.stats.aggregate_requests, 1,
+            "one pass retains exact observed facts and failures"
+        );
+        let mut collector = ReadCollector::new(&a, 1234).await;
         let results = collector.collect(calls).await;
         assert!(
             results
                 .iter()
                 .all(|r| r.as_ref().unwrap_err().code == "MULTICALL_INCOMPLETE")
         );
-        assert_eq!(collector.stats.aggregate_requests, 2);
+        assert_eq!(collector.stats.aggregate_requests, 1);
         assert_eq!(collector.stats.fallback_chunks, 0);
         assert_eq!(rpc.direct.load(Ordering::SeqCst), 0);
     }

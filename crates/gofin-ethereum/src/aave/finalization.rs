@@ -18,89 +18,8 @@ pub(crate) struct AaveFinalFacts<'a> {
     pub warnings: Vec<String>,
     pub simulation: &'a Bytes,
     pub original: Option<&'a Binding>,
-    /// Already verified unit-price observations; absence leaves valuation absent.
-    pub prices: Option<Vec<AssetPrice>>,
     pub observed_at: String,
     pub expires_at: String,
-}
-
-fn valuation(facts: &AaveFinalFacts<'_>, binding: &Binding, gas: U256) -> Result<Valuation> {
-    let prices = facts
-        .prices
-        .clone()
-        .ok_or_else(|| GoFinError::validation("Unit price observations are unavailable."))?;
-    let movement = if facts.operation == "aave.collateral" {
-        binding.supplied_before.clone().unwrap_or_default()
-    } else {
-        quantity(facts.amount)
-    };
-    let additional = if facts.operation == "aave.borrow" {
-        let rounding = binding
-            .debt_rounding_maximum
-            .as_ref()
-            .ok_or_else(|| GoFinError::validation("Borrow rounding bound is missing."))?;
-        quantity(add(facts.amount, u256(rounding)?)?)
-    } else {
-        Quantity::zero()
-    };
-    value_rows(
-        prices,
-        &binding.token,
-        facts.native_asset,
-        movement,
-        quantity(gas),
-        additional,
-    )
-}
-
-fn value_rows(
-    prices: Vec<AssetPrice>,
-    asset: &AssetId,
-    native: &AssetId,
-    movement: Quantity,
-    gas: Quantity,
-    additional: Quantity,
-) -> Result<Valuation> {
-    let from_row = |asset: &AssetId, units: Quantity| -> Result<Quantity> {
-        let row = prices
-            .iter()
-            .find(|price| price.asset == *asset)
-            .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))?;
-        units.mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
-    };
-    let movement_usd_micros = from_row(asset, movement)?;
-    let maximum_fee_usd_micros = from_row(native, gas)?;
-    let source = prices
-        .iter()
-        .find(|price| price.asset == *asset)
-        .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))?
-        .source
-        .clone();
-    let additional_allocation_usd_micros = if additional.is_zero() {
-        Quantity::zero()
-    } else {
-        from_row(asset, additional)?
-    };
-    let observed_at = prices
-        .iter()
-        .map(|price| {
-            chrono::DateTime::parse_from_rfc3339(&price.observed_at)
-                .map(|time| (time, price.observed_at.clone()))
-                .map_err(|_| GoFinError::validation("Price observation timestamp is invalid."))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .min_by_key(|(time, _)| *time)
-        .ok_or_else(|| GoFinError::validation("Unit price observations are unavailable."))?
-        .1;
-    Ok(Valuation {
-        movement_usd_micros,
-        maximum_fee_usd_micros,
-        additional_allocation_usd_micros,
-        observed_at,
-        source,
-        prices,
-    })
 }
 
 fn check_simulation(
@@ -208,8 +127,8 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         amount: amount(facts.native_asset, gas),
         treatment: CostTreatment::AdditionalDebit,
     });
-    // Optional display prices do not grant or gate the native financial intent.
-    let valuation = valuation(&facts, &facts.binding, gas).ok();
+    // USD is intentionally not fetched for approval or revalidation. Protocol
+    // risk prices are separate mandatory observations in the initial capture.
     let mut checks = vec![Check {
         name: "chain, deployment, balance and protocol prerequisites".into(), status: CheckStatus::Passed,
         detail: "Live reads validated exact wallet, deployment, token, route and allowance prerequisites.".into(),
@@ -290,7 +209,7 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         warnings: facts.warnings,
         observed_at: facts.observed_at,
         expires_at: facts.expires_at,
-        valuation,
+        valuation: None,
         intent: facts.intent,
         operation_version: 1,
         action_deadline: None,
@@ -303,56 +222,193 @@ mod tests {
     fn encoded(value: u64) -> Bytes {
         Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
     }
-    #[test]
-    fn valuation_uses_rounded_unit_rows_and_oldest_observation() {
-        let principal = AssetId {
-            network: "ethereum:1".into(),
-            reference: "principal".into(),
-            decimals: 0,
-        };
-        let native = AssetId {
-            network: "ethereum:1".into(),
-            reference: "native".into(),
-            decimals: 0,
-        };
-        let row = |asset: AssetId, usd: u64, units: u64, at: &str| AssetPrice {
-            asset,
-            usd_micros_per_unit: Quantity::from_u64(usd),
-            unit_atoms: Quantity::from_u64(units),
-            observed_at: at.into(),
-            source: "fixture".into(),
-        };
-        let prices = vec![
-            row(principal.clone(), 5, 2, "2026-01-02T00:00:00Z"),
-            row(native.clone(), 3, 2, "2026-01-01T00:00:00Z"),
-        ];
-        let value = value_rows(
-            prices.clone(),
-            &principal,
-            &native,
-            Quantity::from_u64(3),
-            Quantity::from_u64(3),
-            Quantity::from_u64(4),
-        )
-        .unwrap();
-        assert_eq!(value.movement_usd_micros, Quantity::from_u64(8));
-        assert_eq!(value.maximum_fee_usd_micros, Quantity::from_u64(5));
-        assert_eq!(
-            value.additional_allocation_usd_micros,
-            Quantity::from_u64(10)
-        );
-        assert_eq!(value.observed_at, "2026-01-01T00:00:00Z");
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountPrices(Arc<AtomicUsize>);
+    #[async_trait]
+    impl WalletValuation for CountPrices {
+        async fn quote_usd(&self, _: &AssetId, _: Quantity) -> Result<(Quantity, String)> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(GoFinError::validation("unexpected optional USD request"))
+        }
+    }
+
+    struct ReorgRpc {
+        inner: Arc<crate::tests::Fixture>,
+        reorg: Arc<AtomicBool>,
+        trigger_on_estimate: bool,
+    }
+    #[async_trait]
+    impl gofin_evm::EvmRpc for ReorgRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let mut result = self.inner.request(method, params.clone()).await?;
+            if method == "eth_estimateGas" && self.trigger_on_estimate {
+                self.reorg.store(true, Ordering::SeqCst);
+            }
+            if method == "eth_getBlockByNumber"
+                && params[0].as_str().is_some_and(|tag| tag.starts_with("0x"))
+                && self.reorg.load(Ordering::SeqCst)
+            {
+                result["hash"] = json!(format!("0x{}", "ab".repeat(32)));
+            }
+            Ok(result)
+        }
+    }
+
+    struct FeeRpc {
+        inner: Arc<crate::tests::Fixture>,
+        changed: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl gofin_evm::EvmRpc for FeeRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let mut result = self.inner.request(method, params.clone()).await?;
+            if method == "eth_getBlockByNumber"
+                && params[0] == "latest"
+                && self.changed.load(Ordering::SeqCst)
+            {
+                result["baseFeePerGas"] = json!("0xffffffffffffffff");
+            }
+            Ok(result)
+        }
+    }
+
+    struct ReorgMcp {
+        inner: crate::tests::SyntheticAaveMcp,
+        reorg: Arc<AtomicBool>,
+        trigger: bool,
+    }
+    #[async_trait]
+    impl crate::aave_mcp::AaveMcpTransport for ReorgMcp {
+        async fn post(
+            &self,
+            request: crate::aave_mcp::McpHttpRequest,
+        ) -> std::result::Result<crate::aave_mcp::McpHttpResponse, crate::aave_mcp::AaveMcpError>
+        {
+            let is_call = serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .is_some_and(|request| request["method"] == "tools/call");
+            let response = self.inner.post(request).await?;
+            if self.trigger && is_call {
+                self.reorg.store(true, Ordering::SeqCst);
+            }
+            Ok(response)
+        }
+    }
+
+    fn supply_input() -> Value {
+        let mut input = crate::tests::input();
+        input["token"] = json!(lower_address(crate::tests::addr(101)));
+        input["amount"] = json!("1");
+        input
+    }
+
+    #[tokio::test]
+    async fn preparation_and_refresh_skip_usd_quotes_and_refresh_reuses_calldata() {
+        let rpc = Arc::new(crate::tests::Fixture::new());
+        let quotes = Arc::new(AtomicUsize::new(0));
+        let mcp_calls = Arc::new(AtomicUsize::new(0));
+        let adapter = crate::tests::adapter(rpc)
+            .with_wallet_valuation(Arc::new(CountPrices(quotes.clone())))
+            .with_aave_mcp(crate::aave_mcp::AaveMcpClient::with_transport(Arc::new(
+                crate::tests::SyntheticAaveMcp {
+                    calls: mcp_calls.clone(),
+                },
+            )));
+        let prepared = adapter
+            .prepare("aave.supply", &supply_input())
+            .await
+            .unwrap();
+        assert!(prepared.valuation.is_none());
         assert!(
-            value_rows(
-                vec![prices[0].clone()],
-                &principal,
-                &native,
-                Quantity::from_u64(3),
-                Quantity::from_u64(3),
-                Quantity::zero()
-            )
-            .is_err()
+            !prepared.intent.maximum_costs.is_empty(),
+            "native fee remains bounded"
         );
+        assert_eq!(mcp_calls.load(Ordering::SeqCst), 1);
+        let refreshed = adapter.revalidate(&prepared).await.unwrap();
+        assert_eq!(refreshed.binding, prepared.binding);
+        assert_eq!(refreshed.intent, prepared.intent);
+        assert!(refreshed.valuation.is_none());
+        assert_eq!(quotes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            mcp_calls.load(Ordering::SeqCst),
+            1,
+            "refresh must reuse the approved calldata"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rechecks_frozen_nonce_and_fee_without_new_mcp_call() {
+        let rpc = Arc::new(crate::tests::Fixture::new());
+        let fee_changed = Arc::new(AtomicBool::new(false));
+        let mcp_calls = Arc::new(AtomicUsize::new(0));
+        let mut adapter = crate::tests::adapter(rpc.clone());
+        adapter.runtime = Arc::new(gofin_evm::EvmRuntime::new(
+            Arc::new(FeeRpc {
+                inner: rpc.clone(),
+                changed: fee_changed.clone(),
+            }),
+            1,
+            None,
+        ));
+        adapter = adapter.with_aave_mcp(crate::aave_mcp::AaveMcpClient::with_transport(Arc::new(
+            crate::tests::SyntheticAaveMcp {
+                calls: mcp_calls.clone(),
+            },
+        )));
+        let prepared = adapter
+            .prepare("aave.supply", &supply_input())
+            .await
+            .unwrap();
+        rpc.nonce.store(1, Ordering::SeqCst);
+        assert_eq!(
+            adapter.revalidate(&prepared).await.unwrap_err().code,
+            "NONCE_CHANGED"
+        );
+        rpc.nonce.store(0, Ordering::SeqCst);
+        fee_changed.store(true, Ordering::SeqCst);
+        assert_eq!(
+            adapter.revalidate(&prepared).await.unwrap_err().code,
+            "FEE_BOUND_CHANGED"
+        );
+        assert_eq!(mcp_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reorg_during_mcp_or_simulation_rejects_candidate() {
+        for trigger_on_mcp in [true, false] {
+            let rpc = Arc::new(crate::tests::Fixture::new());
+            let reorg = Arc::new(AtomicBool::new(false));
+            let mcp_calls = Arc::new(AtomicUsize::new(0));
+            let mut adapter = crate::tests::adapter(rpc.clone());
+            adapter.runtime = Arc::new(gofin_evm::EvmRuntime::new(
+                Arc::new(ReorgRpc {
+                    inner: rpc,
+                    reorg: reorg.clone(),
+                    trigger_on_estimate: !trigger_on_mcp,
+                }),
+                1,
+                None,
+            ));
+            adapter = adapter.with_aave_mcp(crate::aave_mcp::AaveMcpClient::with_transport(
+                Arc::new(ReorgMcp {
+                    inner: crate::tests::SyntheticAaveMcp {
+                        calls: mcp_calls.clone(),
+                    },
+                    reorg,
+                    trigger: trigger_on_mcp,
+                }),
+            ));
+            let failure = adapter
+                .prepare("aave.supply", &supply_input())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.code, "AAVE_READ_CHANGED",
+                "MCP trigger: {trigger_on_mcp}"
+            );
+            assert_eq!(mcp_calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

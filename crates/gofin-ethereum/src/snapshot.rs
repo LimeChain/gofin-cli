@@ -112,6 +112,28 @@ impl EvmRpc for SnapshotRpc {
         if !self.pinned(method, &params) {
             return self.fetch(method, params, requirements).await;
         }
+        // Every cacheable state fact is fetched with canonical pin requirements.
+        // Thus a later checked caller never reuses weaker, unchecked evidence.
+        // Conflicting requirements remain distinct and are validated by transport.
+        let requirements = if matches!(
+            method,
+            "eth_call"
+                | "eth_getCode"
+                | "eth_getBalance"
+                | "eth_getTransactionCount"
+                | "eth_getStorageAt"
+        ) && requirements.minimum_block.is_none()
+            && requirements
+                .pin_block
+                .is_none_or(|height| height == self.block)
+        {
+            gofin_evm::RpcReadRequirements {
+                pin_block: Some(self.block),
+                ..requirements
+            }
+        } else {
+            requirements
+        };
         // Exact request identity includes calldata, sender (if present), target,
         // and numeric block tag. Never share this cache with another capture.
         // A weaker read cannot satisfy a caller's stronger endpoint/hash or
@@ -666,13 +688,13 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn checked_snapshot_preserves_constraints_and_does_not_reuse_weaker_cache() {
+    async fn checked_snapshot_upgrades_pinned_facts_before_coalescing() {
         let probe = Arc::new(CheckedProbe::default());
         let rpc = SnapshotRpc::preparation(probe.clone(), 20);
         let params = json!(["0x0000000000000000000000000000000000000001", "0x14"]);
         assert_eq!(
             rpc.request("eth_getBalance", params.clone()).await.unwrap(),
-            json!("0x1")
+            json!("0x2")
         );
         for _ in 0..2 {
             assert_eq!(
@@ -690,9 +712,8 @@ mod tests {
             );
         }
         let calls = probe.0.lock().await;
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].pin_block, None);
-        assert_eq!(calls[1].pin_block, Some(20));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pin_block, Some(20));
         drop(calls);
         for _ in 0..2 {
             rpc.request_checked(
@@ -708,7 +729,7 @@ mod tests {
         }
         assert_eq!(
             probe.0.lock().await.len(),
-            4,
+            3,
             "historical constraints must reach transport each time"
         );
         assert!(
@@ -725,7 +746,7 @@ mod tests {
         );
         assert_eq!(
             probe.0.lock().await.len(),
-            4,
+            3,
             "inadequate captured head must fail before transport"
         );
     }
@@ -776,6 +797,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(probe.0.load(Ordering::SeqCst), 6);
+    }
+    #[tokio::test]
+    async fn conflicting_requirements_never_reuse_a_cached_pinned_fact() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        let params = json!(["0x0000000000000000000000000000000000000001", "0x14"]);
+        rpc.request("eth_getBalance", params.clone()).await.unwrap();
+        assert!(
+            rpc.request_checked(
+                "eth_getBalance",
+                params.clone(),
+                gofin_evm::RpcReadRequirements {
+                    pin_block: Some(19),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            rpc.request_checked(
+                "eth_getBalance",
+                params,
+                gofin_evm::RpcReadRequirements {
+                    minimum_block: Some(20),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(probe.0.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn pinned_calls_never_share_results_across_senders() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        for sender in [
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000001",
+        ] {
+            rpc.request("eth_call", json!([{"to":"0x0000000000000000000000000000000000000003", "data":"0x12345678", "from":sender}, "0x14"])).await.unwrap();
+        }
+        assert_eq!(probe.0.load(Ordering::SeqCst), 2);
     }
     #[tokio::test]
     async fn snapshot_cache_coalesces_only_exact_pinned_reads_and_rejects_writes_before_transport()

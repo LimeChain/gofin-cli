@@ -416,7 +416,22 @@ impl EthereumAdapter {
         collector: &mut ReadCollector,
     ) -> Result<AnchorFacts> {
         let (facts, _) = self
-            .observe_anchor_facts_with_extra(ctx, block, zero, collector, Vec::new())
+            .observe_anchor_facts_with_extra(ctx, block, zero, collector, Vec::new(), None)
+            .await?;
+        Ok(facts)
+    }
+    /// Reuse the already-observed capture header; callers still perform the
+    /// uncached canonicality check at the end of the pass.
+    pub(crate) async fn observe_anchor_facts_with_collector_and_header(
+        &self,
+        ctx: &AnchorContext,
+        block: u64,
+        zero: bool,
+        collector: &mut ReadCollector,
+        header: &Value,
+    ) -> Result<AnchorFacts> {
+        let (facts, _) = self
+            .observe_anchor_facts_with_extra(ctx, block, zero, collector, Vec::new(), Some(header))
             .await?;
         Ok(facts)
     }
@@ -427,6 +442,7 @@ impl EthereumAdapter {
         zero: bool,
         collector: &mut ReadCollector,
         extra: Vec<ReadCall>,
+        observed_header: Option<&Value>,
     ) -> Result<(AnchorFacts, Vec<Result<Vec<u8>>>)> {
         require(
             collector.block() == block,
@@ -479,14 +495,18 @@ impl EthereumAdapter {
         } else {
             decode_call::<abi::Pool::getReserveNormalizedVariableDebtCall>(values.next())?
         };
-        let header = self
-            .runtime
-            .rpc
-            .request(
-                "eth_getBlockByNumber",
-                json!([gofin_evm::block_tag(Some(block)), false]),
-            )
-            .await?;
+        let header = match observed_header {
+            Some(header) => header.clone(),
+            None => {
+                self.runtime
+                    .rpc
+                    .request(
+                        "eth_getBlockByNumber",
+                        json!([gofin_evm::block_tag(Some(block)), false]),
+                    )
+                    .await?
+            }
+        };
         let block_hash = header["hash"].as_str().unwrap_or("").to_owned();
         hash(&block_hash)?;
         require(
@@ -660,6 +680,7 @@ impl EthereumAdapter {
                 false,
                 &mut inclusion_collector,
                 extra,
+                None,
             )
             .await?;
         let mut extra = extra.into_iter();

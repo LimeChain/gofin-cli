@@ -573,27 +573,22 @@ impl EthereumAdapter {
         let wallet = adapter.resolve(&input.request, true)?.clone();
         let owner = address(&wallet.address)?;
         adapter.runtime.assert_chain().await?;
-        let block = gofin_evm::rpc_u64(
-            &adapter
-                .runtime
-                .rpc
-                .request("eth_blockNumber", json!([]))
-                .await?,
-        )?;
-        let tag = gofin_evm::block_tag(Some(block));
-        let params = json!([tag, false]);
+        // One latest header supplies both the capture height and its identity.
+        // Numeric state reads and the independent final canonical check remain pinned.
         let header = adapter
             .runtime
             .rpc
-            .request("eth_getBlockByNumber", params.clone())
+            .request("eth_getBlockByNumber", json!(["latest", false]))
             .await?;
+        let block = gofin_evm::rpc_u64(&header["number"])?;
+        require(
+            block > 0,
+            "AAVE_READ_CHANGED",
+            "Preparation block identity is invalid.",
+        )?;
         let hash = header["hash"].as_str().unwrap_or("").to_owned();
         gofin_evm::hash(&hash)?;
-        require(
-            gofin_evm::rpc_u64(&header["number"])? == block,
-            "AAVE_READ_CHANGED",
-            "Preparation block identity differs.",
-        )?;
+        let params = json!([gofin_evm::block_tag(Some(block)), false]);
         let mut reader = adapter.clone();
         reader.runtime = Arc::new(EvmRuntime::new(
             Arc::new(snapshot::SnapshotRpc::preparation(
@@ -793,17 +788,24 @@ impl EthereumAdapter {
             token: &token,
             owner,
             block,
+            header: &header,
         };
-        let supply_anchor = collect_context_anchor(
+        let mut historical_collectors = BTreeMap::new();
+        let mut historical_headers = BTreeMap::new();
+        let mut supply_anchor = collect_context_anchor(
             &anchor_capture,
             &mut collector,
+            &mut historical_collectors,
+            &mut historical_headers,
             a_token,
             PositionKind::Supply,
         )
         .await?;
-        let debt_anchor = collect_context_anchor(
+        let mut debt_anchor = collect_context_anchor(
             &anchor_capture,
             &mut collector,
+            &mut historical_collectors,
+            &mut historical_headers,
             variable_debt,
             PositionKind::VariableDebt,
         )
@@ -818,6 +820,48 @@ impl EthereumAdapter {
             "AAVE_READ_CHANGED",
             "Preparation block became noncanonical.",
         )?;
+        // Reopened lineages at one historical height share a single header
+        // bracket around both anchor observations. The final current-block
+        // canonical check above also closes the bracket when heights coincide.
+        let mut historical_after = BTreeMap::new();
+        for anchor in [&mut supply_anchor, &mut debt_anchor] {
+            if !anchor.reopened {
+                continue;
+            }
+            let height = anchor
+                .prior
+                .as_ref()
+                .and_then(|prior| prior.evidence["block"].as_u64())
+                .expect("validated prior block");
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                historical_after.entry(height)
+            {
+                let end = if height == block {
+                    after.clone()
+                } else {
+                    adapter
+                        .runtime
+                        .rpc
+                        .request(
+                            "eth_getBlockByNumber",
+                            json!([gofin_evm::block_tag(Some(height)), false]),
+                        )
+                        .await?
+                };
+                entry.insert(end);
+            }
+            let before = historical_headers
+                .get(&height)
+                .expect("historical opening header")
+                .clone();
+            anchor.historical_headers = Some((
+                before,
+                historical_after
+                    .get(&height)
+                    .expect("historical closing header")
+                    .clone(),
+            ));
+        }
         Ok(WriteEvidence {
             chain_id: adapter.config.chain_id,
             wallet,
@@ -854,10 +898,13 @@ struct AnchorCapture<'a> {
     token: &'a reads::Token,
     owner: Address,
     block: u64,
+    header: &'a Value,
 }
 async fn collect_context_anchor(
     capture: &AnchorCapture<'_>,
     collector: &mut ReadCollector,
+    historical_collectors: &mut BTreeMap<u64, ReadCollector>,
+    historical_headers: &mut BTreeMap<u64, Value>,
     receipt: Address,
     kind: PositionKind,
 ) -> Result<ContextAnchorEvidence> {
@@ -869,6 +916,7 @@ async fn collect_context_anchor(
         token,
         owner,
         block,
+        header,
     } = *capture;
     use crate::proof::aave_observation::AnchorContext;
     let context = AnchorContext {
@@ -924,20 +972,24 @@ async fn collect_context_anchor(
                 })
         })
         .transpose()?;
-    let old_params = old_block.map(|n| json!([gofin_evm::block_tag(Some(n)), false]));
-    let before = if reopened {
-        Some(
-            live.runtime
-                .rpc
-                .request(
-                    "eth_getBlockByNumber",
-                    old_params.clone().expect("prior block"),
-                )
-                .await?,
-        )
-    } else {
-        None
-    };
+    if reopened {
+        let height = old_block.expect("prior block");
+        if let std::collections::btree_map::Entry::Vacant(entry) = historical_headers.entry(height)
+        {
+            let observed = if height == block {
+                header.clone()
+            } else {
+                live.runtime
+                    .rpc
+                    .request(
+                        "eth_getBlockByNumber",
+                        json!([gofin_evm::block_tag(Some(height)), false]),
+                    )
+                    .await?
+            };
+            entry.insert(observed);
+        }
+    }
     let facts_block = if reopened || prior.is_none() {
         block
     } else {
@@ -949,23 +1001,48 @@ async fn collect_context_anchor(
             .is_some_and(|a| a.evidence["method"] == json!("aave-zero-observed-backing"));
     let facts = if facts_block == block {
         reader
-            .observe_anchor_facts_with_collector(&context, facts_block, zero, collector)
+            .observe_anchor_facts_with_collector_and_header(
+                &context,
+                facts_block,
+                zero,
+                collector,
+                header,
+            )
             .await?
     } else {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            historical_headers.entry(facts_block)
+        {
+            let observed = live
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([gofin_evm::block_tag(Some(facts_block)), false]),
+                )
+                .await?;
+            entry.insert(observed);
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            historical_collectors.entry(facts_block)
+        {
+            entry.insert(ReadCollector::new(reader, facts_block).await);
+        }
         reader
-            .observe_anchor_facts(&context, facts_block, zero)
+            .observe_anchor_facts_with_collector_and_header(
+                &context,
+                facts_block,
+                zero,
+                historical_collectors
+                    .get_mut(&facts_block)
+                    .expect("historical collector"),
+                historical_headers
+                    .get(&facts_block)
+                    .expect("historical header"),
+            )
             .await?
     };
-    let historical_headers = if let Some(before) = before {
-        let after = live
-            .runtime
-            .rpc
-            .request("eth_getBlockByNumber", old_params.expect("prior block"))
-            .await?;
-        Some((before, after))
-    } else {
-        None
-    };
+    let historical_headers = None;
     Ok(ContextAnchorEvidence {
         context,
         prior,
@@ -1490,15 +1567,14 @@ pub(crate) struct WriteFinalEvidence {
     pub transaction: FrozenTransaction,
     pub simulation: gofin_evm::alloy::primitives::Bytes,
     pub live_proxy: String,
-    pub prices: Option<Vec<AssetPrice>>,
     pub observed_at: String,
     pub expires_at: String,
     pub native_asset: AssetId,
 }
 
 impl EthereumAdapter {
-    /// Collect risk, the exact transaction and optional presentation prices;
-    /// the candidate and all later economic decisions are pure values.
+    /// Collect the exact transaction and recheck the captured canonical block.
+    /// The candidate and all later economic decisions are pure values.
     pub(crate) async fn collect_aave_final(
         &self,
         candidate: &WriteCandidate,
@@ -1508,29 +1584,6 @@ impl EthereumAdapter {
         };
         let selected = self.selected_market(&candidate.input)?;
         let adapter = selected.as_ref().unwrap_or(self);
-        let params = json!([gofin_evm::block_tag(Some(candidate.block)), false]);
-        let before = adapter
-            .runtime
-            .rpc
-            .request("eth_getBlockByNumber", params.clone())
-            .await?;
-        require(
-            gofin_evm::rpc_u64(&before["number"])? == candidate.block
-                && before["hash"] == candidate.block_hash,
-            "AAVE_READ_CHANGED",
-            "Preparation block became noncanonical.",
-        )?;
-        let after = adapter
-            .runtime
-            .rpc
-            .request("eth_getBlockByNumber", params)
-            .await?;
-        require(
-            gofin_evm::rpc_u64(&after["number"])? == candidate.block
-                && after["hash"] == candidate.block_hash,
-            "AAVE_READ_CHANGED",
-            "Preparation block became noncanonical.",
-        )?;
         let action = match candidate.operation.as_str() {
             "aave.supply" => AaveMcpAction::Supply,
             "aave.borrow" => AaveMcpAction::Borrow,
@@ -1623,39 +1676,23 @@ impl EthereumAdapter {
                 .await?;
             (prepared.transaction, prepared.simulation)
         };
-        let native_asset = adapter.native_asset();
-        let prices = async {
-            let mut assets = vec![candidate.binding.token.clone()];
-            if native_asset != candidate.binding.token {
-                assets.push(native_asset.clone());
-            }
-            let amounts = assets
-                .into_iter()
-                .map(|asset| {
-                    Ok(Amount {
-                        atoms: quantity(pow10(asset.decimals)?),
-                        asset,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok::<Vec<AssetPrice>, GoFinError>(
-                adapter
-                    .quote_verified_assets_usd_observed(&amounts)
-                    .await?
-                    .into_iter()
-                    .zip(amounts)
-                    .map(|((usd, source, observed_at), amount)| AssetPrice {
-                        asset: amount.asset,
-                        usd_micros_per_unit: usd,
-                        unit_atoms: amount.atoms,
-                        observed_at,
-                        source,
-                    })
-                    .collect(),
+        // Check after provider construction and the exact simulation/fee reads.
+        // This is a fresh transport read, not the per-capture read cache.
+        let canonical = adapter
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([gofin_evm::block_tag(Some(candidate.block)), false]),
             )
-        }
-        .await
-        .ok();
+            .await?;
+        require(
+            gofin_evm::rpc_u64(&canonical["number"])? == candidate.block
+                && canonical["hash"] == candidate.block_hash,
+            "AAVE_READ_CHANGED",
+            "Preparation block became noncanonical.",
+        )?;
+        let native_asset = adapter.native_asset();
         let observed_at = adapter.clock.now().to_rfc3339();
         let expires_at = (adapter.clock.now() + chrono::Duration::seconds(300))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -1663,7 +1700,6 @@ impl EthereumAdapter {
             transaction,
             simulation,
             live_proxy,
-            prices,
             observed_at,
             expires_at,
             native_asset,
@@ -1702,7 +1738,6 @@ pub(crate) fn finalize_write(
         warnings,
         simulation: &evidence.simulation,
         original: candidate.original.as_ref(),
-        prices: evidence.prices.clone(),
         observed_at: evidence.observed_at.clone(),
         expires_at: evidence.expires_at.clone(),
     })

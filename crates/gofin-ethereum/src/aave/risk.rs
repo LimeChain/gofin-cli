@@ -359,8 +359,9 @@ impl EthereumAdapter {
         block: u64,
         selected_users: Option<&[RiskUser]>,
     ) -> Result<()> {
+        let mut collector = ReadCollector::new(self, block).await;
         let evidence = self
-            .collect_borrow_restrictions(owner, token, block, selected_users)
+            .collect_borrow_restrictions(owner, token, block, selected_users, &mut collector)
             .await?;
         evaluate_borrow_restrictions(token, qty, &evidence)
     }
@@ -370,17 +371,18 @@ impl EthereumAdapter {
         token: &reads::Token,
         block: u64,
         selected_users: Option<&[RiskUser]>,
+        collector: &mut ReadCollector,
     ) -> Result<BorrowRestrictionEvidence> {
         let pool = address(&self.aave()?.pool)?;
-        let mode = self.aave_mode(owner, Some(block)).await?;
-        let config = self
-            .runtime
+        let mode = collector
+            .call(pool, &Pool::getUserEModeCall { user: owner })
+            .await?;
+        let config = collector
             .call(
                 pool,
                 &Pool::getConfigurationCall {
                     asset: address(&token.reference)?,
                 },
-                Some(block),
             )
             .await?;
         let emode = if mode > U256::ZERO {
@@ -390,24 +392,20 @@ impl EthereumAdapter {
                 "AAVE_MODE_UNSUPPORTED",
                 "Unrecognized eMode category.",
             )?;
-            let bitmap = self
-                .runtime
+            let bitmap = collector
                 .call(
                     pool,
                     &Pool::getEModeCategoryBorrowableBitmapCall {
                         id: mode.to::<u8>(),
                     },
-                    Some(block),
                 )
                 .await?;
-            let reserve = self
-                .runtime
+            let reserve = collector
                 .call(
                     pool,
                     &Pool::getReserveDataCall {
                         asset: address(&token.reference)?,
                     },
-                    Some(block),
                 )
                 .await?;
             Some((reserve.id, bitmap))
@@ -430,13 +428,12 @@ impl EthereumAdapter {
                 && !ceiling.is_zero()
             {
                 Some(
-                    self.runtime
+                    collector
                         .call(
                             pool,
                             &Pool::getReserveDataCall {
                                 asset: address(reference)?,
                             },
-                            Some(block),
                         )
                         .await?
                         .isolationModeTotalDebt,
@@ -472,7 +469,7 @@ impl EthereumAdapter {
             .collect_bitmap_risk_users(owner, token, block, collector)
             .await?;
         let restrictions = self
-            .collect_borrow_restrictions(owner, token, block, Some(&users))
+            .collect_borrow_restrictions(owner, token, block, Some(&users), collector)
             .await?;
         let health = self
             .collect_health(
@@ -756,12 +753,8 @@ impl EthereumAdapter {
         let account = if let Some(account) = account {
             account.clone()
         } else {
-            self.runtime
-                .call(
-                    pool,
-                    &Pool::getUserAccountDataCall { user: owner },
-                    Some(block),
-                )
+            collector
+                .call(pool, &Pool::getUserAccountDataCall { user: owner })
                 .await?
         };
         let oracle = address(&self.aave()?.oracle)?;
@@ -769,11 +762,11 @@ impl EthereumAdapter {
             None
         } else {
             Some((
-                self.runtime
-                    .call(oracle, &Oracle::BASE_CURRENCYCall {}, Some(block))
+                collector
+                    .call(oracle, &Oracle::BASE_CURRENCYCall {})
                     .await?,
-                self.runtime
-                    .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {}, Some(block))
+                collector
+                    .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {})
                     .await?,
             ))
         };
@@ -781,13 +774,12 @@ impl EthereumAdapter {
             None
         } else {
             Some(
-                self.runtime
+                collector
                     .call(
                         oracle,
                         &Oracle::getAssetPriceCall {
                             asset: address(&token.reference)?,
                         },
-                        Some(block),
                     )
                     .await?,
             )
@@ -798,7 +790,9 @@ impl EthereumAdapter {
                 category_bitmap: 0,
                 collateral: Vec::new(),
             };
-            let mode = self.aave_mode(owner, Some(block)).await?;
+            let mode = collector
+                .call(pool, &Pool::getUserEModeCall { user: owner })
+                .await?;
             require(
                 mode <= U256::from(255),
                 "AAVE_MODE_UNSUPPORTED",
@@ -807,22 +801,13 @@ impl EthereumAdapter {
             if !mode.is_zero() {
                 let id = mode.to::<u8>();
                 details.category_threshold = Some(
-                    self.runtime
-                        .call(
-                            pool,
-                            &Pool::getEModeCategoryCollateralConfigCall { id },
-                            Some(block),
-                        )
+                    collector
+                        .call(pool, &Pool::getEModeCategoryCollateralConfigCall { id })
                         .await?
                         .liquidationThreshold,
                 );
-                details.category_bitmap = self
-                    .runtime
-                    .call(
-                        pool,
-                        &Pool::getEModeCategoryCollateralBitmapCall { id },
-                        Some(block),
-                    )
+                details.category_bitmap = collector
+                    .call(pool, &Pool::getEModeCategoryCollateralBitmapCall { id })
                     .await?;
             }
             let fetched;
@@ -849,36 +834,29 @@ impl EthereumAdapter {
                 let (a_token, _, _) = reserve.receipt_addresses()?;
                 let scaled = if apply_removal && reference == token.reference && removed.is_some() {
                     Some(
-                        self.runtime
-                            .call(
-                                a_token,
-                                &AToken::scaledBalanceOfCall { user: owner },
-                                Some(block),
-                            )
+                        collector
+                            .call(a_token, &AToken::scaledBalanceOfCall { user: owner })
                             .await?,
                     )
                 } else {
                     None
                 };
-                let price = self
-                    .runtime
+                let price = collector
                     .call(
                         oracle,
                         &Oracle::getAssetPriceCall {
                             asset: address(&reference)?,
                         },
-                        Some(block),
                     )
                     .await?;
                 let reserve_id = if details.category_threshold.is_some() {
                     Some(
-                        self.runtime
+                        collector
                             .call(
                                 pool,
                                 &Pool::getReserveDataCall {
                                     asset: address(&reference)?,
                                 },
-                                Some(block),
                             )
                             .await?
                             .id,
