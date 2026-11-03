@@ -486,6 +486,27 @@ impl EvmRpc for WorkflowEvm {
                     AddressesProvider::getPriceOracleCall::SELECTOR => encoded(addr(ORACLE)),
                     AddressesProvider::getPoolDataProviderCall::SELECTOR => encoded(internal(210)),
                     Pool::getReservesListCall::SELECTOR => encoded(vec![addr(WETH), addr(USDC)]),
+                    Pool::getUserConfigurationCall::SELECTOR => encoded(
+                        (if s.supply.is_zero() {
+                            U256::ZERO
+                        } else {
+                            U256::from(2)
+                        }) | (if s.debt.is_zero() {
+                            U256::ZERO
+                        } else {
+                            U256::from(4)
+                        }),
+                    ),
+                    Pool::getReserveAddressByIdCall::SELECTOR => {
+                        let id = Pool::getReserveAddressByIdCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .id;
+                        encoded(match id {
+                            0 => addr(WETH),
+                            1 => addr(USDC),
+                            _ => Address::ZERO,
+                        })
+                    }
                     Pool::getConfigurationCall::SELECTOR => encoded(
                         U256::from(8000)
                             | (U256::from(8500) << 16)

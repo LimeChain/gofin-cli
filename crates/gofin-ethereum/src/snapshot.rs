@@ -40,6 +40,7 @@ impl SnapshotRpc {
         let index = match method {
             "eth_call" | "eth_getCode" | "eth_getBalance" | "eth_getTransactionCount" => 1,
             "eth_getBlockByNumber" => 0,
+            "eth_getStorageAt" => 2,
             _ => return false,
         };
         params[index].as_str() == Some(self.tag.as_str())
@@ -63,6 +64,7 @@ impl EvmRpc for SnapshotRpc {
                 method,
                 "eth_call"
                     | "eth_getCode"
+                    | "eth_getStorageAt"
                     | "eth_getBalance"
                     | "eth_getTransactionCount"
                     | "eth_getBlockByNumber"
@@ -619,6 +621,22 @@ mod tests {
             tokio::task::yield_now().await;
             Ok(json!("0x0"))
         }
+    }
+    #[tokio::test]
+    async fn storage_cache_only_shares_exact_pinned_block_requests() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        for tag in [
+            "0x14", "0x14", "latest", "latest", "pending", "pending", "0x13", "0x13",
+        ] {
+            rpc.request(
+                "eth_getStorageAt",
+                json!(["0x0000000000000000000000000000000000000001", "0x00", tag]),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(probe.0.load(Ordering::SeqCst), 7);
     }
     #[tokio::test]
     async fn preparation_cache_pins_latest_but_never_aliases_historical_or_pending_reads() {

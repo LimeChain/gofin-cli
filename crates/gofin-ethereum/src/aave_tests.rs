@@ -1492,3 +1492,177 @@ async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes()
             && params[1] == "0x15"
     }));
 }
+
+#[tokio::test]
+async fn borrow_rejects_invalid_bitmap_reserve_identity_and_flag_mismatch() {
+    for case in ["missing", "duplicate", "flag_mismatch"] {
+        let rpc = Arc::new(Fixture::new());
+        {
+            let mut states = rpc.states.lock().unwrap();
+            let state = states.get_mut(&20).unwrap();
+            state.scaled_supply = U256::from(10_000_000);
+            state.collateral = true;
+        }
+        match case {
+            "missing" => {
+                rpc.call_overrides.lock().unwrap().insert(
+                    Pool::getReserveAddressByIdCall::SELECTOR,
+                    abi_value(Address::ZERO),
+                );
+            }
+            "duplicate" => {
+                rpc.call_overrides.lock().unwrap().insert(
+                    Pool::getReserveAddressByIdCall::SELECTOR,
+                    abi_value(addr(101)),
+                );
+            }
+            "flag_mismatch" => {
+                rpc.call_overrides.lock().unwrap().insert(
+                    Pool::getUserConfigurationCall::SELECTOR,
+                    abi_value(U256::ZERO),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let a = adapter(rpc);
+        assert_eq!(
+            a.prepare("aave.borrow", &aave_input("aave.borrow"))
+                .await
+                .unwrap_err()
+                .code,
+            "AAVE_USER_CONFIGURATION_INVALID",
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn borrow_revalidation_rechecks_collateral_and_debt() {
+    for case in ["collateral", "debt"] {
+        let rpc = Arc::new(Fixture::new());
+        {
+            let mut states = rpc.states.lock().unwrap();
+            let state = states.get_mut(&20).unwrap();
+            state.scaled_supply = U256::from(10_000_000);
+            state.collateral = true;
+        }
+        let a = adapter(rpc.clone());
+        let prepared = a
+            .prepare("aave.borrow", &aave_input("aave.borrow"))
+            .await
+            .unwrap();
+        {
+            let mut states = rpc.states.lock().unwrap();
+            let state = states.get_mut(&20).unwrap();
+            if case == "collateral" {
+                state.collateral = false;
+            } else {
+                state.scaled_debt = U256::from(1_000_000);
+            }
+        }
+        assert!(a.revalidate(&prepared).await.is_err(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn borrow_rejects_reorg_and_proxy_upgrade_during_capture() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Changing {
+        inner: Arc<Fixture>,
+        headers: AtomicUsize,
+        proxy: bool,
+    }
+    #[async_trait]
+    impl EvmRpc for Changing {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let pinned_storage = method == "eth_getStorageAt" && params[2] == "0x14";
+            let mut result = self.inner.request(method, params).await?;
+            if self.proxy && pinned_storage {
+                self.inner.aave_implementation.store(302, Ordering::SeqCst);
+            }
+            if !self.proxy
+                && method == "eth_getBlockByNumber"
+                && self.headers.fetch_add(1, Ordering::SeqCst) >= 2
+            {
+                result["hash"] = json!(format!("0x{}", "ff".repeat(32)));
+            }
+            Ok(result)
+        }
+    }
+    for proxy in [false, true] {
+        let rpc = Arc::new(Fixture::new());
+        {
+            let mut states = rpc.states.lock().unwrap();
+            let state = states.get_mut(&20).unwrap();
+            state.scaled_supply = U256::from(10_000_000);
+            state.collateral = true;
+        }
+        let mut a = adapter(rpc.clone());
+        a.runtime = Arc::new(EvmRuntime::new(
+            Arc::new(Changing {
+                inner: rpc,
+                headers: AtomicUsize::new(0),
+                proxy,
+            }),
+            1,
+            None,
+        ));
+        let error = a
+            .prepare("aave.borrow", &aave_input("aave.borrow"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            if proxy {
+                "AAVE_IMPLEMENTATION_CHANGED"
+            } else {
+                "AAVE_READ_CHANGED"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn borrow_rejects_flagged_reserve_id_mismatch() {
+    struct BadId(Arc<Fixture>);
+    #[async_trait]
+    impl EvmRpc for BadId {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let data = if method == "eth_call" {
+                gofin_evm::rpc_bytes(&params[0]["data"]).unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            let bad = data.len() >= 4
+                && data[..4] == Pool::getReserveDataCall::SELECTOR
+                && Pool::getReserveDataCall::abi_decode_validate(&data)
+                    .unwrap()
+                    .asset
+                    == addr(102);
+            let value = self.0.request(method, params).await?;
+            if bad {
+                let mut bytes = gofin_evm::rpc_bytes(&value)?.to_vec();
+                bytes[7 * 32 + 31] = 7;
+                Ok(json!(hex_bytes(&bytes)))
+            } else {
+                Ok(value)
+            }
+        }
+    }
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
+    }
+    let mut a = adapter(rpc.clone());
+    a.runtime = Arc::new(EvmRuntime::new(Arc::new(BadId(rpc)), 1, None));
+    assert_eq!(
+        a.prepare("aave.borrow", &aave_input("aave.borrow"))
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_USER_CONFIGURATION_INVALID"
+    );
+}

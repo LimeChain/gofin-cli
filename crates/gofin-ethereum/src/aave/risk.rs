@@ -4,6 +4,13 @@ use crate::abi::*;
 use gofin_evm::{EvmRuntime, rpc_u64, u256};
 use tokio::task::JoinSet;
 
+type RiskUser = (String, U256, DataProvider::getUserReserveDataReturn);
+
+struct RiskObservation<'a> {
+    block: u64,
+    users: Option<&'a [RiskUser]>,
+}
+
 impl EthereumAdapter {
     // One short-lived, read-only capture. All child work shares an eight-request
     // ceiling and exact-request cache; neither cache nor block survives a retry.
@@ -61,7 +68,7 @@ impl EthereumAdapter {
         owner: Address,
         block: u64,
         configurations: bool,
-    ) -> Result<Vec<(String, U256, DataProvider::getUserReserveDataReturn)>> {
+    ) -> Result<Vec<RiskUser>> {
         let provider = self.data_provider(Some(block)).await?;
         let pool = address(&self.aave()?.pool)?;
         let mut remaining = self.all_tokens(None, Some(block)).await?.into_iter();
@@ -127,6 +134,7 @@ impl EthereumAdapter {
             )
             .await
     }
+    #[cfg(test)]
     pub(crate) async fn aave_borrow_restrictions(
         &self,
         owner: Address,
@@ -135,7 +143,7 @@ impl EthereumAdapter {
     ) -> Result<()> {
         let (reader, block, before) = self.aave_risk_reader().await?;
         let result = reader
-            .aave_borrow_restrictions_at(owner, token, qty, block)
+            .aave_borrow_restrictions_at(owner, token, qty, block, None)
             .await;
         self.aave_risk_block_unchanged(block, &before).await?;
         result
@@ -146,6 +154,7 @@ impl EthereumAdapter {
         token: &reads::Token,
         qty: U256,
         block: u64,
+        selected_users: Option<&[RiskUser]>,
     ) -> Result<()> {
         let pool = address(&self.aave()?.pool)?;
         let mode = self.aave_mode(owner, Some(block)).await?;
@@ -192,7 +201,14 @@ impl EthereumAdapter {
         }
         // Eligibility needs only current configuration and user flags/debt,
         // not every reserve's token metadata, caps, indices and total supply.
-        for (reference, other_config, user) in self.aave_risk_users(owner, block, true).await? {
+        let fetched;
+        let users = if let Some(users) = selected_users {
+            users
+        } else {
+            fetched = self.aave_risk_users(owner, block, true).await?;
+            &fetched
+        };
+        for (reference, other_config, user) in users.iter().cloned() {
             if !user.currentVariableDebt.is_zero() || !user.currentStableDebt.is_zero() {
                 require(
                     reference == token.reference
@@ -237,6 +253,135 @@ impl EthereumAdapter {
         }
         Ok(())
     }
+    // Borrow reads only bitmap-selected risk exposures. The pool's stable reserve
+    // IDs, not its compact list indices, identify each pair of user flags.
+    pub(crate) async fn aave_borrow_projection_at(
+        &self,
+        owner: Address,
+        token: &reads::Token,
+        qty: U256,
+        block: u64,
+    ) -> Result<(U256, U256, U256)> {
+        let pool = address(&self.aave()?.pool)?;
+        let flags = self
+            .runtime
+            .call(
+                pool,
+                &Pool::getUserConfigurationCall { user: owner },
+                Some(block),
+            )
+            .await?;
+        let provider = self.data_provider(Some(block)).await?;
+        let selected = address(&token.reference)?;
+        let selected_data = self
+            .runtime
+            .call(
+                pool,
+                &Pool::getReserveDataCall { asset: selected },
+                Some(block),
+            )
+            .await?;
+        require(
+            selected_data.id < 128,
+            "AAVE_USER_CONFIGURATION_INVALID",
+            "Selected reserve ID is outside the user configuration bitmap.",
+        )?;
+        let selected_id = selected_data.id;
+        require(
+            self.runtime
+                .call(
+                    pool,
+                    &Pool::getReserveAddressByIdCall { id: selected_id },
+                    Some(block),
+                )
+                .await?
+                == selected,
+            "AAVE_USER_CONFIGURATION_INVALID",
+            "Selected reserve ID does not resolve to the selected asset.",
+        )?;
+        let selected_user = self
+            .runtime
+            .call(
+                provider,
+                &DataProvider::getUserReserveDataCall {
+                    asset: selected,
+                    user: owner,
+                },
+                Some(block),
+            )
+            .await?;
+        let selected_bits = (flags >> (usize::from(selected_id) * 2)) & U256::from(3);
+        require(
+            selected_user.usageAsCollateralEnabled == !(selected_bits & U256::from(2)).is_zero()
+                && (!(selected_bits & U256::from(1)).is_zero()
+                    || (selected_user.currentVariableDebt.is_zero()
+                        && selected_user.currentStableDebt.is_zero())),
+            "AAVE_USER_CONFIGURATION_INVALID",
+            "Selected reserve observations disagree with pool user flags.",
+        )?;
+        let mut users = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for id in 0..128u16 {
+            let bits = (flags >> (usize::from(id) * 2)) & U256::from(3);
+            if bits.is_zero() {
+                continue;
+            }
+            let asset = self
+                .runtime
+                .call(pool, &Pool::getReserveAddressByIdCall { id }, Some(block))
+                .await?;
+            require(
+                asset != Address::ZERO && seen.insert(asset),
+                "AAVE_USER_CONFIGURATION_INVALID",
+                "Flagged reserve ID has no unique pool asset.",
+            )?;
+            let data = self
+                .runtime
+                .call(pool, &Pool::getReserveDataCall { asset }, Some(block))
+                .await?;
+            require(
+                data.id == id,
+                "AAVE_USER_CONFIGURATION_INVALID",
+                "Flagged reserve ID does not match the pool reserve identity.",
+            )?;
+            let config = self
+                .runtime
+                .call(pool, &Pool::getConfigurationCall { asset }, Some(block))
+                .await?;
+            let user = self
+                .runtime
+                .call(
+                    provider,
+                    &DataProvider::getUserReserveDataCall { asset, user: owner },
+                    Some(block),
+                )
+                .await?;
+            require(
+                user.usageAsCollateralEnabled == !(bits & U256::from(2)).is_zero()
+                    && ((bits & U256::from(1)) != U256::ZERO
+                        || (user.currentVariableDebt.is_zero()
+                            && user.currentStableDebt.is_zero())),
+                "AAVE_USER_CONFIGURATION_INVALID",
+                "Pool user flags disagree with reserve observations.",
+            )?;
+            users.push((lower_address(asset), config, user));
+        }
+        users.sort_by(|a, b| a.0.cmp(&b.0));
+        self.aave_borrow_restrictions_at(owner, token, qty, block, Some(&users))
+            .await?;
+        self.aave_health_projection_at(
+            owner,
+            token,
+            None,
+            false,
+            qty,
+            RiskObservation {
+                block,
+                users: Some(&users),
+            },
+        )
+        .await
+    }
     pub(crate) async fn aave_removal_risk(
         &self,
         owner: Address,
@@ -275,7 +420,14 @@ impl EthereumAdapter {
     ) -> Result<(U256, U256, U256)> {
         let (reader, block, before) = self.aave_risk_reader().await?;
         let result = reader
-            .aave_health_projection_at(owner, token, removed, apply_removal, added_debt, block)
+            .aave_health_projection_at(
+                owner,
+                token,
+                removed,
+                apply_removal,
+                added_debt,
+                RiskObservation { block, users: None },
+            )
             .await;
         self.aave_risk_block_unchanged(block, &before).await?;
         result
@@ -287,8 +439,12 @@ impl EthereumAdapter {
         removed: Option<U256>,
         apply_removal: bool,
         added_debt: U256,
-        block: u64,
+        observation: RiskObservation<'_>,
     ) -> Result<(U256, U256, U256)> {
+        let RiskObservation {
+            block,
+            users: selected_users,
+        } = observation;
         let pool = address(&self.aave()?.pool)?;
         let account = self
             .runtime
@@ -369,7 +525,14 @@ impl EthereumAdapter {
         };
         let mut weighted = U256::ZERO;
         let mut collateral = U256::ZERO;
-        for (reference, _, user) in self.aave_risk_users(owner, block, false).await? {
+        let fetched;
+        let users = if let Some(users) = selected_users {
+            users
+        } else {
+            fetched = self.aave_risk_users(owner, block, false).await?;
+            &fetched
+        };
+        for (reference, _, user) in users.iter().cloned() {
             if !user.usageAsCollateralEnabled || user.currentATokenBalance.is_zero() {
                 continue;
             }

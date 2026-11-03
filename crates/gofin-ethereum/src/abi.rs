@@ -124,6 +124,8 @@ sol! {
     interface Pool {
         function POOL_REVISION() external view returns (uint256 value);
         function getConfiguration(address asset) external view returns (uint256 value);
+        function getUserConfiguration(address user) external view returns (uint256 value);
+        function getReserveAddressById(uint16 id) external view returns (address value);
         function getReserveData(address asset) external view returns (PoolReserveData value);
         function getUserEMode(address user) external view returns (uint256 value);
         function getEModeCategoryCollateralConfig(uint8 id) external view returns (EModeCollateralConfig value);

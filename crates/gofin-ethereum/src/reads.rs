@@ -8,7 +8,7 @@ use gofin_evm::alloy::{
     },
     sol_types::{SolCall, SolValue},
 };
-use gofin_evm::{quantity, rpc_bytes, rpc_u64, u256};
+use gofin_evm::{block_tag, quantity, rpc_bytes, rpc_u64, u256};
 
 /// Arc exposes its native USDC balance through this ERC-20-shaped address too.
 /// Reading both would count the same custody twice.
@@ -148,6 +148,9 @@ impl EthereumAdapter {
     /// deployed bytecode hashes. The official provider relationship and
     /// Pool revision checks remain separate protocol compatibility evidence.
     pub(crate) async fn aave_proxy_identity(&self) -> Result<String> {
+        self.aave_proxy_identity_at(None).await
+    }
+    pub(crate) async fn aave_proxy_identity_at(&self, block: Option<u64>) -> Result<String> {
         let pool = address(&self.aave()?.pool)?;
         const IMPLEMENTATION_SLOT: &str =
             "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -156,7 +159,7 @@ impl EthereumAdapter {
             .rpc
             .request(
                 "eth_getStorageAt",
-                json!([lower_address(pool), IMPLEMENTATION_SLOT, "latest"]),
+                json!([lower_address(pool), IMPLEMENTATION_SLOT, block_tag(block)]),
             )
             .await?;
         let slot = rpc_bytes(&slot_response)?;
@@ -175,7 +178,10 @@ impl EthereumAdapter {
             &self
                 .runtime
                 .rpc
-                .request("eth_getCode", json!([lower_address(pool), "latest"]))
+                .request(
+                    "eth_getCode",
+                    json!([lower_address(pool), block_tag(block)]),
+                )
                 .await?,
         )?;
         let implementation_code = rpc_bytes(
@@ -184,7 +190,7 @@ impl EthereumAdapter {
                 .rpc
                 .request(
                     "eth_getCode",
-                    json!([lower_address(implementation), "latest"]),
+                    json!([lower_address(implementation), block_tag(block)]),
                 )
                 .await?,
         )?;

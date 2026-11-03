@@ -2541,7 +2541,21 @@ impl EvmRpc for Fixture {
                         currentVariableBorrowRate: 0,
                         currentStableBorrowRate: 0,
                         lastUpdateTimestamp: U40::from(1),
-                        id: 0,
+                        id: if Pool::getReserveDataCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .asset
+                            == addr(102)
+                        {
+                            1
+                        } else if Pool::getReserveDataCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .asset
+                            == addr(100)
+                        {
+                            2
+                        } else {
+                            0
+                        },
                         aTokenAddress: addr(110),
                         stableDebtTokenAddress: addr(115),
                         variableDebtTokenAddress: addr(120),
@@ -2555,6 +2569,29 @@ impl EvmRpc for Fixture {
                     AddressesProvider::getPoolCall::SELECTOR => abi_value(addr(300)),
                     AddressesProvider::getPriceOracleCall::SELECTOR => abi_value(addr(400)),
                     AddressesProvider::getPoolDataProviderCall::SELECTOR => abi_value(addr(210)),
+                    Pool::getUserConfigurationCall::SELECTOR => {
+                        let debt0 = !s.scaled_debt.is_zero() || !s.stable_debt.is_zero();
+                        let debt1 = !s.scaled_debt.is_zero()
+                            || self.other_stable.load(Ordering::SeqCst) != 0
+                            || (*self.other_revision_reserve.lock().unwrap()
+                                && !self.other_revision_balance.lock().unwrap().is_zero());
+                        let flags = u64::from(debt0)
+                            | (u64::from(s.collateral) << 1)
+                            | (u64::from(debt1) << 2)
+                            | (u64::from(s.collateral) << 3);
+                        abi_value(U256::from(flags))
+                    }
+                    Pool::getReserveAddressByIdCall::SELECTOR => {
+                        let id = Pool::getReserveAddressByIdCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .id;
+                        abi_value(match id {
+                            0 => addr(101),
+                            1 => addr(102),
+                            2 => addr(100),
+                            _ => Address::ZERO,
+                        })
+                    }
                     Pool::getReservesListCall::SELECTOR => {
                         abi_value(if *self.include_weth.lock().unwrap() {
                             vec![addr(100), addr(101), addr(102)]
@@ -8848,3 +8885,6 @@ async fn native_transfer_prepares_and_revalidates_without_usd_price() {
 
 #[path = "aave_read_measurement.rs"]
 mod aave_read_measurement;
+
+#[path = "borrow_read_measurement.rs"]
+mod borrow_read_measurement;

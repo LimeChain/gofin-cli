@@ -456,14 +456,31 @@ existing provider/revision checks, with the Pool implementation identity bound
 through preview and final revalidation. Historical reconciliation retains the
 original submission and evidence.
 
-Supply preparation and each revalidation create a separate canonical block
-snapshot for selected-reserve financial observations. Exact identical reads at
+Supply and borrow preparation, including each revalidation, create separate
+canonical block snapshots for financial observations. Exact identical reads at
 that block share a capture-local cache; required older anchor evidence remains
 at its original block. An uncached header check rejects a changed block before
-live transaction simulation. Pool implementation identity, simulation, pending
-nonce and gas preparation retain their live reads. No cache survives approval
-or a preparation pass, and other Aave actions retain their existing observation
-paths.
+live transaction simulation. Borrow also binds the Pool proxy implementation and
+code identity at the capture block and checks it against the live identity.
+Simulation, pending nonce and gas preparation retain their live reads. No cache
+survives approval or a preparation pass.
+
+Borrow establishes exposure completeness from the verified Pool's on-chain user
+configuration, whose two bits per reserve ID identify borrowing and collateral
+flags. It resolves flagged IDs through `getReserveAddressById`; the compact
+reserve list is not an ID mapping after reserve drops. Direct reserve identity
+and provider observations must agree with these flags. Missing, duplicate or mismatched
+mappings fail closed, while a flag with zero balance remains a valid observed
+state. The selected debt asset is independently verified even when unflagged.
+Eligibility and health projection share the resulting observations at the same
+block, retaining stable/variable debt, eMode, isolation, siloed borrowing and
+market-wide health/debt constraints. Inactive market reserves do not add borrow
+reads. Other risk paths retain their existing observation behavior.
+
+Official MCP results remain informational discovery/planning evidence, never the
+completeness source for borrow authorization. MCP transaction data remains a
+locally validated candidate; it does not replace exact on-chain checks or frozen
+transaction simulation.
 
 Synthetic tests inject MCP transport responses. Owned fork development examples
 use a deterministic builder fixture so current upstream account state cannot be

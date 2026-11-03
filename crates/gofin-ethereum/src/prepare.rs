@@ -149,7 +149,7 @@ impl EthereumAdapter {
         self.runtime.assert_chain().await?;
         // Supply observations share one canonical block and one short-lived cache.
         // Simulation and dispatch continue to use the original live runtime.
-        let capture = if operation == "aave.supply" {
+        let capture = if matches!(operation, "aave.supply" | "aave.borrow") {
             let block = gofin_evm::rpc_u64(
                 &self
                     .runtime
@@ -186,6 +186,15 @@ impl EthereumAdapter {
             .as_ref()
             .map(|(reader, _, _)| reader)
             .unwrap_or(self);
+        let capture_proxy = if operation == "aave.borrow" {
+            Some(
+                state
+                    .aave_proxy_identity_at(Some(capture.as_ref().expect("borrow capture").1))
+                    .await?,
+            )
+        } else {
+            None
+        };
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
         } else if matches!(
@@ -1218,11 +1227,11 @@ impl EthereumAdapter {
                             "LIQUIDITY_INSUFFICIENT",
                             "Reserve lacks exact underlying liquidity.",
                         )?;
-                        let account = self
+                        let account = state
                             .runtime
                             .call(pool, &Pool::getUserAccountDataCall { user: owner }, None)
                             .await?;
-                        let debt_index = self
+                        let debt_index = state
                             .runtime
                             .call(
                                 pool,
@@ -1232,16 +1241,13 @@ impl EthereumAdapter {
                             .await?;
                         let rounding_limit = aave::math::borrow_rounding_limit(debt_index)?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
-                        state
-                            .aave_borrow_restrictions(owner, &token, add(qty, rounding_limit)?)
-                            .await?;
-                        let (collateral_base, debt, projected) = self
-                            .aave_health_projection(
+                        let block = capture.as_ref().expect("borrow capture").1;
+                        let (collateral_base, debt, projected) = state
+                            .aave_borrow_projection_at(
                                 owner,
                                 &token,
-                                None,
-                                false,
                                 add(qty, rounding_limit)?,
+                                block,
                             )
                             .await?;
                         state.aave_debt_limits(&r, collateral_base, debt)?;
@@ -1487,6 +1493,17 @@ impl EthereumAdapter {
                 &calldata,
             )
             .map_err(|e| error("AAVE_CALLDATA_INVALID", "preview", &e.to_string()))?;
+            let captured_current = if let Some(expected) = &capture_proxy {
+                let current = self.aave_proxy_identity().await?;
+                require(
+                    &current == expected,
+                    "AAVE_IMPLEMENTATION_CHANGED",
+                    "Pool implementation changed during borrow preparation.",
+                )?;
+                Some(current)
+            } else {
+                None
+            };
             if let Some(old) = original {
                 let identity = old.aave_proxy_identity.as_ref().ok_or_else(|| {
                     error(
@@ -1495,7 +1512,10 @@ impl EthereumAdapter {
                         "This legacy Aave preview did not bind the selected Pool proxy and implementation. Create a fresh preview before execution.",
                     )
                 })?;
-                let current = self.aave_proxy_identity().await?;
+                let current = match captured_current {
+                    Some(current) => current,
+                    None => self.aave_proxy_identity().await?,
+                };
                 require(
                     &current == identity,
                     "AAVE_IMPLEMENTATION_CHANGED",
@@ -1503,7 +1523,10 @@ impl EthereumAdapter {
                 )?;
                 b.aave_proxy_identity = Some(identity.clone());
             } else {
-                b.aave_proxy_identity = Some(self.aave_proxy_identity().await?);
+                b.aave_proxy_identity = Some(match captured_current {
+                    Some(current) => current,
+                    None => self.aave_proxy_identity().await?,
+                });
             }
             warnings.push("The official Aave MCP supplies candidate unsigned transaction data; GoFin validates the selected Pool call locally before approval and signing.".into());
         }
