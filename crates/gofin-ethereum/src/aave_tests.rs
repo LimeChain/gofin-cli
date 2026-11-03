@@ -1458,7 +1458,7 @@ async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes()
         first.binding["supply_anchor"]["evidence"]["block"],
         json!(20)
     );
-    let config_selector = hex_bytes(&DataProvider::getReserveConfigurationDataCall::SELECTOR);
+    let config_selector = hex_bytes(&Pool::getReserveDataCall::SELECTOR);
     let scaled_selector = hex_bytes(&AToken::scaledBalanceOfCall::SELECTOR);
     {
         let calls = rpc.call_requests.lock().unwrap();
@@ -1483,7 +1483,7 @@ async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes()
         json!(20)
     );
     let calls = rpc.call_requests.lock().unwrap();
-    let selector = hex_bytes(&DataProvider::getReserveConfigurationDataCall::SELECTOR);
+    let selector = hex_bytes(&Pool::getReserveDataCall::SELECTOR);
     assert!(calls.iter().any(|params| {
         params[0]["data"]
             .as_str()
@@ -1912,4 +1912,212 @@ async fn reopened_zero_lineages_share_historical_header_bracket() {
         headers.iter().any(|params| params[0] == "0x15"),
         "new capture still has a numeric canonical recheck"
     );
+}
+
+struct BadAggregate {
+    inner: Arc<crate::tests::Fixture>,
+    truncated: bool,
+}
+#[async_trait::async_trait]
+impl EvmRpc for BadAggregate {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let mut result = self.inner.request(method, params.clone()).await?;
+        if method == "eth_call"
+            && params[0]["to"] == json!(lower_address(crate::tests::addr(210)))
+            && params[0]["data"].as_str().is_some_and(|data| {
+                data.starts_with(&gofin_evm::hex_bytes(
+                    &DataProvider::getReserveDataCall::SELECTOR,
+                ))
+            })
+        {
+            let mut raw = gofin_evm::rpc_bytes(&result)?.to_vec();
+            if self.truncated {
+                raw.truncate(raw.len() - 32);
+            } else {
+                raw[10 * 32 + 31] ^= 1;
+            }
+            result = json!(gofin_evm::hex_bytes(&raw));
+        }
+        Ok(result)
+    }
+}
+#[tokio::test]
+async fn malformed_or_uncorrelated_aggregate_refuses_before_transaction_preparation() {
+    for truncated in [true, false] {
+        let fixture = Arc::new(crate::tests::Fixture::new());
+        let mut adapter = crate::tests::adapter(fixture.clone());
+        adapter.runtime = Arc::new(gofin_evm::EvmRuntime::new(
+            Arc::new(BadAggregate {
+                inner: fixture.clone(),
+                truncated,
+            }),
+            1,
+            None,
+        ));
+        let error = adapter
+            .prepare("aave.supply", &crate::tests::aave_input("aave.supply"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            if truncated {
+                "CONTRACT_DATA_INVALID"
+            } else {
+                "AAVE_READ_CHANGED"
+            }
+        );
+        assert!(!fixture.calls.lock().unwrap().iter().any(|method| matches!(
+            method.as_str(),
+            "eth_estimateGas" | "eth_sendRawTransaction"
+        )));
+    }
+}
+#[tokio::test]
+async fn scoped_aggregates_replace_overlapping_configuration_and_total_supply_views() {
+    let fixture = Arc::new(crate::tests::Fixture::new());
+    let adapter = crate::tests::adapter(fixture.clone());
+    adapter
+        .prepare("aave.supply", &crate::tests::aave_input("aave.supply"))
+        .await
+        .unwrap();
+    let calls = fixture.call_requests.lock().unwrap();
+    for selector in [
+        Pool::getConfigurationCall::SELECTOR,
+        DataProvider::getReserveConfigurationDataCall::SELECTOR,
+        DataProvider::getReserveTokensAddressesCall::SELECTOR,
+        DataProvider::getReserveCapsCall::SELECTOR,
+        DataProvider::getPausedCall::SELECTOR,
+        Erc20::totalSupplyCall::SELECTOR,
+    ] {
+        let prefix = gofin_evm::hex_bytes(&selector);
+        assert!(
+            !calls.iter().any(|params| params[0]["data"]
+                .as_str()
+                .is_some_and(|data| data.starts_with(&prefix))),
+            "overlapping view remained: {prefix}"
+        );
+    }
+}
+
+struct MetadataMcp {
+    decimals: u8,
+    calls: AtomicUsize,
+    fallback: SyntheticAaveMcp,
+}
+
+#[async_trait]
+impl aave_mcp::AaveMcpTransport for MetadataMcp {
+    async fn post(
+        &self,
+        request: aave_mcp::McpHttpRequest,
+    ) -> std::result::Result<aave_mcp::McpHttpResponse, aave_mcp::AaveMcpError> {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let result = match body["method"].as_str() {
+            Some("tools/list") => json!({"tools":[{
+                "name":"get_reserve_details",
+                "inputSchema":{"type":"object","properties":{"version":{"type":"string"},"chainId":{"type":"integer"},"market":{"type":"string"},"token":{"type":"string"}},"required":["version","chainId","market","token"],"additionalProperties":false},
+                "annotations":{"readOnlyHint":true,"openWorldHint":false,"destructiveHint":false}
+            }]}),
+            Some("tools/call") if body["params"]["name"] == "get_reserve_details" => {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let args = &body["params"]["arguments"];
+                json!({"structuredContent":{"data":{"chainId":args["chainId"],"market":args["market"],"token":args["token"],"symbol":"MCPUSD","decimals":self.decimals}},"content":[]})
+            }
+            _ => return self.fallback.post(request).await,
+        };
+        Ok(aave_mcp::McpHttpResponse {
+            status: 200,
+            headers: std::collections::BTreeMap::from([(
+                "content-type".into(),
+                "application/json".into(),
+            )]),
+            body: serde_json::to_vec(&json!({"jsonrpc":"2.0","id":body["id"],"result":result}))
+                .unwrap(),
+        })
+    }
+}
+
+fn metadata_fixture(decimals: u8) -> (Arc<Fixture>, EthereumAdapter, Arc<MetadataMcp>) {
+    let fixture = Arc::new(Fixture::new());
+    let transport = Arc::new(MetadataMcp {
+        decimals,
+        calls: AtomicUsize::new(0),
+        fallback: SyntheticAaveMcp {
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+    });
+    let adapter = adapter(fixture.clone())
+        .with_aave_mcp(aave_mcp::AaveMcpClient::with_transport(transport.clone()));
+    (fixture, adapter, transport)
+}
+
+fn metadata_rpc_count(fixture: &Fixture, selector: [u8; 4]) -> usize {
+    let prefix = gofin_evm::hex_bytes(&selector);
+    fixture
+        .call_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|params| {
+            params[0]["data"]
+                .as_str()
+                .is_some_and(|data| data.starts_with(&prefix))
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn scoped_mcp_metadata_is_verified_and_reused() {
+    let (fixture, adapter, mcp) = metadata_fixture(6);
+    let input = json!({"wallet":"synthetic","network":"evm","chain_id":1,"tokens":[lower_address(addr(101))]});
+    for pass in 0..2 {
+        let result = adapter.read("aave.reserves", &input).await.unwrap();
+        assert_eq!(result["data"][0]["token"]["symbol"], "MCPUSD");
+        assert_eq!(mcp.calls.load(Ordering::SeqCst), 1, "pass {pass}");
+        assert_eq!(metadata_rpc_count(&fixture, Erc20::symbolCall::SELECTOR), 0);
+        assert_eq!(
+            metadata_rpc_count(&fixture, Erc20::decimalsCall::SELECTOR),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn mismatched_mcp_metadata_falls_back_to_canonical_rpc() {
+    let (fixture, adapter, mcp) = metadata_fixture(18);
+    let input = json!({"wallet":"synthetic","network":"evm","chain_id":1,"tokens":[lower_address(addr(101))]});
+    let result = adapter.read("aave.reserves", &input).await.unwrap();
+    assert_ne!(result["data"][0]["token"]["symbol"], "MCPUSD");
+    assert_eq!(result["data"][0]["token"]["decimals"], 6);
+    assert_eq!(mcp.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(metadata_rpc_count(&fixture, Erc20::symbolCall::SELECTOR), 1);
+    assert_eq!(
+        metadata_rpc_count(&fixture, Erc20::decimalsCall::SELECTOR),
+        1
+    );
+}
+
+#[tokio::test]
+async fn historical_and_unscoped_reserves_do_not_fan_out_metadata_mcp() {
+    let (fixture, adapter, mcp) = metadata_fixture(6);
+    fixture.states.lock().unwrap().insert(
+        19,
+        AtBlock {
+            income: ray(),
+            debt_index: ray(),
+            ..Default::default()
+        },
+    );
+    let historical = json!({"wallet":"synthetic","network":"evm","chain_id":1,"tokens":[lower_address(addr(101))],"block_number":19});
+    let result = adapter.read("aave.reserves", &historical).await.unwrap();
+    assert_eq!(result["block"], 19);
+    assert_eq!(mcp.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(metadata_rpc_count(&fixture, Erc20::symbolCall::SELECTOR), 1);
+    assert_eq!(
+        metadata_rpc_count(&fixture, Erc20::decimalsCall::SELECTOR),
+        1
+    );
+    let unscoped = json!({"wallet":"synthetic","network":"evm","chain_id":1});
+    adapter.read("aave.reserves", &unscoped).await.unwrap();
+    assert_eq!(mcp.calls.load(Ordering::SeqCst), 0);
 }

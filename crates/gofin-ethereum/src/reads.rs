@@ -647,6 +647,90 @@ impl EthereumAdapter {
             )
             .await
     }
+    /// Same reviewed market binding as `data_provider`, using the capture's
+    /// fact collector so later rounds reuse each relationship exactly once.
+    pub(crate) async fn data_provider_with_collector(
+        &self,
+        block: u64,
+        collector: &mut crate::collection::ReadCollector,
+    ) -> Result<Address> {
+        use crate::collection::ReadCall;
+        require(
+            collector.block() == block,
+            "AAVE_READ_CHANGED",
+            "Provider collector block differs.",
+        )?;
+        let pool = address(&self.aave()?.pool)?;
+        let oracle = address(&self.aave()?.oracle)?;
+        self.runtime.code_at(pool, Some(block)).await?;
+        self.runtime.code_at(oracle, Some(block)).await?;
+        let provider = collector
+            .call(pool, &Pool::ADDRESSES_PROVIDERCall {})
+            .await?;
+        self.runtime.code_at(provider, Some(block)).await?;
+        if let Some(profile) = aave::reviewed_markets(self.config.chain_id)
+            .into_iter()
+            .find(|p| p.pool == self.aave().map(|a| a.pool.as_str()).unwrap_or(""))
+        {
+            require(
+                provider == address(&profile.addresses_provider)?,
+                "DEPLOYMENT_IDENTITY_MISMATCH",
+                "Pool provider differs from the reviewed market identity.",
+            )?;
+        }
+        let mut values = collector
+            .collect(vec![
+                ReadCall::new(provider, &AddressesProvider::getPoolCall {}),
+                ReadCall::new(provider, &AddressesProvider::getPriceOracleCall {}),
+                ReadCall::new(provider, &AddressesProvider::getPoolDataProviderCall {}),
+            ])
+            .await
+            .into_iter();
+        let decode = |raw: Option<Result<Vec<u8>>>| {
+            raw.ok_or_else(|| {
+                error(
+                    "MULTICALL_INCOMPLETE",
+                    "read",
+                    "Provider relationship is missing.",
+                )
+            })?
+        };
+        let observed_pool = AddressesProvider::getPoolCall::abi_decode_returns(&decode(
+            values.next(),
+        )?)
+        .map_err(|_| {
+            error(
+                "CONTRACT_DATA_INVALID",
+                "read",
+                "Invalid Pool relationship.",
+            )
+        })?;
+        let observed_oracle =
+            AddressesProvider::getPriceOracleCall::abi_decode_returns(&decode(values.next())?)
+                .map_err(|_| {
+                    error(
+                        "CONTRACT_DATA_INVALID",
+                        "read",
+                        "Invalid oracle relationship.",
+                    )
+                })?;
+        let data =
+            AddressesProvider::getPoolDataProviderCall::abi_decode_returns(&decode(values.next())?)
+                .map_err(|_| {
+                    error(
+                        "CONTRACT_DATA_INVALID",
+                        "read",
+                        "Invalid data-provider relationship.",
+                    )
+                })?;
+        require(
+            observed_pool == pool && observed_oracle == oracle,
+            "DEPLOYMENT_IDENTITY_MISMATCH",
+            "Aave provider disagrees with configured pool or oracle.",
+        )?;
+        self.runtime.code_at(data, Some(block)).await?;
+        Ok(data)
+    }
     pub(crate) async fn data_provider(&self, block: Option<u64>) -> Result<Address> {
         let pool = address(&self.aave()?.pool)?;
         let oracle = address(&self.aave()?.oracle)?;

@@ -462,8 +462,9 @@ that block share a capture-local cache; required older anchor evidence remains
 at its original block. An uncached header check rejects a changed block before
 live transaction simulation. Borrow also binds the Pool proxy implementation and
 code identity at the capture block and checks it against the live identity.
-Simulation, pending nonce and gas preparation retain their live reads. No cache
-survives approval or a preparation pass.
+Simulation, pending nonce and gas preparation retain their live reads. No financial
+state cache survives approval or a preparation pass. Only token metadata hints
+can be reused, after matching their identity and precision against fresh reserve evidence.
 
 Borrow establishes exposure completeness from the verified Pool's on-chain user
 configuration, whose two bits per reserve ID identify borrowing and collateral
@@ -529,6 +530,31 @@ to bounded direct reads; mandatory subcall failure or an incomplete result is an
 error, never an observed zero or a reason to hide a target revert. Snapshot
 wrappers preserve the transport's block/hash and freshness requirements, and a
 weaker cached read cannot satisfy stronger requirements.
+
+Selected reserves use the scoped onchain aggregators `Pool.getReserveData` and
+`AaveProtocolDataProvider.getReserveData`. The Pool's packed configuration is the
+single source for flags, caps, risk parameters and precision; the same returned
+record supplies reserve ID and receipt addresses. The provider aggregates current
+aToken and stable/variable debt totals; its internal EVM reads are not additional
+JSON-RPC requests and are not counted by the client-side exact-fact audit. Its exact tuple length, stored indices,
+rates and timestamp must correlate with the Pool at the captured block. Current
+normalized indices and available underlying liquidity retain their distinct
+reads. This avoids overlapping configuration/token-address/totals views and the
+whole-market UI provider's unrelated reserve scan and version-dependent ABI.
+Provider relationships, known account/oracle facts, current anchor facts and
+independently known collateral prices share dependency batches.
+
+Token metadata first uses exact chain/address local cache and bundled catalogs.
+A single selected reserve's cache/catalog miss can use the official MCP's scoped
+`get_reserve_details`; bulk reads use batched token fallback rather than a remote
+metadata session per row;
+only an exact chain/Pool/token response with bounded fields is a candidate hint.
+A missing, invalid or stale-precision hint falls back to batched ERC-20 metadata.
+Fresh packed reserve precision must match any hint before amount conversion;
+MCP never supplies financial risk, proxy identity or exposure completeness.
+Verified current metadata is reusable under existing token-cache expiry rules;
+explicit historical reads fetch their own token labels and never overwrite the
+current cache. Financial state remains fresh in every pass.
 
 Some evidence depends on a candidate. After pure borrow evaluation selects an
 exact amount, `collect_final` can obtain unsigned MCP calldata, gas/nonce facts

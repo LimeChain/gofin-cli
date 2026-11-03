@@ -74,10 +74,15 @@ async fn native_aave_read_fixture_counts_and_scope_are_reproducible() {
                 );
                 counts.push((requests.len(), eth_calls, headers, block_numbers));
             }
+            let metadata_reads = if scoped { 2 } else { 4 };
             assert_eq!(
-                counts[0], counts[1],
-                "each capture starts with a fresh per-pass cache"
+                counts[0].0,
+                counts[1].0 + metadata_reads,
+                "only validated display metadata survives captures; financial reads stay fresh"
             );
+            assert_eq!(counts[0].1, counts[1].1 + metadata_reads);
+            assert_eq!(counts[0].2, counts[1].2);
+            assert_eq!(counts[0].3, counts[1].3);
             assert_eq!(
                 counts[0].0,
                 counts[2].0 + 1,

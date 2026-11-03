@@ -600,9 +600,11 @@ impl EthereumAdapter {
         ));
         let pool = reader.aave()?.pool.clone();
         let pool_address = address(&pool)?;
-        let provider = reader.data_provider(Some(block)).await?;
-        let proxy_identity = reader.aave_proxy_identity_at(Some(block)).await?;
         let mut collector = ReadCollector::new(&reader, block).await;
+        let provider = reader
+            .data_provider_with_collector(block, &mut collector)
+            .await?;
+        let proxy_identity = reader.aave_proxy_identity_at(Some(block)).await?;
         let reserve = super::read_lifecycle::collect_write_reserve(
             &reader,
             block,
@@ -668,6 +670,32 @@ impl EthereumAdapter {
                 pool_address,
                 &abi::Pool::getReserveNormalizedVariableDebtCall { asset },
             ));
+        }
+        // These pinned facts depend only on addresses already resolved above.
+        // Prefetch into the pass-local collector; each consumer still decodes
+        // its own required result and keeps existing validation/error behavior.
+        calls.extend(current_anchor_prefetch(
+            input,
+            original.is_none(),
+            reader.config.chain_id,
+            &pool,
+            &token,
+            owner,
+            block,
+            a_token,
+            variable_debt,
+        ));
+        if borrow {
+            let oracle = address(&reader.aave()?.oracle)?;
+            calls.extend([
+                ReadCall::new(
+                    pool_address,
+                    &abi::Pool::getUserConfigurationCall { user: owner },
+                ),
+                ReadCall::new(oracle, &abi::Oracle::BASE_CURRENCYCall {}),
+                ReadCall::new(oracle, &abi::Oracle::BASE_CURRENCY_UNITCall {}),
+                ReadCall::new(oracle, &abi::Oracle::getAssetPriceCall { asset }),
+            ]);
         }
         let mut results = collector.collect(calls).await.into_iter();
         let raw_user = decode::<abi::DataProvider::getUserReserveDataCall>(results.next())?;
@@ -887,6 +915,85 @@ impl EthereumAdapter {
             risk,
         })
     }
+}
+
+/// Prefetch only anchor facts that the later lineage check will read at the
+/// current block. Older nonzero lineages retain their separate pinned capture.
+#[allow(clippy::too_many_arguments)]
+fn current_anchor_prefetch(
+    input: &WriteInput,
+    new_attempt: bool,
+    chain_id: u64,
+    pool: &str,
+    token: &reads::Token,
+    owner: Address,
+    block: u64,
+    a_token: Address,
+    debt_token: Address,
+) -> Vec<ReadCall> {
+    let Ok(pool_address) = address(pool) else {
+        return Vec::new();
+    };
+    let Ok(asset) = address(&token.reference) else {
+        return Vec::new();
+    };
+    let resource = resource(chain_id, owner);
+    let mut calls = Vec::new();
+    for (kind, receipt, suffix) in [
+        (PositionKind::Supply, a_token, "supply"),
+        (PositionKind::VariableDebt, debt_token, "variable-debt"),
+    ] {
+        let name = position(pool, &token.reference, suffix);
+        let mut matches = input.context.positions.iter().filter(|anchor| {
+            anchor.resource == resource && anchor.position == name && anchor.position_kind == kind
+        });
+        let prior = matches.next();
+        if matches.next().is_some() {
+            continue;
+        }
+        let reopened = new_attempt
+            && prior.is_some_and(|anchor| {
+                anchor.principal.atoms.is_zero()
+                    && anchor
+                        .scaled_receipt
+                        .as_ref()
+                        .is_some_and(Quantity::is_zero)
+            });
+        let current = prior.is_none()
+            || reopened
+            || prior.is_some_and(|anchor| anchor.evidence["block"].as_u64() == Some(block));
+        if !current {
+            continue;
+        }
+        let zero = reopened
+            || prior.is_some_and(|anchor| {
+                anchor.evidence["method"] == json!("aave-zero-observed-backing")
+            });
+        if !zero {
+            calls.push(if kind == PositionKind::Supply {
+                ReadCall::new(receipt, &abi::AToken::ATOKEN_REVISIONCall {})
+            } else {
+                ReadCall::new(receipt, &abi::AToken::DEBT_TOKEN_REVISIONCall {})
+            });
+        }
+        calls.push(ReadCall::new(
+            receipt,
+            &abi::AToken::scaledBalanceOfCall { user: owner },
+        ));
+        calls.push(ReadCall::new(receipt, &abi::Erc20::balanceOfCall { owner }));
+        calls.push(if kind == PositionKind::Supply {
+            ReadCall::new(
+                pool_address,
+                &abi::Pool::getReserveNormalizedIncomeCall { asset },
+            )
+        } else {
+            ReadCall::new(
+                pool_address,
+                &abi::Pool::getReserveNormalizedVariableDebtCall { asset },
+            )
+        });
+    }
+    calls
 }
 
 #[derive(Clone, Copy)]
@@ -2051,6 +2158,78 @@ write_lifecycle!(Collateral);
 #[cfg(test)]
 mod typed_action_tests {
     use super::*;
+    #[test]
+    fn anchor_prefetch_never_replaces_historical_lineage_evidence() {
+        let raw = json!({"wallet":"synthetic", "network":"ethereum", "chain_id":1, "token":"0x0000000000000000000000000000000000000065", "request_id":"anchor-prefetch", "amount":"1", "max_fee_eth":"0.001"});
+        let mut input = WriteInput {
+            operation: "aave.supply".into(),
+            request: request::parse("aave.supply", &raw).unwrap(),
+            input: raw,
+            context: PreparationContext::default(),
+        };
+        let token = reads::Token {
+            reference: "0x0000000000000000000000000000000000000065".into(),
+            decimals: 6,
+            symbol: "SYN".into(),
+        };
+        let pool = "0x000000000000000000000000000000000000012c";
+        let owner = address("0x0000000000000000000000000000000000000001").unwrap();
+        let a_token = address("0x000000000000000000000000000000000000006e").unwrap();
+        let debt_token = address("0x0000000000000000000000000000000000000078").unwrap();
+        let collect = |input: &WriteInput, new_attempt| {
+            current_anchor_prefetch(
+                input,
+                new_attempt,
+                1,
+                pool,
+                &token,
+                owner,
+                20,
+                a_token,
+                debt_token,
+            )
+        };
+        assert_eq!(
+            collect(&input, true).len(),
+            8,
+            "new positions need both current anchors"
+        );
+        input.context.positions.push(PositionAnchor {
+            resource: resource(1, owner),
+            position: position(pool, &token.reference, "supply"),
+            position_kind: PositionKind::Supply,
+            principal: Amount {
+                asset: AssetId {
+                    network: "ethereum:1".into(),
+                    reference: token.reference.clone(),
+                    decimals: 6,
+                },
+                atoms: Quantity::from_u64(2),
+            },
+            scaled_receipt: Some(Quantity::from_u64(2)),
+            evidence_version: 1,
+            evidence: json!({"block":19,"method":"aave-v3-revision-5-exact-scaled-backing"}),
+            observed_at: now(),
+        });
+        assert_eq!(
+            collect(&input, true).len(),
+            4,
+            "historical nonzero anchor remains at its original block"
+        );
+        input.context.positions[0].principal.atoms = Quantity::zero();
+        input.context.positions[0].scaled_receipt = Some(Quantity::zero());
+        assert_eq!(
+            collect(&input, true).len(),
+            7,
+            "reopening adds only the current zero-anchor facts"
+        );
+        assert_eq!(
+            collect(&input, false).len(),
+            4,
+            "revalidation keeps the frozen historical lineage"
+        );
+    }
+
     #[test]
     fn marker_rejects_another_actions_input() {
         let input = json!({"wallet":"synthetic", "network":"ethereum", "chain_id":1, "token":"0x0000000000000000000000000000000000000065", "request_id":"typed-action", "amount":"1", "max_fee_eth":"0.001", "min_health_factor":"1.5"});

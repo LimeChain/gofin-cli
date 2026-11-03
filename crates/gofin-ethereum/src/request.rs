@@ -652,11 +652,12 @@ pub fn definitions() -> Vec<Definition> {
         if *operation == "wallet.balances" {
             semantics["discovery_scope"] = json!("Automatic reads merge local catalog, configured, and previously observed positive holdings, bounded to 512 ERC-20 addresses. Explicit tokens select only those contracts, bounded to 64. Coverage is limited to the reported candidate set.");
             semantics["zero_balances"] = json!("Native, explicitly requested and configured zero balances are included. Other zero-balance candidates are omitted without metadata reads. Every candidate balance is checked again on the next read.");
-            semantics["metadata_cache"] = json!("Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh; financial preparation independently reads current metadata.");
+            semantics["metadata_cache"] = json!("Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh. Aave may reuse exact-identity metadata hints only after checking precision against fresh reserve configuration; other financial preparation reads current metadata.");
             semantics["batch_reads"] = json!("ERC-20 calls use 32-call Multicall3 batches with at most 4 concurrent batches, only after exact runtime-code verification at the balance block. Unavailable or incompatible aggregation falls back to at most 8 concurrent direct calls. Automatic token failures are warnings and omitted holdings; explicit failures fail the read.");
         }
         let mut examples = vec![example(operation)];
         if operation.starts_with("aave.") {
+            semantics["metadata_sources"] = json!("Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are always fresh.");
             if matches!(*operation,"aave.reserves"|"aave.positions") {
                 semantics["state_block"] = json!("block_number selects a historical read-only observation with canonical block/hash checks; it never supplies financial write authority or current-funds evidence.");
             }

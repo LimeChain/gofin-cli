@@ -248,6 +248,23 @@ impl AaveMcpClient {
         })
     }
 
+    /// Unverified display metadata only. The caller must independently bind
+    /// decimals to the selected reserve's fresh on-chain configuration.
+    pub async fn reserve_metadata(
+        &self,
+        chain_id: u64,
+        pool: Address,
+        token: Address,
+    ) -> Result<crate::TokenMetadataHint, AaveMcpError> {
+        let result = self
+            .call_read_tool(
+                "get_reserve_details",
+                json!({"version":"v3", "chainId":chain_id, "market":pool.to_string(), "token":token.to_string()}),
+            )
+            .await?;
+        parse_reserve_metadata(&result.result, chain_id, pool, token)
+    }
+
     async fn fetch_read_catalog(&self) -> Result<AaveMcpReadCatalog, AaveMcpError> {
         let mut session = McpSession::new(self.transport.clone());
         session.initialize().await?;
@@ -265,6 +282,49 @@ impl AaveMcpClient {
         validate_mcp_transaction(intent, &transaction, &calldata)?;
         Ok(AaveMcpCall { calldata })
     }
+}
+
+fn parse_reserve_metadata(
+    result: &Value,
+    chain_id: u64,
+    pool: Address,
+    token: Address,
+) -> Result<crate::TokenMetadataHint, AaveMcpError> {
+    let invalid = || AaveMcpError::Protocol("invalid or mismatched reserve metadata".into());
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(invalid());
+    }
+    let data = result
+        .pointer("/structuredContent/data")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    let parse_address = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<Address>().ok())
+    };
+    if data.get("chainId").and_then(Value::as_u64) != Some(chain_id)
+        || parse_address("market") != Some(pool)
+        || parse_address("token") != Some(token)
+    {
+        return Err(invalid());
+    }
+    let decimals = data
+        .get("decimals")
+        .and_then(Value::as_u64)
+        .filter(|v| *v <= 77)
+        .ok_or_else(invalid)? as u8;
+    let symbol = data
+        .get("symbol")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
+        .ok_or_else(invalid)?;
+    Ok(crate::TokenMetadataHint {
+        chain_id,
+        address: token.to_string().to_lowercase(),
+        decimals,
+        symbol: symbol.to_owned(),
+    })
 }
 
 /// Revalidate frozen or received calldata locally, without contacting Aave.
@@ -1326,6 +1386,78 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[test]
+    fn reserve_metadata_requires_exact_identity_and_bounded_fields() {
+        let pool: Address = "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"
+            .parse()
+            .unwrap();
+        let token: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse()
+            .unwrap();
+        let good = json!({"structuredContent":{"data":{"chainId":1,"market":pool.to_string(),"token":token.to_string(),"symbol":"USDC","decimals":6}}});
+        let hint = parse_reserve_metadata(&good, 1, pool, token).unwrap();
+        assert_eq!(
+            (hint.chain_id, hint.decimals, hint.symbol.as_str()),
+            (1, 6, "USDC")
+        );
+        let mut invalid = vec![
+            json!({}),
+            json!({"isError":true,"structuredContent":good["structuredContent"]}),
+        ];
+        for (field, value) in [
+            ("chainId", json!(8453)),
+            ("market", json!(Address::ZERO.to_string())),
+            ("token", json!(Address::ZERO.to_string())),
+            ("symbol", json!("bad\nlabel")),
+            ("symbol", json!("")),
+            ("decimals", json!(78)),
+            ("decimals", json!("6")),
+        ] {
+            let mut item = good.clone();
+            item["structuredContent"]["data"][field] = value;
+            invalid.push(item);
+        }
+        for item in invalid {
+            assert!(parse_reserve_metadata(&item, 1, pool, token).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn reserve_metadata_uses_read_tool_and_rejects_upstream_error() {
+        let pool: Address = "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"
+            .parse()
+            .unwrap();
+        let token: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse()
+            .unwrap();
+        let schema = closed_object_schema(
+            &["version", "chainId", "market", "token"],
+            json!({"version":{"type":"string"},"chainId":{"type":"integer"},"market":{"type":"string"},"token":{"type":"string"}}),
+        );
+        let data = json!({"chainId":1,"market":pool.to_string(),"token":token.to_string(),"symbol":"USDC","decimals":6});
+        let (client, _) = read_client_with_result(
+            "get_reserve_details",
+            schema.clone(),
+            true,
+            json!({"structuredContent":{"data":data},"content":[]}),
+        );
+        assert_eq!(
+            client
+                .reserve_metadata(1, pool, token)
+                .await
+                .unwrap()
+                .symbol,
+            "USDC"
+        );
+        let (client, _) = read_client_with_result(
+            "get_reserve_details",
+            schema,
+            true,
+            json!({"isError":true,"content":[{"type":"text","text":"unavailable"}]}),
+        );
+        assert!(client.reserve_metadata(1, pool, token).await.is_err());
+    }
 
     fn address(value: &str) -> Address {
         value.parse().unwrap()

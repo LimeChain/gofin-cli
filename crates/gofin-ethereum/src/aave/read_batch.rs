@@ -91,8 +91,7 @@ struct PositionFacts {
 }
 struct First {
     asset: Address,
-    decimals: u8,
-    symbol: String,
+    metadata: Option<Token>,
     config: Config,
     receipts: Receipts,
     caps: Caps,
@@ -101,9 +100,37 @@ struct First {
     income: U256,
     debt_index: U256,
     deployed: PoolReserveData,
+    aggregate: DataProvider::getReserveDataReturn,
     user: Option<User>,
     wallet: Option<U256>,
     allowance: Option<U256>,
+}
+// Canonical Pool configuration, reviewed against Aave ReserveConfiguration.
+// The data-provider's separate configuration/caps/paused views decode this same word.
+fn configuration(word: U256) -> (Config, Caps, bool) {
+    let field =
+        |shift: usize, width: usize| (word >> shift) & ((U256::from(1) << width) - U256::from(1));
+    let flag = |bit| !field(bit, 1).is_zero();
+    let threshold = field(16, 16);
+    (
+        Config {
+            decimals: field(48, 8),
+            ltv: field(0, 16),
+            liquidationThreshold: threshold,
+            liquidationBonus: field(32, 16),
+            reserveFactor: field(64, 16),
+            usageAsCollateralEnabled: !threshold.is_zero(),
+            borrowingEnabled: flag(58),
+            stableBorrowRateEnabled: flag(59),
+            isActive: flag(56),
+            isFrozen: flag(57),
+        },
+        Caps {
+            borrowCap: field(80, 36),
+            supplyCap: field(116, 36),
+        },
+        flag(60),
+    )
 }
 pub(super) fn next<C: SolCall>(
     values: &mut impl Iterator<Item = Result<Vec<u8>>>,
@@ -194,13 +221,23 @@ pub(super) async fn collect_with_collector(
     )?;
     let pool = address(&adapter.aave()?.pool)?;
     let (provider, references) = tokio::try_join!(
-        adapter.data_provider(Some(block)),
+        adapter.data_provider_with_collector(block, collector),
         adapter.all_tokens(explicit, Some(block))
     )?;
     let assets = references
         .iter()
         .map(|v| address(v))
         .collect::<Result<Vec<_>>>()?;
+    let hints = references
+        .iter()
+        .map(|reference| {
+            if capture.historical {
+                None
+            } else {
+                adapter.aave_metadata_hint(reference)
+            }
+        })
+        .collect::<Vec<_>>();
     for asset in &assets {
         require(
             *asset != Address::ZERO,
@@ -209,25 +246,15 @@ pub(super) async fn collect_with_collector(
         )?;
     }
     code_checks(adapter, block, assets.iter().copied().collect()).await?;
+    // Scoped onchain aggregators: Pool owns configuration/identities and the
+    // protocol data provider owns current totals. Neither scans other reserves.
     let mut calls = Vec::new();
     for &asset in &assets {
         calls.extend([
-            ReadCall::new(asset, &Erc20::decimalsCall {}),
-            ReadCall::new(asset, &Erc20::symbolCall {}),
-            ReadCall::new(
-                provider,
-                &DataProvider::getReserveConfigurationDataCall { asset },
-            ),
-            ReadCall::new(
-                provider,
-                &DataProvider::getReserveTokensAddressesCall { asset },
-            ),
-            ReadCall::new(provider, &DataProvider::getReserveCapsCall { asset }),
-            ReadCall::new(provider, &DataProvider::getPausedCall { asset }),
-            ReadCall::new(pool, &Pool::getConfigurationCall { asset }),
+            ReadCall::new(pool, &Pool::getReserveDataCall { asset }),
+            ReadCall::new(provider, &DataProvider::getReserveDataCall { asset }),
             ReadCall::new(pool, &Pool::getReserveNormalizedIncomeCall { asset }),
             ReadCall::new(pool, &Pool::getReserveNormalizedVariableDebtCall { asset }),
-            ReadCall::new(pool, &Pool::getReserveDataCall { asset }),
         ]);
         if positions {
             calls.extend([
@@ -273,28 +300,76 @@ pub(super) async fn collect_with_collector(
     let mut values = collector.collect(calls).await.into_iter();
     let mut first = Vec::new();
     let mut receipt_code = BTreeSet::new();
-    for asset in assets {
-        let decimals = next::<Erc20::decimalsCall>(&mut values)?;
-        let symbol = symbol(values.next())?;
-        let config = next::<DataProvider::getReserveConfigurationDataCall>(&mut values)?;
-        let receipts = next::<DataProvider::getReserveTokensAddressesCall>(&mut values)?;
+    for (asset, hint) in assets.into_iter().zip(hints) {
+        let deployed = next::<Pool::getReserveDataCall>(&mut values)?;
+        let raw = values.next().ok_or_else(|| {
+            error(
+                "AAVE_READ_INCOMPLETE",
+                "read",
+                "Reserve totals are missing.",
+            )
+        })??;
+        require(
+            raw.len() == 12 * 32,
+            "CONTRACT_DATA_INVALID",
+            "Protocol reserve aggregate has an incompatible ABI.",
+        )?;
+        let aggregate =
+            DataProvider::getReserveDataCall::abi_decode_returns(&raw).map_err(|_| {
+                error(
+                    "CONTRACT_DATA_INVALID",
+                    "read",
+                    "Protocol reserve aggregate does not match its reviewed ABI.",
+                )
+            })?;
+        require(
+            aggregate.liquidityIndex == U256::from(deployed.liquidityIndex)
+                && aggregate.variableBorrowIndex == U256::from(deployed.variableBorrowIndex)
+                && aggregate.liquidityRate == U256::from(deployed.currentLiquidityRate)
+                && aggregate.variableBorrowRate == U256::from(deployed.currentVariableBorrowRate)
+                && aggregate.lastUpdateTimestamp == deployed.lastUpdateTimestamp,
+            "AAVE_READ_CHANGED",
+            "Pool and protocol aggregate disagree at the captured block.",
+        )?;
+        let (config, caps, paused) = configuration(deployed.configuration);
+        let receipts = Receipts {
+            aTokenAddress: deployed.aTokenAddress,
+            stableDebtTokenAddress: deployed.stableDebtTokenAddress,
+            variableDebtTokenAddress: deployed.variableDebtTokenAddress,
+        };
         require(
             receipts.aTokenAddress != Address::ZERO
                 && receipts.variableDebtTokenAddress != Address::ZERO,
             "RESERVE_UNAVAILABLE",
             "Aave reserve has no supplied/debt representation.",
         )?;
-        receipt_code.insert(receipts.aTokenAddress);
-        receipt_code.insert(receipts.variableDebtTokenAddress);
+        receipt_code.extend([receipts.aTokenAddress, receipts.variableDebtTokenAddress]);
         if receipts.stableDebtTokenAddress != Address::ZERO {
             receipt_code.insert(receipts.stableDebtTokenAddress);
         }
-        let caps = next::<DataProvider::getReserveCapsCall>(&mut values)?;
-        let paused = next::<DataProvider::getPausedCall>(&mut values)?;
-        let configuration = next::<Pool::getConfigurationCall>(&mut values)?;
+        let reference = lower_address(asset);
+        let mut metadata = hint
+            .as_ref()
+            .and_then(|hint| adapter.aave_metadata_for_decimals(&reference, hint, config.decimals));
+        // MCP is a display-metadata fallback, never the risk/precision authority.
+        // Historical reads retain their block-specific token labels. Bulk reads
+        // fall back in one ERC-20 batch rather than opening a session per row.
+        if metadata.is_none()
+            && hint.is_none()
+            && !capture.historical
+            && explicit.is_some_and(|tokens| tokens.len() == 1)
+            && let Ok(hint) = adapter
+                .aave_mcp
+                .reserve_metadata(adapter.config.chain_id, pool, asset)
+                .await
+        {
+            metadata = adapter.aave_metadata_for_decimals(&reference, &hint, config.decimals);
+            if let Some(token) = &metadata {
+                adapter.aave_store_verified_metadata(token);
+            }
+        }
         let income = next::<Pool::getReserveNormalizedIncomeCall>(&mut values)?;
         let debt_index = next::<Pool::getReserveNormalizedVariableDebtCall>(&mut values)?;
-        let deployed = next::<Pool::getReserveDataCall>(&mut values)?;
         let (user, wallet, allowance) = if positions {
             (
                 Some(next::<DataProvider::getUserReserveDataCall>(&mut values)?),
@@ -306,16 +381,16 @@ pub(super) async fn collect_with_collector(
         };
         first.push(First {
             asset,
-            decimals,
-            symbol,
+            metadata,
             config,
             receipts,
             caps,
             paused,
-            configuration,
+            configuration: deployed.configuration,
             income,
             debt_index,
             deployed,
+            aggregate,
             user,
             wallet,
             allowance,
@@ -332,46 +407,41 @@ pub(super) async fn collect_with_collector(
     code_checks(adapter, block, receipt_code).await?;
     let mut calls = Vec::new();
     for row in &first {
-        let r = &row.receipts;
-        calls.extend([
-            ReadCall::new(r.aTokenAddress, &Erc20::totalSupplyCall {}),
-            ReadCall::new(r.variableDebtTokenAddress, &Erc20::totalSupplyCall {}),
-        ]);
-        if r.stableDebtTokenAddress != Address::ZERO {
-            calls.push(ReadCall::new(
-                r.stableDebtTokenAddress,
-                &Erc20::totalSupplyCall {},
-            ));
+        if row.metadata.is_none() {
+            calls.extend([
+                ReadCall::new(row.asset, &Erc20::decimalsCall {}),
+                ReadCall::new(row.asset, &Erc20::symbolCall {}),
+            ]);
         }
         calls.extend([
             ReadCall::new(
                 row.asset,
                 &Erc20::balanceOfCall {
-                    owner: r.aTokenAddress,
+                    owner: row.receipts.aTokenAddress,
                 },
             ),
-            ReadCall::new(r.aTokenAddress, &AToken::ATOKEN_REVISIONCall {}),
+            ReadCall::new(row.receipts.aTokenAddress, &AToken::ATOKEN_REVISIONCall {}),
             ReadCall::new(
-                r.variableDebtTokenAddress,
+                row.receipts.variableDebtTokenAddress,
                 &AToken::DEBT_TOKEN_REVISIONCall {},
             ),
         ]);
         if positions {
             calls.extend([
                 ReadCall::new(
-                    r.aTokenAddress,
+                    row.receipts.aTokenAddress,
                     &AToken::scaledBalanceOfCall {
                         user: capture.owner,
                     },
                 ),
                 ReadCall::new(
-                    r.aTokenAddress,
+                    row.receipts.aTokenAddress,
                     &AToken::getPreviousIndexCall {
                         user: capture.owner,
                     },
                 ),
                 ReadCall::new(
-                    r.variableDebtTokenAddress,
+                    row.receipts.variableDebtTokenAddress,
                     &AToken::getPreviousIndexCall {
                         user: capture.owner,
                     },
@@ -382,12 +452,25 @@ pub(super) async fn collect_with_collector(
     let mut values = collector.collect(calls).await.into_iter();
     let mut rows = Vec::new();
     for f in first {
-        let supplied_total = next::<Erc20::totalSupplyCall>(&mut values)?;
-        let variable_total = next::<Erc20::totalSupplyCall>(&mut values)?;
-        let stable_total = if f.receipts.stableDebtTokenAddress == Address::ZERO {
-            U256::ZERO
+        let metadata = if let Some(metadata) = f.metadata {
+            metadata
         } else {
-            next::<Erc20::totalSupplyCall>(&mut values)?
+            let decimals = next::<Erc20::decimalsCall>(&mut values)?;
+            let symbol = symbol(values.next())?;
+            require(
+                U256::from(decimals) == f.config.decimals,
+                "RESERVE_PRECISION_MISMATCH",
+                "Aave reserve precision disagrees with token identity.",
+            )?;
+            let token = Token {
+                reference: lower_address(f.asset),
+                decimals,
+                symbol,
+            };
+            if !capture.historical {
+                adapter.aave_store_verified_metadata(&token);
+            }
+            token
         };
         let liquidity = next::<Erc20::balanceOfCall>(&mut values)?;
         let supply_revision = next::<AToken::ATOKEN_REVISIONCall>(&mut values)?;
@@ -406,8 +489,8 @@ pub(super) async fn collect_with_collector(
         };
         rows.push(RowFacts {
             asset: f.asset,
-            decimals: f.decimals,
-            symbol: f.symbol,
+            decimals: metadata.decimals,
+            symbol: metadata.symbol,
             config: f.config,
             receipts: f.receipts,
             caps: f.caps,
@@ -416,9 +499,9 @@ pub(super) async fn collect_with_collector(
             income: f.income,
             debt_index: f.debt_index,
             deployed: f.deployed,
-            supplied_total,
-            variable_total,
-            stable_total,
+            supplied_total: f.aggregate.totalAToken,
+            variable_total: f.aggregate.totalVariableDebt,
+            stable_total: f.aggregate.totalStableDebt,
             liquidity,
             supply_revision,
             debt_revision,
@@ -505,4 +588,34 @@ pub(super) fn evaluate(facts: &RowsFacts) -> Result<(Vec<Reserve>, Vec<PositionR
         reserves.push(reserve);
     }
     Ok((reserves, positions))
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+    #[test]
+    fn packed_configuration_preserves_precision_flags_caps_and_risk_fields() {
+        let word = U256::from(7500)
+            | (U256::from(8100) << 16)
+            | (U256::from(10600) << 32)
+            | (U256::from(18) << 48)
+            | (U256::from(1) << 56)
+            | (U256::from(1) << 57)
+            | (U256::from(1) << 58)
+            | (U256::from(1) << 60)
+            | (U256::from(1200) << 64)
+            | (U256::from(123456) << 80)
+            | (U256::from(654321) << 116)
+            | (U256::from(1) << 252);
+        let (config, caps, paused) = configuration(word);
+        assert_eq!(config.decimals, U256::from(18));
+        assert_eq!(config.ltv, U256::from(7500));
+        assert_eq!(config.liquidationThreshold, U256::from(8100));
+        assert_eq!(config.liquidationBonus, U256::from(10600));
+        assert_eq!(config.reserveFactor, U256::from(1200));
+        assert!(config.isActive && config.isFrozen && config.borrowingEnabled && paused);
+        assert!(!config.stableBorrowRateEnabled);
+        assert_eq!(caps.borrowCap, U256::from(123456));
+        assert_eq!(caps.supplyCap, U256::from(654321));
+    }
 }

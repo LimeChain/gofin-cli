@@ -514,10 +514,16 @@ impl EvmRpc for WorkflowEvm {
                             | (U256::from(1) << 58),
                     ),
                     Pool::getUserEModeCall::SELECTOR => encoded(U256::ZERO),
-                    Pool::getReserveDataCall::SELECTOR => {
+                    Pool::getReserveDataCall::SELECTOR if to == addr(POOL) => {
                         let w = reserve_weth();
                         encoded(PoolReserveData {
-                            configuration: U256::from(8000) | (U256::from(8500) << 16),
+                            configuration: U256::from(8000)
+                                | (U256::from(8500) << 16)
+                                | (U256::from(10500) << 32)
+                                | (U256::from(if w { 18 } else { 6 }) << 48)
+                                | (U256::from(1) << 56)
+                                | (U256::from(1) << 58)
+                                | (U256::from(1000) << 64),
                             liquidityIndex: ray().to::<u128>(),
                             currentLiquidityRate: 0,
                             variableBorrowIndex: ray().to::<u128>(),
@@ -534,6 +540,20 @@ impl EvmRpc for WorkflowEvm {
                             isolationModeTotalDebt: 0,
                         })
                     }
+                    DataProvider::getReserveDataCall::SELECTOR if to == internal(210) => encoded((
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::from(10).pow(U256::from(24)),
+                        U256::from(10).pow(U256::from(24)),
+                        U256::from(10).pow(U256::from(24)),
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::ZERO,
+                        ray(),
+                        ray(),
+                        U40::from(1),
+                    )),
                     DataProvider::getReserveConfigurationDataCall::SELECTOR => encoded((
                         U256::from(if reserve_weth() { 18 } else { 6 }),
                         U256::from(8000),

@@ -374,19 +374,22 @@ impl EthereumAdapter {
         collector: &mut ReadCollector,
     ) -> Result<BorrowRestrictionEvidence> {
         let pool = address(&self.aave()?.pool)?;
-        let mode = collector
-            .call(pool, &Pool::getUserEModeCall { user: owner })
-            .await?;
-        let config = collector
-            .call(
-                pool,
-                &Pool::getConfigurationCall {
-                    asset: address(&token.reference)?,
-                },
-            )
-            .await?;
+        let mut observed = collector
+            .collect(vec![
+                ReadCall::new(pool, &Pool::getUserEModeCall { user: owner }),
+                ReadCall::new(
+                    pool,
+                    &Pool::getReserveDataCall {
+                        asset: address(&token.reference)?,
+                    },
+                ),
+            ])
+            .await
+            .into_iter();
+        let mode = decode::<Pool::getUserEModeCall>(observed.next())?;
+        let selected_reserve = decode::<Pool::getReserveDataCall>(observed.next())?;
+        let config = selected_reserve.configuration;
         let emode = if mode > U256::ZERO {
-            // Range validation is needed to decode the protocol's uint8 request.
             require(
                 mode <= U256::from(255),
                 "AAVE_MODE_UNSUPPORTED",
@@ -400,15 +403,7 @@ impl EthereumAdapter {
                     },
                 )
                 .await?;
-            let reserve = collector
-                .call(
-                    pool,
-                    &Pool::getReserveDataCall {
-                        asset: address(&token.reference)?,
-                    },
-                )
-                .await?;
-            Some((reserve.id, bitmap))
+            Some((selected_reserve.id, bitmap))
         } else {
             None
         };
@@ -419,6 +414,22 @@ impl EthereumAdapter {
             fetched = self.aave_risk_users(owner, block, true).await?;
             &fetched
         };
+        let isolated_calls = users
+            .iter()
+            .filter_map(|(reference, config, user)| {
+                let ceiling = (*config >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1));
+                (user.usageAsCollateralEnabled
+                    && !user.currentATokenBalance.is_zero()
+                    && !ceiling.is_zero())
+                .then(|| {
+                    address(reference)
+                        .map(|asset| ReadCall::new(pool, &Pool::getReserveDataCall { asset }))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Preserve each individual error in the pass-local collector; validation
+        // below still interprets the same fact at its original point.
+        let _ = collector.collect(isolated_calls).await;
         let mut observed = Vec::with_capacity(users.len());
         for entry in users.iter().cloned() {
             let (reference, config, user) = &entry;
@@ -503,7 +514,7 @@ impl EthereumAdapter {
         collector: &mut ReadCollector,
     ) -> Result<Vec<RiskUser>> {
         let pool = address(&self.aave()?.pool)?;
-        let provider = self.data_provider(Some(block)).await?;
+        let provider = self.data_provider_with_collector(block, collector).await?;
         let selected = address(&token.reference)?;
         let mut initial = collector
             .collect(vec![
@@ -574,10 +585,9 @@ impl EthereumAdapter {
             )?;
             active.push((id, asset, bits));
         }
-        let mut calls = Vec::with_capacity(active.len() * 3);
+        let mut calls = Vec::with_capacity(active.len() * 2);
         for &(_, asset, _) in &active {
             calls.push(ReadCall::new(pool, &Pool::getReserveDataCall { asset }));
-            calls.push(ReadCall::new(pool, &Pool::getConfigurationCall { asset }));
             calls.push(ReadCall::new(
                 provider,
                 &DataProvider::getUserReserveDataCall { asset, user: owner },
@@ -587,7 +597,7 @@ impl EthereumAdapter {
         let mut users = Vec::with_capacity(active.len());
         for (id, asset, bits) in active {
             let data = decode::<Pool::getReserveDataCall>(observed.next())?;
-            let config = decode::<Pool::getConfigurationCall>(observed.next())?;
+            let config = data.configuration;
             let user = decode::<DataProvider::getUserReserveDataCall>(observed.next())?;
             require(
                 data.id == id,
@@ -750,49 +760,54 @@ impl EthereumAdapter {
             account,
         } = observation;
         let pool = address(&self.aave()?.pool)?;
+        let oracle = address(&self.aave()?.oracle)?;
+        // These targets are known at the same pinned block. Gather them in one
+        // request; the per-call results retain their original error semantics.
+        let mut calls = Vec::new();
+        if account.is_none() {
+            calls.push(ReadCall::new(
+                pool,
+                &Pool::getUserAccountDataCall { user: owner },
+            ));
+        }
+        if !added_debt.is_zero() {
+            calls.push(ReadCall::new(oracle, &Oracle::BASE_CURRENCYCall {}));
+            calls.push(ReadCall::new(oracle, &Oracle::BASE_CURRENCY_UNITCall {}));
+            calls.push(ReadCall::new(
+                oracle,
+                &Oracle::getAssetPriceCall {
+                    asset: address(&token.reference)?,
+                },
+            ));
+        }
+        calls.push(ReadCall::new(pool, &Pool::getUserEModeCall { user: owner }));
+        let mut observed = collector.collect(calls).await.into_iter();
         let account = if let Some(account) = account {
             account.clone()
         } else {
-            collector
-                .call(pool, &Pool::getUserAccountDataCall { user: owner })
-                .await?
+            decode::<Pool::getUserAccountDataCall>(observed.next())?
         };
-        let oracle = address(&self.aave()?.oracle)?;
-        let oracle_units = if added_debt.is_zero() {
-            None
+        let (oracle_units, debt_price) = if added_debt.is_zero() {
+            (None, None)
         } else {
-            Some((
-                collector
-                    .call(oracle, &Oracle::BASE_CURRENCYCall {})
-                    .await?,
-                collector
-                    .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {})
-                    .await?,
-            ))
-        };
-        let debt_price = if added_debt.is_zero() {
-            None
-        } else {
-            Some(
-                collector
-                    .call(
-                        oracle,
-                        &Oracle::getAssetPriceCall {
-                            asset: address(&token.reference)?,
-                        },
-                    )
-                    .await?,
+            (
+                Some((
+                    decode::<Oracle::BASE_CURRENCYCall>(observed.next())?,
+                    decode::<Oracle::BASE_CURRENCY_UNITCall>(observed.next())?,
+                )),
+                Some(decode::<Oracle::getAssetPriceCall>(observed.next())?),
             )
         };
+        // Mode failure was historically part of the optional details result,
+        // so keep its interpretation inside that result rather than promoting it.
+        let mode_result = observed.next();
         let details: Result<HealthDetails> = async {
             let mut details = HealthDetails {
                 category_threshold: None,
                 category_bitmap: 0,
                 collateral: Vec::new(),
             };
-            let mode = collector
-                .call(pool, &Pool::getUserEModeCall { user: owner })
-                .await?;
+            let mode = decode::<Pool::getUserEModeCall>(mode_result)?;
             require(
                 mode <= U256::from(255),
                 "AAVE_MODE_UNSUPPORTED",
@@ -800,15 +815,19 @@ impl EthereumAdapter {
             )?;
             if !mode.is_zero() {
                 let id = mode.to::<u8>();
+                let mut observed = collector
+                    .collect(vec![
+                        ReadCall::new(pool, &Pool::getEModeCategoryCollateralConfigCall { id }),
+                        ReadCall::new(pool, &Pool::getEModeCategoryCollateralBitmapCall { id }),
+                    ])
+                    .await
+                    .into_iter();
                 details.category_threshold = Some(
-                    collector
-                        .call(pool, &Pool::getEModeCategoryCollateralConfigCall { id })
-                        .await?
+                    decode::<Pool::getEModeCategoryCollateralConfigCall>(observed.next())?
                         .liquidationThreshold,
                 );
-                details.category_bitmap = collector
-                    .call(pool, &Pool::getEModeCategoryCollateralBitmapCall { id })
-                    .await?;
+                details.category_bitmap =
+                    decode::<Pool::getEModeCategoryCollateralBitmapCall>(observed.next())?;
             }
             let fetched;
             let users = if let Some(users) = selected_users {
@@ -817,6 +836,21 @@ impl EthereumAdapter {
                 fetched = self.aave_risk_users(owner, block, false).await?;
                 &fetched
             };
+            let price_calls = users
+                .iter()
+                .filter(|(_, _, user)| {
+                    user.usageAsCollateralEnabled && !user.currentATokenBalance.is_zero()
+                })
+                .map(|(reference, _, _)| {
+                    Ok(ReadCall::new(
+                        oracle,
+                        &Oracle::getAssetPriceCall {
+                            asset: address(reference)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let _ = collector.collect(price_calls).await;
             for (reference, _, user) in users.iter().cloned() {
                 if !user.usageAsCollateralEnabled || user.currentATokenBalance.is_zero() {
                     continue;
@@ -832,35 +866,39 @@ impl EthereumAdapter {
                     .await?
                 };
                 let (a_token, _, _) = reserve.receipt_addresses()?;
-                let scaled = if apply_removal && reference == token.reference && removed.is_some() {
-                    Some(
-                        collector
-                            .call(a_token, &AToken::scaledBalanceOfCall { user: owner })
-                            .await?,
-                    )
+                let needs_scaled =
+                    apply_removal && reference == token.reference && removed.is_some();
+                let needs_id = details.category_threshold.is_some();
+                let mut calls = Vec::new();
+                if needs_scaled {
+                    calls.push(ReadCall::new(
+                        a_token,
+                        &AToken::scaledBalanceOfCall { user: owner },
+                    ));
+                }
+                calls.push(ReadCall::new(
+                    oracle,
+                    &Oracle::getAssetPriceCall {
+                        asset: address(&reference)?,
+                    },
+                ));
+                if needs_id {
+                    calls.push(ReadCall::new(
+                        pool,
+                        &Pool::getReserveDataCall {
+                            asset: address(&reference)?,
+                        },
+                    ));
+                }
+                let mut observed = collector.collect(calls).await.into_iter();
+                let scaled = if needs_scaled {
+                    Some(decode::<AToken::scaledBalanceOfCall>(observed.next())?)
                 } else {
                     None
                 };
-                let price = collector
-                    .call(
-                        oracle,
-                        &Oracle::getAssetPriceCall {
-                            asset: address(&reference)?,
-                        },
-                    )
-                    .await?;
-                let reserve_id = if details.category_threshold.is_some() {
-                    Some(
-                        collector
-                            .call(
-                                pool,
-                                &Pool::getReserveDataCall {
-                                    asset: address(&reference)?,
-                                },
-                            )
-                            .await?
-                            .id,
-                    )
+                let price = decode::<Oracle::getAssetPriceCall>(observed.next())?;
+                let reserve_id = if needs_id {
+                    Some(decode::<Pool::getReserveDataCall>(observed.next())?.id)
                 } else {
                     None
                 };

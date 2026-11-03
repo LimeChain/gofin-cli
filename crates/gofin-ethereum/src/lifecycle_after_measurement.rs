@@ -25,6 +25,61 @@ impl EvmRpc for Counted {
             .await
     }
 }
+/// Count all MCP transport posts separately from EVM RPCs.
+struct CountedMcp {
+    inner: SyntheticAaveMcp,
+    posts: Arc<AtomicUsize>,
+    tool_calls: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl aave_mcp::AaveMcpTransport for CountedMcp {
+    async fn post(
+        &self,
+        request: aave_mcp::McpHttpRequest,
+    ) -> std::result::Result<aave_mcp::McpHttpResponse, aave_mcp::AaveMcpError> {
+        self.posts.fetch_add(1, Ordering::SeqCst);
+        if serde_json::from_slice::<Value>(&request.body)
+            .ok()
+            .is_some_and(|v| v["method"] == "tools/call")
+        {
+            self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.post(request).await
+    }
+}
+struct LocalCatalog {
+    lookups: Arc<AtomicUsize>,
+    remote_calls: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl TokenDiscovery for LocalCatalog {
+    async fn tokens(&self, _: u64, _: &str) -> Result<TokenDiscoveryResult> {
+        self.remote_calls.fetch_add(1, Ordering::SeqCst);
+        Err(GoFinError::validation(
+            "Catalog-first fixture cannot call a metadata service.",
+        ))
+    }
+    fn token_metadata(&self, chain_id: u64, reference: &str) -> Option<TokenMetadataHint> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        (chain_id == 1 && reference == lower_address(addr(101))).then(|| TokenMetadataHint {
+            chain_id,
+            address: reference.into(),
+            decimals: 6,
+            symbol: "USDC".into(),
+        })
+    }
+}
+fn selected_metadata(params: &Value) -> bool {
+    if params[0]["to"] != json!(lower_address(addr(101))) {
+        return false;
+    }
+    let Ok(bytes) = gofin_evm::rpc_bytes(&params[0]["data"]) else {
+        return false;
+    };
+    bytes.starts_with(&Erc20::decimalsCall::SELECTOR)
+        || bytes.starts_with(&Erc20::symbolCall::SELECTOR)
+}
+
 /// Exact synthetic fact identity. Block-by-hash and numeric tags normalize to
 /// the same canonical test block; mutable sender-bearing simulations are separate.
 fn fact_key(method: &str, params: &Value) -> Option<String> {
@@ -475,7 +530,27 @@ async fn after_action_and_read_http_counts() {
             scoped: false,
         },
         Case {
+            label: "supply_catalog_first",
+            op: "aave.supply",
+            supply: 0,
+            debt: 0,
+            collateral: false,
+            all: false,
+            enabled: false,
+            scoped: false,
+        },
+        Case {
             label: "borrow_open",
+            op: "aave.borrow",
+            supply: 10_000_000,
+            debt: 0,
+            collateral: true,
+            all: false,
+            enabled: false,
+            scoped: false,
+        },
+        Case {
+            label: "borrow_catalog_first",
             op: "aave.borrow",
             supply: 10_000_000,
             debt: 0,
@@ -649,6 +724,9 @@ async fn after_action_and_read_http_counts() {
     let mut fixed_exposure_counts: BTreeMap<&str, [Vec<Counts>; 4]> = BTreeMap::new();
     for market_size in [2u64, 20, 50] {
         for case in cases {
+            if case.label.ends_with("catalog_first") && market_size != 20 {
+                continue;
+            }
             let fixture = Arc::new(Fixture::new());
             {
                 let mut state = fixture.states.lock().unwrap();
@@ -690,6 +768,12 @@ async fn after_action_and_read_http_counts() {
             let worker_subcalls = subcalls.clone();
             let direct = Arc::new(AtomicUsize::new(0));
             let worker_direct = direct.clone();
+            let metadata_calls = Arc::new(AtomicUsize::new(0));
+            let worker_metadata_calls = metadata_calls.clone();
+            let mcp_posts = Arc::new(AtomicUsize::new(0));
+            let mcp_tool_calls = Arc::new(AtomicUsize::new(0));
+            let catalog_lookups = Arc::new(AtomicUsize::new(0));
+            let metadata_remote_calls = Arc::new(AtomicUsize::new(0));
             let fault = Arc::new(AtomicUsize::new(0));
             let worker_fault = fault.clone();
             let facts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
@@ -775,6 +859,9 @@ async fn after_action_and_read_http_counts() {
                         let mut rows = Vec::new();
                         for call in calls {
                             let subparams = json!([{"to":lower_address(call.target),"data":hex_bytes(&call.callData)},params[1]]);
+                            if selected_metadata(&subparams) {
+                                worker_metadata_calls.fetch_add(1, Ordering::SeqCst);
+                            }
                             if worker_tracking.load(Ordering::SeqCst)
                                 && let Some(key) = fact_key("eth_call", &subparams)
                             {
@@ -812,6 +899,9 @@ async fn after_action_and_read_http_counts() {
                     } else {
                         if method == "eth_call" {
                             worker_direct.fetch_add(1, Ordering::SeqCst);
+                            if selected_metadata(&params) {
+                                worker_metadata_calls.fetch_add(1, Ordering::SeqCst);
+                            }
                         }
                         handle.block_on(synthetic_reply(&worker_fixture, case, method, params))
                     };
@@ -829,10 +919,54 @@ async fn after_action_and_read_http_counts() {
                 inner: gofin_evm::HttpRpc::isolated_localhost(url, 1).unwrap(),
                 logical: AtomicUsize::new(0),
             });
-            let mut adapter = adapter(fixture.clone());
+            let mut adapter = adapter(fixture.clone()).with_aave_mcp(
+                aave_mcp::AaveMcpClient::with_transport(Arc::new(CountedMcp {
+                    inner: SyntheticAaveMcp {
+                        calls: Arc::new(AtomicUsize::new(0)),
+                    },
+                    posts: mcp_posts.clone(),
+                    tool_calls: mcp_tool_calls.clone(),
+                })),
+            );
+            if case.label.ends_with("catalog_first") {
+                adapter = adapter.with_token_discovery(Arc::new(LocalCatalog {
+                    lookups: catalog_lookups.clone(),
+                    remote_calls: metadata_remote_calls.clone(),
+                }));
+            }
             adapter.runtime = Arc::new(EvmRuntime::new(counted.clone(), 1, None));
             let measure = || {
                 let phase = phase_index.fetch_add(1, Ordering::SeqCst);
+                let metadata = metadata_calls.swap(0, Ordering::SeqCst);
+                let posts = mcp_posts.swap(0, Ordering::SeqCst);
+                let tools = mcp_tool_calls.swap(0, Ordering::SeqCst);
+                let local = catalog_lookups.swap(0, Ordering::SeqCst);
+                let remote = metadata_remote_calls.swap(0, Ordering::SeqCst);
+                if metadata + posts + local + remote > 0 {
+                    eprintln!(
+                        "EXTERNAL N={} {} phase={} token_metadata_rpc={} mcp_posts={} mcp_tool_calls={} local_catalog_lookups={} metadata_service_calls={}",
+                        market_size, case.label, phase, metadata, posts, tools, local, remote
+                    );
+                }
+                if matches!(case.op, "aave.reserves" | "aave.positions") && !case.scoped {
+                    assert_eq!(
+                        posts, 0,
+                        "bulk native reads must not issue per-token MCP metadata requests"
+                    );
+                }
+                if case.label.ends_with("catalog_first") {
+                    assert_eq!(
+                        metadata, 0,
+                        "catalog-first capture must not request token decimals/symbol"
+                    );
+                    assert_eq!(remote, 0, "local metadata hint cannot hide remote lookups");
+                    if phase == 0 {
+                        assert_eq!(
+                            posts, 0,
+                            "catalog-first collection must not request MCP metadata"
+                        );
+                    }
+                }
                 let duplicates = std::mem::take(&mut *facts.lock().unwrap())
                     .into_iter()
                     .filter(|(_, count)| *count > 1)

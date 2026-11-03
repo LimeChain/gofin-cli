@@ -485,9 +485,24 @@ pub struct TokenDiscoveryResult {
     pub source: String,
     pub warnings: Vec<String>,
 }
+/// Public metadata is a hint only; Aave must bind its decimals to a fresh
+/// reserve configuration before using it for exact quantities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenMetadataHint {
+    pub chain_id: u64,
+    pub address: String,
+    pub decimals: u8,
+    pub symbol: String,
+}
+
 #[async_trait]
 pub trait TokenDiscovery: Send + Sync {
     async fn tokens(&self, chain_id: u64, address: &str) -> Result<TokenDiscoveryResult>;
+    /// Synchronous local catalog hint, scoped to the exact chain and contract.
+    /// It never proves a balance, deployment, or financial precision by itself.
+    fn token_metadata(&self, _chain_id: u64, _address: &str) -> Option<TokenMetadataHint> {
+        None
+    }
     /// Trusted catalog policy only; external discovery must not grant indefinite caching.
     fn metadata_expiry_seconds(&self, _chain_id: u64, _address: &str) -> i64 {
         86400

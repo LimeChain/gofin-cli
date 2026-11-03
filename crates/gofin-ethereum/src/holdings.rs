@@ -52,6 +52,111 @@ impl EthereumAdapter {
     fn metadata_key(&self, reference: &str) -> String {
         format!("evm-metadata-v1:{}:{reference}", self.config.chain_id)
     }
+    /// Look up display metadata locally; this is never financial evidence until
+    /// its decimals agree with the selected reserve's fresh onchain configuration.
+    pub(crate) fn aave_metadata_hint(&self, reference: &str) -> Option<TokenMetadataHint> {
+        let contract = address(reference).ok()?;
+        if contract == Address::ZERO {
+            return None;
+        }
+        let reference = lower_address(contract);
+        let key = self.metadata_key(&reference);
+        let cached = self
+            .metadata_cache
+            .get::<Metadata>(
+                &key,
+                self.metadata_ttl(&reference),
+                self.clock.now().timestamp(),
+            )
+            .filter(|metadata| {
+                metadata.token.reference == reference
+                    && pow10(metadata.token.decimals).is_ok()
+                    && label_valid(&metadata.token.symbol)
+                    && metadata.name.as_ref().is_none_or(|name| label_valid(name))
+            })
+            .map(|metadata| TokenMetadataHint {
+                chain_id: self.config.chain_id,
+                address: reference.clone(),
+                decimals: metadata.token.decimals,
+                symbol: metadata.token.symbol,
+            });
+        cached.or_else(|| {
+            self.token_discovery
+                .as_ref()?
+                .token_metadata(self.config.chain_id, &reference)
+                .filter(|hint| {
+                    hint.chain_id == self.config.chain_id
+                        && hint.address == reference
+                        && pow10(hint.decimals).is_ok()
+                        && label_valid(&hint.symbol)
+                })
+        })
+    }
+    /// The live selected reserve decides precision. A mismatch invalidates any
+    /// mutable cached metadata and forces the caller to fetch token metadata.
+    pub(crate) fn aave_metadata_for_decimals(
+        &self,
+        reference: &str,
+        hint: &TokenMetadataHint,
+        canonical_decimals: U256,
+    ) -> Option<reads::Token> {
+        let contract = address(reference).ok()?;
+        if contract == Address::ZERO {
+            return None;
+        }
+        let reference = lower_address(contract);
+        if hint.chain_id != self.config.chain_id || hint.address != reference {
+            return None;
+        }
+        if canonical_decimals > U256::from(u8::MAX)
+            || canonical_decimals != U256::from(hint.decimals)
+            || pow10(hint.decimals).is_err()
+            || !label_valid(&hint.symbol)
+        {
+            self.metadata_cache.remove(&self.metadata_key(&reference));
+            return None;
+        }
+        Some(reads::Token {
+            reference,
+            decimals: hint.decimals,
+            symbol: hint.symbol.clone(),
+        })
+    }
+    /// Store only metadata the caller has just checked against reserve precision.
+    pub(crate) fn aave_store_verified_metadata(&self, token: &reads::Token) {
+        let Ok(contract) = address(&token.reference) else {
+            return;
+        };
+        let reference = lower_address(contract);
+        if contract == Address::ZERO
+            || token.reference != reference
+            || pow10(token.decimals).is_err()
+            || !label_valid(&token.symbol)
+        {
+            return;
+        }
+        let key = self.metadata_key(&reference);
+        let ttl = self.metadata_ttl(&reference);
+        let now = self.clock.now().timestamp();
+        let name = self
+            .metadata_cache
+            .get::<Metadata>(&key, ttl, now)
+            .filter(|old| {
+                old.token.reference == reference
+                    && old.token.decimals == token.decimals
+                    && old.name.as_ref().is_none_or(|name| label_valid(name))
+            })
+            .and_then(|old| old.name);
+        self.metadata_cache.put(
+            &key,
+            &Metadata {
+                token: token.clone(),
+                name,
+            },
+            ttl,
+            now,
+        );
+    }
     pub(crate) fn learned_key(&self, owner: &str) -> String {
         format!(
             "evm-holdings-v1:{}:{}",
@@ -617,6 +722,147 @@ mod tests {
         other.config.chain_id = 42161;
         read(&other, None, false).await.unwrap();
         assert_eq!(rpc.metadata_reads.load(Ordering::SeqCst), 14);
+    }
+    struct MetadataCatalog;
+    #[async_trait]
+    impl TokenDiscovery for MetadataCatalog {
+        async fn tokens(&self, _: u64, _: &str) -> Result<TokenDiscoveryResult> {
+            Ok(TokenDiscoveryResult {
+                candidates: Vec::new(),
+                complete: false,
+                source: "metadata-fixture".into(),
+                warnings: Vec::new(),
+            })
+        }
+        fn token_metadata(&self, chain: u64, reference: &str) -> Option<TokenMetadataHint> {
+            (chain == 1 && reference == token(100)).then(|| TokenMetadataHint {
+                chain_id: 1,
+                address: token(100),
+                decimals: 6,
+                symbol: "USDC".into(),
+            })
+        }
+        fn metadata_expiry_seconds(&self, _: u64, _: &str) -> i64 {
+            60
+        }
+    }
+    #[test]
+    fn aave_catalog_hint_requires_exact_identity_and_fresh_reserve_precision() {
+        let rpc = Arc::new(Rpc::new(false));
+        let mut a = adapter(rpc.clone(), 0, 60).with_token_discovery(Arc::new(MetadataCatalog));
+        let contract = token(100);
+        let hint = a.aave_metadata_hint(&contract).unwrap();
+        assert_eq!(
+            hint,
+            TokenMetadataHint {
+                chain_id: 1,
+                address: token(100),
+                decimals: 6,
+                symbol: "USDC".into()
+            }
+        );
+        let confirmed = a
+            .aave_metadata_for_decimals(&contract, &hint, U256::from(6))
+            .unwrap();
+        assert_eq!(confirmed.reference, contract);
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(18))
+                .is_none()
+        );
+        let refreshed = reads::Token {
+            reference: contract.clone(),
+            decimals: 18,
+            symbol: "REFRESHED".into(),
+        };
+        a.aave_store_verified_metadata(&refreshed);
+        let cached = a.aave_metadata_hint(&contract).unwrap();
+        assert_eq!(
+            cached.decimals, 18,
+            "verified cache supersedes a stale catalog hint"
+        );
+        assert_eq!(
+            a.aave_metadata_for_decimals(&contract, &cached, U256::from(18))
+                .unwrap()
+                .symbol,
+            "REFRESHED"
+        );
+        assert!(a.aave_metadata_hint(&token(101)).is_none());
+        assert!(
+            a.aave_metadata_for_decimals(&token(101), &hint, U256::from(6))
+                .is_none(),
+            "a hint cannot cross contract identity"
+        );
+        a.config.chain_id = 8453;
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(6))
+                .is_none(),
+            "a hint cannot cross chain identity"
+        );
+        assert!(a.aave_metadata_hint(&contract).is_none());
+        assert!(
+            rpc.requests.lock().unwrap().is_empty(),
+            "catalog and validation must be local"
+        );
+    }
+    #[test]
+    fn aave_cached_metadata_expires_and_mismatch_evicts_it() {
+        let rpc = Arc::new(Rpc::new(false));
+        let clock = Arc::new(Clock(AtomicI64::new(1000)));
+        let a = adapter(rpc, 0, 60).with_clock(clock.clone());
+        let contract = token(100);
+        let token = reads::Token {
+            reference: contract.clone(),
+            decimals: 6,
+            symbol: "SYN".into(),
+        };
+        a.aave_store_verified_metadata(&token);
+        let hint = a.aave_metadata_hint(&contract).unwrap();
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(18))
+                .is_none()
+        );
+        assert!(
+            a.aave_metadata_hint(&contract).is_none(),
+            "mismatch must evict mutable metadata"
+        );
+        a.aave_store_verified_metadata(&token);
+        clock
+            .0
+            .store(1000 + a.metadata_ttl(&contract), Ordering::SeqCst);
+        assert!(
+            a.aave_metadata_hint(&contract).is_none(),
+            "expired metadata must not supply an Aave hint"
+        );
+    }
+    #[test]
+    fn aave_metadata_rejects_invalid_identity_labels_and_unrepresentable_decimals() {
+        let rpc = Arc::new(Rpc::new(false));
+        let a = adapter(rpc, 0, 60);
+        let contract = token(100);
+        for bad in [
+            TokenMetadataHint {
+                chain_id: 1,
+                address: contract.clone(),
+                decimals: 6,
+                symbol: "bad\nlabel".into(),
+            },
+            TokenMetadataHint {
+                chain_id: 1,
+                address: contract.clone(),
+                decimals: 255,
+                symbol: "BAD".into(),
+            },
+        ] {
+            assert!(
+                a.aave_metadata_for_decimals(&contract, &bad, U256::from(bad.decimals))
+                    .is_none()
+            );
+        }
+        assert!(a.aave_metadata_hint("not-an-address").is_none());
+        assert!(
+            a.aave_metadata_hint("0x0000000000000000000000000000000000000000")
+                .is_none()
+        );
     }
     #[tokio::test]
     async fn remembered_arc_native_alias_cannot_reenter_erc20_scope() {

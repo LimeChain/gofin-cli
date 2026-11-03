@@ -2530,40 +2530,91 @@ impl EvmRpc for Fixture {
                     Pool::getConfigurationCall::SELECTOR => abi_value(
                         U256::from(8000)
                             | (U256::from(8500) << 16)
+                            | (U256::from(10500) << 32)
+                            | (U256::from(if token == WETH { 18 } else { 6 }) << 48)
                             | (U256::from(1) << 56)
-                            | (U256::from(1) << 58),
+                            | (U256::from(u8::from(*self.frozen.lock().unwrap())) << 57)
+                            | (U256::from(1) << 58)
+                            | (U256::from(u8::from(*self.paused.lock().unwrap())) << 60)
+                            | (U256::from(1000) << 64),
                     ),
-                    Pool::getReserveDataCall::SELECTOR => abi_value(PoolReserveData {
-                        configuration: U256::from(8000) | (U256::from(8500) << 16),
-                        liquidityIndex: s.income.to::<u128>(),
-                        currentLiquidityRate: 0,
-                        variableBorrowIndex: s.debt_index.to::<u128>(),
-                        currentVariableBorrowRate: 0,
-                        currentStableBorrowRate: 0,
-                        lastUpdateTimestamp: U40::from(1),
-                        id: if Pool::getReserveDataCall::abi_decode_validate(&data)
-                            .unwrap()
-                            .asset
-                            == addr(102)
-                        {
-                            1
-                        } else if Pool::getReserveDataCall::abi_decode_validate(&data)
-                            .unwrap()
-                            .asset
-                            == addr(100)
-                        {
-                            2
-                        } else {
-                            0
-                        },
-                        aTokenAddress: addr(110),
-                        stableDebtTokenAddress: addr(115),
-                        variableDebtTokenAddress: addr(120),
-                        interestRateStrategyAddress: addr(130),
-                        accruedToTreasury: 0,
-                        unbacked: 0,
-                        isolationModeTotalDebt: 0,
-                    }),
+                    Pool::getReserveDataCall::SELECTOR if to != addr(210) => {
+                        abi_value(PoolReserveData {
+                            configuration: U256::from(8000)
+                                | (U256::from(8500) << 16)
+                                | (U256::from(10500) << 32)
+                                | (U256::from(
+                                    if Pool::getReserveDataCall::abi_decode_validate(&data)
+                                        .unwrap()
+                                        .asset
+                                        == addr(100)
+                                    {
+                                        18
+                                    } else {
+                                        6
+                                    },
+                                ) << 48)
+                                | (U256::from(1) << 56)
+                                | (U256::from(u8::from(*self.frozen.lock().unwrap())) << 57)
+                                | (U256::from(1) << 58)
+                                | (U256::from(u8::from(*self.paused.lock().unwrap())) << 60)
+                                | (U256::from(1000) << 64)
+                                | self
+                                    .call_overrides
+                                    .lock()
+                                    .unwrap()
+                                    .get(&Pool::getConfigurationCall::SELECTOR)
+                                    .map(|raw| gofin_evm::rpc_u256(raw).unwrap())
+                                    .unwrap_or(U256::ZERO),
+                            liquidityIndex: s.income.to::<u128>(),
+                            currentLiquidityRate: 0,
+                            variableBorrowIndex: s.debt_index.to::<u128>(),
+                            currentVariableBorrowRate: 0,
+                            currentStableBorrowRate: 0,
+                            lastUpdateTimestamp: U40::from(1),
+                            id: if Pool::getReserveDataCall::abi_decode_validate(&data)
+                                .unwrap()
+                                .asset
+                                == addr(102)
+                            {
+                                1
+                            } else if Pool::getReserveDataCall::abi_decode_validate(&data)
+                                .unwrap()
+                                .asset
+                                == addr(100)
+                            {
+                                2
+                            } else {
+                                0
+                            },
+                            aTokenAddress: if Pool::getReserveDataCall::abi_decode_validate(&data)
+                                .unwrap()
+                                .asset
+                                == addr(102)
+                                && *self.other_revision_reserve.lock().unwrap()
+                            {
+                                addr(111)
+                            } else {
+                                addr(110)
+                            },
+                            stableDebtTokenAddress: addr(115),
+                            variableDebtTokenAddress:
+                                if Pool::getReserveDataCall::abi_decode_validate(&data)
+                                    .unwrap()
+                                    .asset
+                                    == addr(102)
+                                    && *self.other_revision_reserve.lock().unwrap()
+                                {
+                                    addr(121)
+                                } else {
+                                    addr(120)
+                                },
+                            interestRateStrategyAddress: addr(130),
+                            accruedToTreasury: 0,
+                            unbacked: 0,
+                            isolationModeTotalDebt: 0,
+                        })
+                    }
                     Pool::POOL_REVISIONCall::SELECTOR => abi_value(U256::from(10)),
                     Pool::ADDRESSES_PROVIDERCall::SELECTOR => abi_value(addr(200)),
                     AddressesProvider::getPoolCall::SELECTOR => abi_value(addr(300)),
@@ -2599,6 +2650,20 @@ impl EvmRpc for Fixture {
                             vec![addr(101), addr(102)]
                         })
                     }
+                    DataProvider::getReserveDataCall::SELECTOR => abi_value((
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::from(1_000_000_000u64),
+                        U256::from(1_000_000_000u64),
+                        U256::from(1_000_000_000u64),
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::ZERO,
+                        U256::ZERO,
+                        s.income,
+                        s.debt_index,
+                        U40::from(1),
+                    )),
                     DataProvider::getReserveConfigurationDataCall::SELECTOR => abi_value((
                         U256::from(
                             if DataProvider::getReserveConfigurationDataCall::abi_decode_validate(
