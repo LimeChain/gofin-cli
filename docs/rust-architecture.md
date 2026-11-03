@@ -482,6 +482,113 @@ completeness source for borrow authorization. MCP transaction data remains a
 locally validated candidate; it does not replace exact on-chain checks or frozen
 transaction simulation.
 
+### Proposed shared operation lifecycle
+
+This is the next design direction, not an interface implemented by this change.
+The current supply/borrow optimization retains the existing `Adapter` contract;
+its helpers still mix evidence acquisition and financial evaluation. Complete and
+verify that bounded optimization before migrating adapters to the phases below.
+
+Keep one adapter instance for a protocol/network and implement a shared generic
+trait once per operation marker. Associated types give each implementation its
+own input, evidence, candidate, refreshed evidence, validated execution and
+observation types. For example, the same Aave adapter implements
+`OperationLifecycle<Supply>`, `OperationLifecycle<Borrow>` and
+`OperationLifecycle<Repay>` while sharing market configuration and transport.
+Exact/all amount modes belong to the relevant operation's typed input; they do
+not require another adapter. An intent describes approved financial bounds; it
+does not select a separate adapter instance or own another execution loop.
+
+The broker's existing engine orchestrates the lifecycle. Application adapters own
+the evidence and protocol rules; shared domain contracts remain independent of
+Alloy and application implementations. An illustrative contract is:
+
+```rust
+trait OperationLifecycle<Op> {
+    type Input;
+    type Evidence;
+    type Candidate;
+    type FinalEvidence;
+    type Prepared;
+    type FreshEvidence;
+    type Validated;
+    type ExecutionRef;
+    type Observation;
+    type Output;
+
+    async fn collect(&self, input: &Self::Input) -> Result<Self::Evidence>;
+    fn evaluate(input: &Self::Input, evidence: &Self::Evidence)
+        -> Result<Self::Candidate>;
+    async fn collect_final(&self, input: &Self::Input, candidate: &Self::Candidate)
+        -> Result<Self::FinalEvidence>;
+    fn finalize_candidate(input: &Self::Input, candidate: &Self::Candidate,
+        evidence: &Self::FinalEvidence) -> Result<Self::Prepared>;
+    async fn refresh(&self, prepared: &Self::Prepared)
+        -> Result<Self::FreshEvidence>;
+    fn revalidate(prepared: &Self::Prepared, fresh: &Self::FreshEvidence)
+        -> Result<Self::Validated>;
+    async fn execute(&self, validated: &Self::Validated,
+        admission: &DurableAdmission) -> Result<Self::ExecutionRef>;
+    async fn observe(&self, original: &DurableOperation)
+        -> Result<Self::Observation>;
+    fn evaluate_observation(original: &DurableOperation,
+        evidence: &Self::Observation) -> Result<ObservationResult<Self::Output>>;
+}
+```
+
+Names and supporting types above are illustrative. The implementation must
+provide a registry bridge for heterogeneous operations without erasing concrete
+evidence into an untyped JSON bag. The phase responsibilities are:
+
+| Phase | Adapter responsibility | Engine responsibility |
+| --- | --- | --- |
+| Collect | Acquire typed, attributed facts efficiently, including evidence of completeness. | Select the operation and supply input/context. |
+| Evaluate | Interpret only supplied facts and produce a candidate with exact or bounded native terms. | Validate accounting and present the resulting approval request. |
+| Authorize | Supply protocol-specific terms through the candidate. | Obtain or reuse valid authority; the adapter cannot grant it. |
+| Refresh and revalidate | Acquire facts that must be fresh and check the approved candidate against them. | Run post-approval freshness and the separate locked-admission check; independently enforce authority. |
+| Execute | Dispatch the validated immutable request through the runtime. | Persist submission identity and reservations before dispatch, using the existing journal admission path. |
+| Observe and evaluate observation | Acquire receipt/status and financial proof facts; interpret pending, failed or settled outcomes. | Reconcile the original submission and atomically settle verified effects. |
+
+Evaluation functions are synchronous and have no adapter receiver, transport,
+signer, journal or clock access. Required timestamps are captured data. Merely
+wrapping a completed `PreparedOperation` or `Reconciliation` from an old async
+helper as "evidence" does not establish this boundary: eligibility, health,
+amount, accounting and settlement decisions must actually use the typed facts.
+
+Collection can have dependency rounds. For example, an Aave borrow first needs
+the verified Pool identity and user bitmap, then reserve identities and exact
+balances for the flagged exposures. Sender-independent calls can be collected
+through verified Multicall at one pinned block. Mandatory subcall failures must
+remain errors; bounded direct fallback must not turn a target revert into a
+zero balance. The current borrow change deduplicates direct RPC reads; it does
+not yet batch Aave evidence through Multicall.
+
+Some evidence depends on an earlier candidate. For example, after pure borrow
+evaluation chooses an exact amount, a collector can request candidate calldata
+from MCP, prepare gas/nonce information and simulate that exact transaction.
+A subsequent pure finalization checks those facts and freezes the approved
+request. This is what "materialize" would mean; use explicit collection and
+finalization stages instead of hiding those reads inside evaluation. Complete
+non-time-sensitive preparation before approval. Refresh only the evidence whose
+freshness is required, preserving block/market identity, approved bounds and the
+separate admission checks. No capture-local cache crosses approval.
+
+MCP remains preferred for informational discovery and planning, and for the
+independently validated unsigned candidate already used by Aave writes. Replacing
+an exact RPC fact requires equivalent precision, provenance, freshness and
+coverage; rounded or incomplete MCP output cannot prove exposure completeness
+or authorize financial effects. Native reads need only collection and evaluation;
+the dynamic MCP read namespace remains one catalog-driven informational family.
+
+Observation is repeatable and resumes from the original durable operation after
+a restart. Submission acceptance is not settlement. Observation must distinguish
+canonical inclusion, finality, reversion, reorg and missing or uncertain evidence;
+it cannot authorize, dispatch or replay a write. Compound actions use the same
+child lifecycle under the parent's authority and dependency rules. An observed
+child outcome can make the next stage ready, but only the engine can admit and
+execute that stage. Migration must preserve existing durable identities and
+records rather than requiring a journal reset.
+
 Synthetic tests inject MCP transport responses. Owned fork development examples
 use a deterministic builder fixture so current upstream account state cannot be
 mistaken for historical fork state; production uses only the official endpoint.
