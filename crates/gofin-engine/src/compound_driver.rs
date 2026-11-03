@@ -375,7 +375,11 @@ impl Engine {
                 "reauthorization preparation",
                 PREFLIGHT_TIMEOUT,
                 async {
-                    if let Some(linked_compound) = &compound_context {
+                    if let Some(mut session) =
+                        adapter.operation_lifecycle(&action.operation, &input, Some(&context))?
+                    {
+                        operation_lifecycle::prepare(session.as_mut()).await
+                    } else if let Some(linked_compound) = &compound_context {
                         adapter
                             .prepare_with_compound_context(
                                 &action.operation,
@@ -1229,11 +1233,24 @@ impl Engine {
                 &nonce_candidate,
             )?;
         }
+        let stage_context = self.preparation_context(action.run_id.as_deref())?;
+        let mut stage_lifecycle = adapter.operation_lifecycle(
+            &nonce_candidate.operation,
+            &nonce_candidate.input,
+            Some(&stage_context),
+        )?;
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&strip_plan_metadata(&nonce_candidate)),
+            async {
+                let candidate = strip_plan_metadata(&nonce_candidate);
+                if let Some(session) = stage_lifecycle.as_mut() {
+                    operation_lifecycle::refresh(session.as_mut(), &candidate).await
+                } else {
+                    adapter.revalidate(&candidate).await
+                }
+            },
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &current)?;
@@ -1333,9 +1350,13 @@ impl Engine {
             strip_plan_metadata(&candidate),
             self.clock.clone(),
         )?;
-        let result = adapter
-            .submit_revalidated(&validated, journal.clone())
-            .await;
+        let result = if let Some(session) = stage_lifecycle.as_mut() {
+            session.execute(&validated, journal.clone()).await
+        } else {
+            adapter
+                .submit_revalidated(&validated, journal.clone())
+                .await
+        };
         child = journal
             .record
             .lock()
@@ -1457,11 +1478,24 @@ impl Engine {
             nonce_claimed = true;
             candidate = adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
         }
+        let stage_context = self.preparation_context(action.run_id.as_deref())?;
+        let mut stage_lifecycle = adapter.operation_lifecycle(
+            &candidate.operation,
+            &candidate.input,
+            Some(&stage_context),
+        )?;
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&strip_plan_metadata(&candidate)),
+            async {
+                let candidate = strip_plan_metadata(&candidate);
+                if let Some(session) = stage_lifecycle.as_mut() {
+                    operation_lifecycle::refresh(session.as_mut(), &candidate).await
+                } else {
+                    adapter.revalidate(&candidate).await
+                }
+            },
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage.stage_id, &current)?;
@@ -1526,9 +1560,13 @@ impl Engine {
             strip_plan_metadata(&finalized),
             self.clock.clone(),
         )?;
-        let result = adapter
-            .submit_revalidated(&validated, journal.clone())
-            .await;
+        let result = if let Some(session) = stage_lifecycle.as_mut() {
+            session.execute(&validated, journal.clone()).await
+        } else {
+            adapter
+                .submit_revalidated(&validated, journal.clone())
+                .await
+        };
         child = journal
             .record
             .lock()
@@ -2016,14 +2054,27 @@ impl Engine {
                 PREFLIGHT_TIMEOUT,
                 async {
                     if adapter.supports_approved_reprepare(parent) {
-                        adapter
-                            .prepare_with_context(&action.operation, &action.input, &context)
-                            .await
+                        if let Some(mut session) = adapter.operation_lifecycle(
+                            &action.operation,
+                            &action.input,
+                            Some(&context),
+                        )? {
+                            operation_lifecycle::prepare(session.as_mut()).await
+                        } else {
+                            adapter
+                                .prepare_with_context(&action.operation, &action.input, &context)
+                                .await
+                        }
                     } else {
                         // Exact adapters own refresh of their approved durable
                         // identities. A new preparation may allocate a different
                         // venue idempotency key even for identical input.
-                        adapter.revalidate(&strip_plan_metadata(parent)).await
+                        lifecycle_revalidate(
+                            adapter.as_ref(),
+                            &strip_plan_metadata(parent),
+                            Some(&context),
+                        )
+                        .await
                     }
                 },
             )

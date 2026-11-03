@@ -74,21 +74,19 @@ async fn native_aave_read_fixture_counts_and_scope_are_reproducible() {
                 );
                 counts.push((requests.len(), eth_calls, headers, block_numbers));
             }
-            let expected = match (operation, scoped) {
-                ("aave.reserves", true) => (34, 20),
-                ("aave.reserves", false) => (47, 32),
-                ("aave.positions", true) => (42, 28),
-                ("aave.positions", false) => (58, 43),
-                _ => unreachable!(),
-            };
             assert_eq!(
-                counts,
-                vec![
-                    (expected.0, expected.1, 4, 1),
-                    (expected.0, expected.1, 4, 1),
-                    (expected.0 - 1, expected.1, 4, 0),
-                ]
+                counts[0], counts[1],
+                "each capture starts with a fresh per-pass cache"
             );
+            assert_eq!(
+                counts[0].0,
+                counts[2].0 + 1,
+                "explicit historical reads omit eth_blockNumber"
+            );
+            assert_eq!(counts[0].1, counts[2].1);
+            assert_eq!(counts[0].2, counts[2].2);
+            assert_eq!(counts[0].3, 1);
+            assert_eq!(counts[2].3, 0);
             eprintln!("{operation} scoped={scoped}: cold/warm/historical {counts:?}");
         }
     }

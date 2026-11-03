@@ -45,7 +45,12 @@ impl SnapshotRpc {
         };
         params[index].as_str() == Some(self.tag.as_str())
     }
-    async fn fetch(&self, method: &str, params: Value) -> Result<Value> {
+    async fn fetch(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: gofin_evm::RpcReadRequirements,
+    ) -> Result<Value> {
         let _permit = self.permits.acquire().await.map_err(|_| {
             error(
                 "SNAPSHOT_UNAVAILABLE",
@@ -53,12 +58,23 @@ impl SnapshotRpc {
                 "Snapshot read capacity closed.",
             )
         })?;
-        self.inner.request(method, params).await
+        self.inner
+            .request_checked(method, params, requirements)
+            .await
     }
 }
 #[async_trait]
 impl EvmRpc for SnapshotRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_checked(method, params, Default::default())
+            .await
+    }
+    async fn request_checked(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: gofin_evm::RpcReadRequirements,
+    ) -> Result<Value> {
         require(
             matches!(
                 method,
@@ -77,6 +93,14 @@ impl EvmRpc for SnapshotRpc {
         let mut params = params;
         if self.pin_latest {
             if method == "eth_blockNumber" {
+                require(
+                    requirements
+                        .minimum_block
+                        .is_none_or(|minimum| self.block >= minimum)
+                        && requirements.pin_block.is_none(),
+                    "RPC_DATA_INVALID",
+                    "Captured head does not satisfy the requested read requirements.",
+                )?;
                 return Ok(json!(format!("{:#x}", self.block)));
             }
             if matches!(method, "eth_call" | "eth_getCode" | "eth_getBalance")
@@ -86,13 +110,18 @@ impl EvmRpc for SnapshotRpc {
             }
         }
         if !self.pinned(method, &params) {
-            return self.fetch(method, params).await;
+            return self.fetch(method, params, requirements).await;
         }
         // Exact request identity includes calldata, sender (if present), target,
         // and numeric block tag. Never share this cache with another capture.
-        let key = format!("{method}:{}", params);
+        // A weaker read cannot satisfy a caller's stronger endpoint/hash or
+        // freshness constraints. Preserve them through the real transport.
+        let key = format!(
+            "{method}:{params}:{:?}:{:?}",
+            requirements.minimum_block, requirements.pin_block
+        );
         let cell = self.reads.lock().await.entry(key).or_default().clone();
-        cell.get_or_init(|| self.fetch(method, params))
+        cell.get_or_init(|| self.fetch(method, params, requirements))
             .await
             .clone()
     }
@@ -614,6 +643,92 @@ mod tests {
 
     #[derive(Default)]
     struct ReadProbe(AtomicUsize);
+
+    #[derive(Default)]
+    struct CheckedProbe(Mutex<Vec<gofin_evm::RpcReadRequirements>>);
+    #[async_trait]
+    impl EvmRpc for CheckedProbe {
+        async fn request(&self, _: &str, _: Value) -> Result<Value> {
+            panic!("snapshot must preserve checked transport requirements")
+        }
+        async fn request_checked(
+            &self,
+            _: &str,
+            _: Value,
+            requirements: gofin_evm::RpcReadRequirements,
+        ) -> Result<Value> {
+            self.0.lock().await.push(requirements);
+            Ok(json!(if requirements.pin_block.is_some() {
+                "0x2"
+            } else {
+                "0x1"
+            }))
+        }
+    }
+    #[tokio::test]
+    async fn checked_snapshot_preserves_constraints_and_does_not_reuse_weaker_cache() {
+        let probe = Arc::new(CheckedProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        let params = json!(["0x0000000000000000000000000000000000000001", "0x14"]);
+        assert_eq!(
+            rpc.request("eth_getBalance", params.clone()).await.unwrap(),
+            json!("0x1")
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                rpc.request_checked(
+                    "eth_getBalance",
+                    params.clone(),
+                    gofin_evm::RpcReadRequirements {
+                        pin_block: Some(20),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap(),
+                json!("0x2")
+            );
+        }
+        let calls = probe.0.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].pin_block, None);
+        assert_eq!(calls[1].pin_block, Some(20));
+        drop(calls);
+        for _ in 0..2 {
+            rpc.request_checked(
+                "eth_getBalance",
+                json!(["0x0000000000000000000000000000000000000001", "0x13"]),
+                gofin_evm::RpcReadRequirements {
+                    pin_block: Some(19),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probe.0.lock().await.len(),
+            4,
+            "historical constraints must reach transport each time"
+        );
+        assert!(
+            rpc.request_checked(
+                "eth_blockNumber",
+                json!([]),
+                gofin_evm::RpcReadRequirements {
+                    minimum_block: Some(21),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            probe.0.lock().await.len(),
+            4,
+            "inadequate captured head must fail before transport"
+        );
+    }
     #[async_trait]
     impl EvmRpc for ReadProbe {
         async fn request(&self, _: &str, _: Value) -> Result<Value> {

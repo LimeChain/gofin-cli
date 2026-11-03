@@ -1,14 +1,216 @@
 //! Point-in-time Aave risk and mode checks, using protocol units and exact math.
 use super::super::*;
 use crate::abi::*;
+use crate::collection::{ReadCall, ReadCollector};
+use gofin_evm::alloy::sol_types::SolCall;
 use gofin_evm::{EvmRuntime, rpc_u64, u256};
 use tokio::task::JoinSet;
 
+fn decode<C: SolCall>(value: Option<Result<Vec<u8>>>) -> Result<C::Return> {
+    let bytes = value.ok_or_else(|| {
+        error(
+            "MULTICALL_INCOMPLETE",
+            "read",
+            "A risk observation is missing.",
+        )
+    })??;
+    C::abi_decode_returns(&bytes).map_err(|_| {
+        error(
+            "CONTRACT_DATA_INVALID",
+            "read",
+            "Risk observation does not match the reviewed ABI.",
+        )
+    })
+}
+
 type RiskUser = (String, U256, DataProvider::getUserReserveDataReturn);
+
+pub(crate) struct BorrowRestrictionEvidence {
+    mode: U256,
+    config: U256,
+    emode: Option<(u16, u128)>,
+    users: Vec<(RiskUser, Option<u128>)>,
+}
+
+pub(crate) fn evaluate_borrow_restrictions(
+    token: &reads::Token,
+    qty: U256,
+    e: &BorrowRestrictionEvidence,
+) -> Result<()> {
+    if e.mode > U256::ZERO {
+        let (id, bitmap) = e
+            .emode
+            .ok_or_else(|| GoFinError::validation("Missing eMode observation."))?;
+        require(
+            id < 128 && (bitmap & (1u128 << id)) != 0,
+            "AAVE_EMODE_BORROW_UNAVAILABLE",
+            "Debt asset is not borrowable in the current eMode category.",
+        )?;
+    }
+    for ((reference, config, user), isolation_debt) in &e.users {
+        if !user.currentVariableDebt.is_zero() || !user.currentStableDebt.is_zero() {
+            require(
+                reference == &token.reference
+                    || ((e.config >> 62usize) & U256::from(1)).is_zero()
+                        && ((*config >> 62usize) & U256::from(1)).is_zero(),
+                "AAVE_SILOED_BORROW_UNAVAILABLE",
+                "Siloed borrowing cannot mix another debt asset.",
+            )?;
+        }
+        let ceiling = (*config >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1));
+        if user.usageAsCollateralEnabled
+            && !user.currentATokenBalance.is_zero()
+            && !ceiling.is_zero()
+        {
+            require(
+                !((e.config >> 61usize) & U256::from(1)).is_zero(),
+                "AAVE_ISOLATION_BORROW_UNAVAILABLE",
+                "Debt asset is not permitted against isolated collateral.",
+            )?;
+            let debt = isolation_debt
+                .ok_or_else(|| GoFinError::validation("Missing isolation debt observation."))?;
+            let added = add(
+                mul(qty, U256::from(100))?,
+                pow10(token.decimals)? - U256::from(1),
+            )? / pow10(token.decimals)?;
+            require(
+                add(U256::from(debt), added)? <= ceiling,
+                "AAVE_ISOLATION_DEBT_CEILING",
+                "Borrow exceeds the isolated collateral's remaining debt ceiling.",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+struct HealthCollateral {
+    reference: String,
+    units: U256,
+    reserve: super::read_lifecycle::WriteReserveFacts,
+    scaled: Option<U256>,
+    price: U256,
+    reserve_id: Option<u16>,
+}
+pub(crate) struct HealthEvidence {
+    horizon: bool,
+    collateral_before: U256,
+    debt_before: U256,
+    debt_price: Option<U256>,
+    oracle_units: Option<(Address, U256)>,
+    details: Result<HealthDetails>,
+}
+struct HealthDetails {
+    category_threshold: Option<u16>,
+    category_bitmap: u128,
+    collateral: Vec<HealthCollateral>,
+}
+fn health_debt(token: &reads::Token, added_debt: U256, e: &HealthEvidence) -> Result<U256> {
+    if !added_debt.is_zero() {
+        require(
+            e.oracle_units == Some((Address::ZERO, pow10(8)?)),
+            "AAVE_ORACLE_UNITS_UNSUPPORTED",
+            "USD debt limits require the reviewed USD oracle base and eight-decimal units.",
+        )?;
+    }
+    let added = if added_debt.is_zero() {
+        U256::ZERO
+    } else {
+        let price = e
+            .debt_price
+            .ok_or_else(|| GoFinError::validation("Missing debt price observation."))?;
+        super::math::added_debt_base(e.horizon, added_debt, price, token.decimals)?
+    };
+    add(e.debt_before, added)
+}
+pub(crate) fn evaluate_health(
+    token: &reads::Token,
+    removed: Option<U256>,
+    apply_removal: bool,
+    added_debt: U256,
+    e: &HealthEvidence,
+) -> Result<(U256, U256, U256)> {
+    let debt = health_debt(token, added_debt, e)?;
+    if debt.is_zero() {
+        return Ok((e.collateral_before, debt, U256::MAX));
+    }
+    let details = e.details.as_ref().map_err(Clone::clone)?;
+    let mut weighted = U256::ZERO;
+    let mut collateral = U256::ZERO;
+    for entry in &details.collateral {
+        let reserve = super::read_lifecycle::evaluate_write_reserve(&entry.reserve)?;
+        let mut units = entry.units;
+        if apply_removal && entry.reference == token.reference {
+            units = if let Some(qty) = removed {
+                let index = u256(&reserve.normalized_income)?;
+                let burned = super::math::scaled_change(
+                    e.horizon,
+                    qty,
+                    index,
+                    &PositionKind::Supply,
+                    false,
+                )?;
+                let scaled = entry
+                    .scaled
+                    .ok_or_else(|| GoFinError::validation("Missing scaled supply observation."))?;
+                let remaining = scaled
+                    .checked_sub(burned)
+                    .ok_or_else(|| GoFinError::validation("Removal exceeds exact scaled claim."))?;
+                super::math::position_backing(e.horizon, remaining, index, &PositionKind::Supply)?
+            } else {
+                U256::ZERO
+            };
+        }
+        require(
+            !entry.price.is_zero(),
+            "ORACLE_INVALID",
+            "Collateral risk price must be positive.",
+        )?;
+        let base = mul(units, entry.price)? / pow10(reserve.token.decimals)?;
+        let mut threshold = u256(&reserve.liquidation_threshold)?;
+        if let (Some(category), Some(id)) = (details.category_threshold, entry.reserve_id)
+            && id < 128
+            && (details.category_bitmap & (1u128 << id)) != 0
+        {
+            threshold = U256::from(category);
+        }
+        if !e.horizon || !threshold.is_zero() {
+            collateral = add(collateral, base)?;
+            weighted = add(weighted, mul(base, threshold)?)?;
+        }
+    }
+    Ok((
+        collateral,
+        debt,
+        health_factor(e.horizon, collateral, weighted, debt)?,
+    ))
+}
+
+pub(crate) struct BorrowRiskEvidence {
+    restrictions: BorrowRestrictionEvidence,
+    health: HealthEvidence,
+}
+pub(crate) fn evaluate_borrow_risk(
+    token: &reads::Token,
+    qty: U256,
+    e: &BorrowRiskEvidence,
+) -> Result<(U256, U256, U256)> {
+    evaluate_borrow_restrictions(token, qty, &e.restrictions)?;
+    evaluate_health(token, None, false, qty, &e.health)
+}
+
+pub(crate) struct RiskCapture<'a> {
+    pub block: u64,
+    pub collector: &'a mut ReadCollector,
+    pub selected_reserve: Option<&'a super::read_lifecycle::WriteReserveFacts>,
+    pub account: Option<&'a Pool::getUserAccountDataReturn>,
+}
 
 struct RiskObservation<'a> {
     block: u64,
     users: Option<&'a [RiskUser]>,
+    collector: &'a mut ReadCollector,
+    selected_reserve: Option<(&'a str, &'a super::read_lifecycle::WriteReserveFacts)>,
+    account: Option<&'a Pool::getUserAccountDataReturn>,
 }
 
 impl EthereumAdapter {
@@ -148,6 +350,7 @@ impl EthereumAdapter {
         self.aave_risk_block_unchanged(block, &before).await?;
         result
     }
+    #[cfg(test)]
     async fn aave_borrow_restrictions_at(
         &self,
         owner: Address,
@@ -156,6 +359,18 @@ impl EthereumAdapter {
         block: u64,
         selected_users: Option<&[RiskUser]>,
     ) -> Result<()> {
+        let evidence = self
+            .collect_borrow_restrictions(owner, token, block, selected_users)
+            .await?;
+        evaluate_borrow_restrictions(token, qty, &evidence)
+    }
+    async fn collect_borrow_restrictions(
+        &self,
+        owner: Address,
+        token: &reads::Token,
+        block: u64,
+        selected_users: Option<&[RiskUser]>,
+    ) -> Result<BorrowRestrictionEvidence> {
         let pool = address(&self.aave()?.pool)?;
         let mode = self.aave_mode(owner, Some(block)).await?;
         let config = self
@@ -168,18 +383,20 @@ impl EthereumAdapter {
                 Some(block),
             )
             .await?;
-        if mode > U256::ZERO {
+        let emode = if mode > U256::ZERO {
+            // Range validation is needed to decode the protocol's uint8 request.
             require(
                 mode <= U256::from(255),
                 "AAVE_MODE_UNSUPPORTED",
                 "Unrecognized eMode category.",
             )?;
-            let id = mode.to::<u8>();
             let bitmap = self
                 .runtime
                 .call(
                     pool,
-                    &Pool::getEModeCategoryBorrowableBitmapCall { id },
+                    &Pool::getEModeCategoryBorrowableBitmapCall {
+                        id: mode.to::<u8>(),
+                    },
                     Some(block),
                 )
                 .await?;
@@ -193,14 +410,10 @@ impl EthereumAdapter {
                     Some(block),
                 )
                 .await?;
-            require(
-                reserve.id < 128 && (bitmap & (1u128 << reserve.id)) != 0,
-                "AAVE_EMODE_BORROW_UNAVAILABLE",
-                "Debt asset is not borrowable in the current eMode category.",
-            )?;
-        }
-        // Eligibility needs only current configuration and user flags/debt,
-        // not every reserve's token metadata, caps, indices and total supply.
+            Some((reserve.id, bitmap))
+        } else {
+            None
+        };
         let fetched;
         let users = if let Some(users) = selected_users {
             users
@@ -208,108 +421,116 @@ impl EthereumAdapter {
             fetched = self.aave_risk_users(owner, block, true).await?;
             &fetched
         };
-        for (reference, other_config, user) in users.iter().cloned() {
-            if !user.currentVariableDebt.is_zero() || !user.currentStableDebt.is_zero() {
-                require(
-                    reference == token.reference
-                        || ((config >> 62usize) & U256::from(1)).is_zero()
-                            && ((other_config >> 62usize) & U256::from(1)).is_zero(),
-                    "AAVE_SILOED_BORROW_UNAVAILABLE",
-                    "Siloed borrowing cannot mix another debt asset.",
-                )?;
-            }
-            let ceiling = (other_config >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1));
-            if user.usageAsCollateralEnabled
+        let mut observed = Vec::with_capacity(users.len());
+        for entry in users.iter().cloned() {
+            let (reference, config, user) = &entry;
+            let ceiling = (*config >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1));
+            let isolation_debt = if user.usageAsCollateralEnabled
                 && !user.currentATokenBalance.is_zero()
                 && !ceiling.is_zero()
             {
-                require(
-                    !((config >> 61usize) & U256::from(1)).is_zero(),
-                    "AAVE_ISOLATION_BORROW_UNAVAILABLE",
-                    "Debt asset is not permitted against isolated collateral.",
-                )?;
-                let data = self
-                    .runtime
-                    .call(
-                        pool,
-                        &Pool::getReserveDataCall {
-                            asset: address(&reference)?,
-                        },
-                        Some(block),
-                    )
-                    .await?;
-                // Isolation debt ceilings use two decimal borrowing units in
-                // reviewed legacy V3 revisions, independently of oracle USD.
-                let added = add(
-                    mul(qty, U256::from(100))?,
-                    pow10(token.decimals)? - U256::from(1),
-                )? / pow10(token.decimals)?;
-                require(
-                    add(U256::from(data.isolationModeTotalDebt), added)? <= ceiling,
-                    "AAVE_ISOLATION_DEBT_CEILING",
-                    "Borrow exceeds the isolated collateral's remaining debt ceiling.",
-                )?;
-            }
+                Some(
+                    self.runtime
+                        .call(
+                            pool,
+                            &Pool::getReserveDataCall {
+                                asset: address(reference)?,
+                            },
+                            Some(block),
+                        )
+                        .await?
+                        .isolationModeTotalDebt,
+                )
+            } else {
+                None
+            };
+            observed.push((entry, isolation_debt));
         }
-        Ok(())
+        Ok(BorrowRestrictionEvidence {
+            mode,
+            config,
+            emode,
+            users: observed,
+        })
     }
     // Borrow reads only bitmap-selected risk exposures. The pool's stable reserve
     // IDs, not its compact list indices, identify each pair of user flags.
-    pub(crate) async fn aave_borrow_projection_at(
+    pub(crate) async fn collect_borrow_risk(
         &self,
         owner: Address,
         token: &reads::Token,
         qty: U256,
-        block: u64,
-    ) -> Result<(U256, U256, U256)> {
-        let pool = address(&self.aave()?.pool)?;
-        let flags = self
-            .runtime
-            .call(
-                pool,
-                &Pool::getUserConfigurationCall { user: owner },
-                Some(block),
+        capture: RiskCapture<'_>,
+    ) -> Result<BorrowRiskEvidence> {
+        let RiskCapture {
+            block,
+            collector,
+            selected_reserve,
+            account,
+        } = capture;
+        let users = self
+            .collect_bitmap_risk_users(owner, token, block, collector)
+            .await?;
+        let restrictions = self
+            .collect_borrow_restrictions(owner, token, block, Some(&users))
+            .await?;
+        let health = self
+            .collect_health(
+                owner,
+                token,
+                None,
+                false,
+                qty,
+                RiskObservation {
+                    block,
+                    users: Some(&users),
+                    collector,
+                    selected_reserve: selected_reserve
+                        .map(|reserve| (token.reference.as_str(), reserve)),
+                    account,
+                },
             )
             .await?;
+        Ok(BorrowRiskEvidence {
+            restrictions,
+            health,
+        })
+    }
+    // Resolve sparse Pool reserve IDs. Only flagged collateral/debt exposures
+    // enter health projection; the selected token is checked independently.
+    async fn collect_bitmap_risk_users(
+        &self,
+        owner: Address,
+        token: &reads::Token,
+        block: u64,
+        collector: &mut ReadCollector,
+    ) -> Result<Vec<RiskUser>> {
+        let pool = address(&self.aave()?.pool)?;
         let provider = self.data_provider(Some(block)).await?;
         let selected = address(&token.reference)?;
-        let selected_data = self
-            .runtime
-            .call(
-                pool,
-                &Pool::getReserveDataCall { asset: selected },
-                Some(block),
-            )
-            .await?;
+        let mut initial = collector
+            .collect(vec![
+                ReadCall::new(pool, &Pool::getUserConfigurationCall { user: owner }),
+                ReadCall::new(pool, &Pool::getReserveDataCall { asset: selected }),
+                ReadCall::new(
+                    provider,
+                    &DataProvider::getUserReserveDataCall {
+                        asset: selected,
+                        user: owner,
+                    },
+                ),
+            ])
+            .await
+            .into_iter();
+        let flags = decode::<Pool::getUserConfigurationCall>(initial.next())?;
+        let selected_data = decode::<Pool::getReserveDataCall>(initial.next())?;
+        let selected_user = decode::<DataProvider::getUserReserveDataCall>(initial.next())?;
         require(
             selected_data.id < 128,
             "AAVE_USER_CONFIGURATION_INVALID",
             "Selected reserve ID is outside the user configuration bitmap.",
         )?;
         let selected_id = selected_data.id;
-        require(
-            self.runtime
-                .call(
-                    pool,
-                    &Pool::getReserveAddressByIdCall { id: selected_id },
-                    Some(block),
-                )
-                .await?
-                == selected,
-            "AAVE_USER_CONFIGURATION_INVALID",
-            "Selected reserve ID does not resolve to the selected asset.",
-        )?;
-        let selected_user = self
-            .runtime
-            .call(
-                provider,
-                &DataProvider::getUserReserveDataCall {
-                    asset: selected,
-                    user: owner,
-                },
-                Some(block),
-            )
-            .await?;
         let selected_bits = (flags >> (usize::from(selected_id) * 2)) & U256::from(3);
         require(
             selected_user.usageAsCollateralEnabled == !(selected_bits & U256::from(2)).is_zero()
@@ -319,46 +540,66 @@ impl EthereumAdapter {
             "AAVE_USER_CONFIGURATION_INVALID",
             "Selected reserve observations disagree with pool user flags.",
         )?;
-        let mut users = Vec::new();
+        let mut ids: Vec<u16> = (0..128u16)
+            .filter(|id| !((flags >> (usize::from(*id) * 2)) & U256::from(3)).is_zero())
+            .collect();
+        if !ids.contains(&selected_id) {
+            ids.push(selected_id);
+        }
+        ids.sort_unstable();
+        let mut resolved = collector
+            .collect(
+                ids.iter()
+                    .map(|&id| ReadCall::new(pool, &Pool::getReserveAddressByIdCall { id }))
+                    .collect(),
+            )
+            .await
+            .into_iter();
+        let mut active = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
-        for id in 0..128u16 {
+        for id in ids {
+            let asset = decode::<Pool::getReserveAddressByIdCall>(resolved.next())?;
             let bits = (flags >> (usize::from(id) * 2)) & U256::from(3);
+            if id == selected_id {
+                require(
+                    asset == selected,
+                    "AAVE_USER_CONFIGURATION_INVALID",
+                    "Selected reserve ID does not resolve to the selected asset.",
+                )?;
+            }
             if bits.is_zero() {
                 continue;
             }
-            let asset = self
-                .runtime
-                .call(pool, &Pool::getReserveAddressByIdCall { id }, Some(block))
-                .await?;
             require(
                 asset != Address::ZERO && seen.insert(asset),
                 "AAVE_USER_CONFIGURATION_INVALID",
                 "Flagged reserve ID has no unique pool asset.",
             )?;
-            let data = self
-                .runtime
-                .call(pool, &Pool::getReserveDataCall { asset }, Some(block))
-                .await?;
+            active.push((id, asset, bits));
+        }
+        let mut calls = Vec::with_capacity(active.len() * 3);
+        for &(_, asset, _) in &active {
+            calls.push(ReadCall::new(pool, &Pool::getReserveDataCall { asset }));
+            calls.push(ReadCall::new(pool, &Pool::getConfigurationCall { asset }));
+            calls.push(ReadCall::new(
+                provider,
+                &DataProvider::getUserReserveDataCall { asset, user: owner },
+            ));
+        }
+        let mut observed = collector.collect(calls).await.into_iter();
+        let mut users = Vec::with_capacity(active.len());
+        for (id, asset, bits) in active {
+            let data = decode::<Pool::getReserveDataCall>(observed.next())?;
+            let config = decode::<Pool::getConfigurationCall>(observed.next())?;
+            let user = decode::<DataProvider::getUserReserveDataCall>(observed.next())?;
             require(
                 data.id == id,
                 "AAVE_USER_CONFIGURATION_INVALID",
                 "Flagged reserve ID does not match the pool reserve identity.",
             )?;
-            let config = self
-                .runtime
-                .call(pool, &Pool::getConfigurationCall { asset }, Some(block))
-                .await?;
-            let user = self
-                .runtime
-                .call(
-                    provider,
-                    &DataProvider::getUserReserveDataCall { asset, user: owner },
-                    Some(block),
-                )
-                .await?;
             require(
                 user.usageAsCollateralEnabled == !(bits & U256::from(2)).is_zero()
-                    && ((bits & U256::from(1)) != U256::ZERO
+                    && (!(bits & U256::from(1)).is_zero()
                         || (user.currentVariableDebt.is_zero()
                             && user.currentStableDebt.is_zero())),
                 "AAVE_USER_CONFIGURATION_INVALID",
@@ -367,31 +608,66 @@ impl EthereumAdapter {
             users.push((lower_address(asset), config, user));
         }
         users.sort_by(|a, b| a.0.cmp(&b.0));
-        self.aave_borrow_restrictions_at(owner, token, qty, block, Some(&users))
-            .await?;
-        self.aave_health_projection_at(
-            owner,
-            token,
-            None,
-            false,
-            qty,
-            RiskObservation {
-                block,
-                users: Some(&users),
-            },
-        )
-        .await
+        Ok(users)
     }
-    pub(crate) async fn aave_removal_risk(
+    pub(crate) async fn collect_removal_health_at(
         &self,
         owner: Address,
         token: &reads::Token,
         removed: Option<U256>,
-        minimum: Option<&str>,
-    ) -> Result<()> {
-        let (_, debt, projected) = self
-            .aave_health_projection(owner, token, removed, true, U256::ZERO)
+        capture: RiskCapture<'_>,
+    ) -> Result<HealthEvidence> {
+        let RiskCapture {
+            block,
+            collector,
+            selected_reserve,
+            account,
+        } = capture;
+        // Acquisition planning from an exact zero account-debt fact avoids
+        // market discovery; the pure evaluator remains the authority.
+        if let Some(account) = account
+            && account.totalDebtBase.is_zero()
+        {
+            return Ok(HealthEvidence {
+                horizon: self.horizon_math(),
+                collateral_before: account.totalCollateralBase,
+                debt_before: account.totalDebtBase,
+                debt_price: None,
+                oracle_units: None,
+                details: Ok(HealthDetails {
+                    category_threshold: None,
+                    category_bitmap: 0,
+                    collateral: Vec::new(),
+                }),
+            });
+        }
+        let users = self
+            .collect_bitmap_risk_users(owner, token, block, collector)
             .await?;
+        self.collect_health(
+            owner,
+            token,
+            removed,
+            true,
+            U256::ZERO,
+            RiskObservation {
+                block,
+                users: Some(&users),
+                collector,
+                selected_reserve: selected_reserve
+                    .map(|reserve| (token.reference.as_str(), reserve)),
+                account,
+            },
+        )
+        .await
+    }
+    pub(crate) fn evaluate_removal_risk(
+        token: &reads::Token,
+        removed: Option<U256>,
+        minimum: Option<&str>,
+        evidence: &HealthEvidence,
+    ) -> Result<()> {
+        let (_, debt, projected) = evaluate_health(token, removed, true, U256::ZERO, evidence)?;
         let requested = minimum.map(|v| exact(v, 18)).transpose()?;
         if let Some(floor) = requested {
             require(
@@ -419,6 +695,7 @@ impl EthereumAdapter {
         added_debt: U256,
     ) -> Result<(U256, U256, U256)> {
         let (reader, block, before) = self.aave_risk_reader().await?;
+        let mut collector = ReadCollector::new(&reader, block).await;
         let result = reader
             .aave_health_projection_at(
                 owner,
@@ -426,7 +703,13 @@ impl EthereumAdapter {
                 removed,
                 apply_removal,
                 added_debt,
-                RiskObservation { block, users: None },
+                RiskObservation {
+                    block,
+                    users: None,
+                    collector: &mut collector,
+                    selected_reserve: None,
+                    account: None,
+                },
             )
             .await;
         self.aave_risk_block_unchanged(block, &before).await?;
@@ -441,168 +724,188 @@ impl EthereumAdapter {
         added_debt: U256,
         observation: RiskObservation<'_>,
     ) -> Result<(U256, U256, U256)> {
+        let evidence = self
+            .collect_health(
+                owner,
+                token,
+                removed,
+                apply_removal,
+                added_debt,
+                observation,
+            )
+            .await?;
+        evaluate_health(token, removed, apply_removal, added_debt, &evidence)
+    }
+    async fn collect_health(
+        &self,
+        owner: Address,
+        token: &reads::Token,
+        removed: Option<U256>,
+        apply_removal: bool,
+        added_debt: U256,
+        observation: RiskObservation<'_>,
+    ) -> Result<HealthEvidence> {
         let RiskObservation {
             block,
             users: selected_users,
+            collector,
+            selected_reserve,
+            account,
         } = observation;
         let pool = address(&self.aave()?.pool)?;
-        let account = self
-            .runtime
-            .call(
-                pool,
-                &Pool::getUserAccountDataCall { user: owner },
-                Some(block),
-            )
-            .await?;
-        let oracle = address(&self.aave()?.oracle)?;
-        if !added_debt.is_zero() {
-            require(
-                self.runtime
-                    .call(oracle, &Oracle::BASE_CURRENCYCall {}, Some(block))
-                    .await?
-                    == Address::ZERO
-                    && self
-                        .runtime
-                        .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {}, Some(block))
-                        .await?
-                        == pow10(8)?,
-                "AAVE_ORACLE_UNITS_UNSUPPORTED",
-                "USD debt limits require the reviewed USD oracle base and eight-decimal units.",
-            )?;
-        }
-        let added_base = if added_debt.is_zero() {
-            U256::ZERO
+        let account = if let Some(account) = account {
+            account.clone()
         } else {
-            let price = self
-                .runtime
+            self.runtime
                 .call(
-                    oracle,
-                    &Oracle::getAssetPriceCall {
-                        asset: address(&token.reference)?,
-                    },
+                    pool,
+                    &Pool::getUserAccountDataCall { user: owner },
                     Some(block),
                 )
-                .await?;
-            self.aave_added_debt_base(added_debt, price, token.decimals)?
+                .await?
         };
-        let debt = add(account.totalDebtBase, added_base)?;
-        if debt.is_zero() {
-            return Ok((account.totalCollateralBase, debt, U256::MAX));
-        }
-        let mode = self.aave_mode(owner, Some(block)).await?;
-        require(
-            mode <= U256::from(255),
-            "AAVE_MODE_UNSUPPORTED",
-            "Unrecognized eMode category.",
-        )?;
-        let category = if mode.is_zero() {
+        let oracle = address(&self.aave()?.oracle)?;
+        let oracle_units = if added_debt.is_zero() {
+            None
+        } else {
+            Some((
+                self.runtime
+                    .call(oracle, &Oracle::BASE_CURRENCYCall {}, Some(block))
+                    .await?,
+                self.runtime
+                    .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {}, Some(block))
+                    .await?,
+            ))
+        };
+        let debt_price = if added_debt.is_zero() {
             None
         } else {
             Some(
                 self.runtime
                     .call(
-                        pool,
-                        &Pool::getEModeCategoryCollateralConfigCall {
-                            id: mode.to::<u8>(),
+                        oracle,
+                        &Oracle::getAssetPriceCall {
+                            asset: address(&token.reference)?,
                         },
                         Some(block),
                     )
                     .await?,
             )
         };
-        let bitmap = if mode.is_zero() {
-            0
-        } else {
-            self.runtime
-                .call(
-                    pool,
-                    &Pool::getEModeCategoryCollateralBitmapCall {
-                        id: mode.to::<u8>(),
-                    },
-                    Some(block),
-                )
-                .await?
-        };
-        let mut weighted = U256::ZERO;
-        let mut collateral = U256::ZERO;
-        let fetched;
-        let users = if let Some(users) = selected_users {
-            users
-        } else {
-            fetched = self.aave_risk_users(owner, block, false).await?;
-            &fetched
-        };
-        for (reference, _, user) in users.iter().cloned() {
-            if !user.usageAsCollateralEnabled || user.currentATokenBalance.is_zero() {
-                continue;
-            }
-            let reserve = self.reserve(&reference, Some(block)).await?;
-            let mut units = user.currentATokenBalance;
-            if apply_removal && reference == token.reference {
-                units = match removed {
-                    Some(qty) => {
-                        let index = u256(&reserve.normalized_income)?;
-                        let scaled = self
-                            .runtime
-                            .call(
-                                address(&reserve.a_token)?,
-                                &AToken::scaledBalanceOfCall { user: owner },
-                                Some(block),
-                            )
-                            .await?;
-                        let burned =
-                            self.scaled_change(qty, index, &PositionKind::Supply, false)?;
-                        let remaining = scaled.checked_sub(burned).ok_or_else(|| {
-                            GoFinError::validation("Removal exceeds exact scaled claim.")
-                        })?;
-                        self.position_backing(remaining, index, &PositionKind::Supply)?
-                    }
-                    None => U256::ZERO,
-                };
-            }
-            let price = self
-                .runtime
-                .call(
-                    oracle,
-                    &Oracle::getAssetPriceCall {
-                        asset: address(&reference)?,
-                    },
-                    Some(block),
-                )
-                .await?;
+        let details: Result<HealthDetails> = async {
+            let mut details = HealthDetails {
+                category_threshold: None,
+                category_bitmap: 0,
+                collateral: Vec::new(),
+            };
+            let mode = self.aave_mode(owner, Some(block)).await?;
             require(
-                !price.is_zero(),
-                "ORACLE_INVALID",
-                "Collateral risk price must be positive.",
+                mode <= U256::from(255),
+                "AAVE_MODE_UNSUPPORTED",
+                "Unrecognized eMode category.",
             )?;
-            let base = mul(units, price)? / pow10(reserve.token.decimals)?;
-            let mut threshold = u256(&reserve.liquidation_threshold)?;
-            if let Some(category) = &category {
-                let data = self
+            if !mode.is_zero() {
+                let id = mode.to::<u8>();
+                details.category_threshold = Some(
+                    self.runtime
+                        .call(
+                            pool,
+                            &Pool::getEModeCategoryCollateralConfigCall { id },
+                            Some(block),
+                        )
+                        .await?
+                        .liquidationThreshold,
+                );
+                details.category_bitmap = self
                     .runtime
                     .call(
                         pool,
-                        &Pool::getReserveDataCall {
+                        &Pool::getEModeCategoryCollateralBitmapCall { id },
+                        Some(block),
+                    )
+                    .await?;
+            }
+            let fetched;
+            let users = if let Some(users) = selected_users {
+                users
+            } else {
+                fetched = self.aave_risk_users(owner, block, false).await?;
+                &fetched
+            };
+            for (reference, _, user) in users.iter().cloned() {
+                if !user.usageAsCollateralEnabled || user.currentATokenBalance.is_zero() {
+                    continue;
+                }
+                let reserve = if let Some((_, facts)) =
+                    selected_reserve.filter(|(selected, _)| *selected == reference)
+                {
+                    facts.clone()
+                } else {
+                    super::read_lifecycle::collect_write_reserve(
+                        self, block, owner, &reference, collector,
+                    )
+                    .await?
+                };
+                let (a_token, _, _) = reserve.receipt_addresses()?;
+                let scaled = if apply_removal && reference == token.reference && removed.is_some() {
+                    Some(
+                        self.runtime
+                            .call(
+                                a_token,
+                                &AToken::scaledBalanceOfCall { user: owner },
+                                Some(block),
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let price = self
+                    .runtime
+                    .call(
+                        oracle,
+                        &Oracle::getAssetPriceCall {
                             asset: address(&reference)?,
                         },
                         Some(block),
                     )
                     .await?;
-                if data.id < 128 && (bitmap & (1u128 << data.id)) != 0 {
-                    threshold = U256::from(category.liquidationThreshold);
-                }
+                let reserve_id = if details.category_threshold.is_some() {
+                    Some(
+                        self.runtime
+                            .call(
+                                pool,
+                                &Pool::getReserveDataCall {
+                                    asset: address(&reference)?,
+                                },
+                                Some(block),
+                            )
+                            .await?
+                            .id,
+                    )
+                } else {
+                    None
+                };
+                details.collateral.push(HealthCollateral {
+                    reference,
+                    units: user.currentATokenBalance,
+                    reserve,
+                    scaled,
+                    price,
+                    reserve_id,
+                });
             }
-            // Legacy Horizon excludes zero-threshold collateral entirely.
-            if !self.horizon_math() || !threshold.is_zero() {
-                collateral = add(collateral, base)?;
-                weighted = add(weighted, mul(base, threshold)?)?;
-            }
+            Ok(details)
         }
-        Ok((
-            collateral,
-            debt,
-            health_factor(self.horizon_math(), collateral, weighted, debt)?,
-        ))
+        .await;
+        Ok(HealthEvidence {
+            horizon: self.horizon_math(),
+            collateral_before: account.totalCollateralBase,
+            debt_before: account.totalDebtBase,
+            debt_price,
+            oracle_units,
+            details,
+        })
     }
     /// Pin reserve identity and its income index without reading wallet funds.
     pub(crate) async fn aave_supply_plan_observation(

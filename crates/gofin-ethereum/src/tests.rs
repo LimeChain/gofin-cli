@@ -8888,3 +8888,6 @@ mod aave_read_measurement;
 
 #[path = "borrow_read_measurement.rs"]
 mod borrow_read_measurement;
+
+#[path = "lifecycle_after_measurement.rs"]
+mod lifecycle_after_measurement;

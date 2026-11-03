@@ -6,6 +6,7 @@ mod abi;
 mod amm_conformance_tests;
 mod amm_permissions;
 mod anchors;
+mod collection;
 mod holdings;
 pub mod morpho;
 mod permit2;
@@ -1045,6 +1046,17 @@ struct Permit2AllowanceState {
 
 #[async_trait]
 impl Adapter for EthereumAdapter {
+    fn operation_lifecycle<'a>(
+        &'a self,
+        operation: &str,
+        input: &Value,
+        context: Option<&PreparationContext>,
+    ) -> Result<Option<Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>>> {
+        if let Some(session) = self.aave_read_lifecycle(operation, input)? {
+            return Ok(Some(session));
+        }
+        self.aave_write_lifecycle(operation, input, context)
+    }
     async fn evm_nonce_scope(&self, prepared: &PreparedOperation) -> Result<Option<(String, u64)>> {
         if prepared
             .binding
@@ -1303,6 +1315,17 @@ impl Adapter for EthereumAdapter {
         self.read_snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        if let Some(mut session) = self.aave_read_lifecycle(operation, input)? {
+            session.collect().await?;
+            session.evaluate()?;
+            session.collect_final().await?;
+            return match session.finalize_candidate()? {
+                gofin_domain::operation_lifecycle::CandidateResult::Read(value) => Ok(value),
+                _ => Err(GoFinError::validation(
+                    "Native read produced a write candidate.",
+                )),
+            };
+        }
         if operation == "uniswap.quote" {
             return self.uniswap_api_quote(input).await;
         }
@@ -1318,6 +1341,11 @@ impl Adapter for EthereumAdapter {
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if operation.starts_with("aave.") {
+            return self
+                .prepare_with_context(operation, input, &PreparationContext::default())
+                .await;
+        }
         if uniswap_api::requested(operation, input) {
             let mut p = self.uniswap_api_prepare(operation, input).await?;
             bind_prepared_valuation(&mut p)?;
@@ -1343,6 +1371,17 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if let Some(mut session) = self.aave_write_lifecycle(operation, input, Some(context))? {
+            session.collect().await?;
+            session.evaluate()?;
+            session.collect_final().await?;
+            return match session.finalize_candidate()? {
+                gofin_domain::operation_lifecycle::CandidateResult::Write(prepared) => {
+                    Ok(*prepared)
+                }
+                _ => Err(GoFinError::validation("Aave write produced a read result.")),
+            };
+        }
         if uniswap_api::requested(operation, input) {
             let mut p = self.uniswap_api_prepare(operation, input).await?;
             bind_prepared_valuation(&mut p)?;
@@ -1509,6 +1548,14 @@ impl Adapter for EthereumAdapter {
     }
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if let Some(mut session) =
+            self.aave_write_lifecycle(&prepared.operation, &prepared.input, None)?
+        {
+            session.refresh(prepared).await?;
+            session.revalidate(prepared)?;
+            session.confirm(prepared).await?;
+            return session.finalize_validation(prepared);
+        }
         if uniswap_api::is_api(prepared) {
             return self.uniswap_api_revalidate(prepared).await;
         }

@@ -1767,6 +1767,63 @@ pub struct CanonicalReceipt {
     pub receipt: Value,
 }
 
+/// Independently verified finalized nonce-consumer evidence for one immutable
+/// original submission. It carries no outcome or financial effects.
+#[derive(Clone, Debug)]
+pub struct FinalizedNonceReplacement {
+    submission: Submission,
+    transaction: FrozenTransaction,
+    original: B256,
+    replacement: B256,
+    sender: Address,
+    block_number: u64,
+    block_hash: B256,
+    finalized_block_number: u64,
+    finalized_block_hash: B256,
+}
+
+impl FinalizedNonceReplacement {
+    /// Decide the replacement outcome without RPC or signer access. Evidence
+    /// can only be applied to the exact original submission and envelope.
+    pub fn reconcile(
+        &self,
+        submission: &Submission,
+        transaction: &FrozenTransaction,
+        observed_at: String,
+    ) -> Result<gofin_domain::Reconciliation> {
+        if submission != &self.submission
+            || transaction != &self.transaction
+            || submission.kind != "ethereum"
+            || submission.data["transaction"]
+                != serde_json::to_value(transaction)
+                    .map_err(|_| GoFinError::validation("Invalid transaction envelope."))?
+            || hash(&submission.reference)? != self.original
+            || address(&transaction.sender)? != self.sender
+            || self.original == self.replacement
+            || self.block_number > self.finalized_block_number
+        {
+            return Err(GoFinError::validation(
+                "Replacement evidence does not match the original submission and finalized transaction.",
+            ));
+        }
+        let evidence = json!({"state":"finalized_nonce_replaced","outcome_replay_safe":true,"original_hash":submission.reference,"replacement_hash":format!("{:#x}",self.replacement),"sender":transaction.sender,"nonce":transaction.nonce,"block_number":self.block_number,"block_hash":format!("{:#x}",self.block_hash),"finalized_block_number":self.finalized_block_number,"finalized_block_hash":format!("{:#x}",self.finalized_block_hash),"financial_effects":[]});
+        let mut verified = gofin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: vec![],
+            evidence: evidence.clone(),
+            observed_at,
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
+        Ok(gofin_domain::Reconciliation {
+            status: gofin_domain::Status::Failed,
+            evidence,
+            verified: Some(verified),
+        })
+    }
+}
+
 fn receipt_inclusion_pending(receipt: &Value, transaction: &Value) -> Result<bool> {
     let mut pending = false;
     for response in [receipt, transaction] {
@@ -2664,6 +2721,19 @@ impl EvmRuntime {
         submission: &Submission,
         transaction: &FrozenTransaction,
     ) -> Result<Option<gofin_domain::Reconciliation>> {
+        self.observe_finalized_nonce_replacement(submission, transaction)
+            .await?
+            .map(|facts| facts.reconcile(submission, transaction, gofin_domain::now()))
+            .transpose()
+    }
+
+    /// Collect a verified finalized replacement identity; callers decide the
+    /// resulting outcome separately using `FinalizedNonceReplacement::reconcile`.
+    pub async fn observe_finalized_nonce_replacement(
+        &self,
+        submission: &Submission,
+        transaction: &FrozenTransaction,
+    ) -> Result<Option<FinalizedNonceReplacement>> {
         if submission.kind != "ethereum"
             || submission.data["transaction"]
                 != serde_json::to_value(transaction)
@@ -2770,20 +2840,16 @@ impl EvmRuntime {
         {
             return Ok(None);
         }
-        let evidence = json!({"state":"finalized_nonce_replaced","outcome_replay_safe":true,"original_hash":submission.reference,"replacement_hash":format!("{replacement:#x}"),"sender":transaction.sender,"nonce":transaction.nonce,"block_number":low,"block_hash":format!("{block_hash:#x}"),"finalized_block_number":height,"finalized_block_hash":format!("{finalized_hash:#x}"),"financial_effects":[]});
-        let mut verified = gofin_domain::VerifiedEffects {
-            evidence_version: 1,
+        Ok(Some(FinalizedNonceReplacement {
             submission: submission.clone(),
-            effects: vec![],
-            evidence: evidence.clone(),
-            observed_at: gofin_domain::now(),
-            proof_digest: String::new(),
-        };
-        verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
-        Ok(Some(gofin_domain::Reconciliation {
-            status: gofin_domain::Status::Failed,
-            evidence,
-            verified: Some(verified),
+            transaction: transaction.clone(),
+            original,
+            replacement,
+            sender,
+            block_number: low,
+            block_hash,
+            finalized_block_number: height,
+            finalized_block_hash: finalized_hash,
         }))
     }
 
@@ -3699,6 +3765,89 @@ mod http_rpc_tests {
                 assert_eq!(result.evidence["state"], "finalized_nonce_replaced");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn replacement_facts_are_repeatable_and_bound_to_full_original_identity() {
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: "0x4444444444444444444444444444444444444444".into(),
+            to: "0x5555555555555555555555555555555555555555".into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: format!("0x{}", "11".repeat(32)),
+            data: json!({"transaction":transaction, "dispatch_block":1}),
+        };
+        let runtime = EvmRuntime::new(
+            Arc::new(ReplacementRpc {
+                consumed: true,
+                replacement_is_original: false,
+                minimum_history: 1,
+            }),
+            1,
+            None,
+        );
+        let facts = runtime
+            .observe_finalized_nonce_replacement(&submission, &transaction)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(runtime); // Pure decisions have no access to RPC or a signer.
+        let observed = "2026-11-03T09:00:00Z".to_owned();
+        let first = facts
+            .reconcile(&submission, &transaction, observed.clone())
+            .unwrap();
+        let second = facts
+            .reconcile(&submission, &transaction, observed)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+        assert_eq!(first.status, gofin_domain::Status::Failed);
+        let verified = first.verified.unwrap();
+        assert_eq!(verified.submission, submission);
+        assert!(verified.effects.is_empty());
+        assert_eq!(
+            verified.proof_digest,
+            gofin_domain::verified_effect_digest(&verified).unwrap()
+        );
+        let mut changed_submission = submission.clone();
+        changed_submission.data["dispatch_block"] = json!(2);
+        assert!(
+            facts
+                .reconcile(&changed_submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut changed_transaction = transaction.clone();
+        changed_transaction.nonce += 1;
+        assert!(
+            facts
+                .reconcile(&submission, &changed_transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut same_hash = facts.clone();
+        same_hash.replacement = same_hash.original;
+        assert!(
+            same_hash
+                .reconcile(&submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut beyond_finality = facts.clone();
+        beyond_finality.block_number = beyond_finality.finalized_block_number + 1;
+        assert!(
+            beyond_finality
+                .reconcile(&submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
     }
 
     #[tokio::test]

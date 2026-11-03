@@ -60,7 +60,9 @@ mod cost_attention_tests;
 #[cfg(test)]
 mod direct_credit_cost_tests;
 mod financial_plans;
+mod operation_lifecycle;
 pub use financial_plans::financial_plan_approval_review;
+use operation_lifecycle::revalidate as lifecycle_revalidate;
 #[cfg(test)]
 mod gross_anchor_tests;
 #[cfg(test)]
@@ -541,20 +543,21 @@ impl Engine {
         // RPC observations use their adapter's own read bounds. Composite
         // snapshots may return bounded partial coverage, and bridge recovery
         // reconciles immutable identities without command-level cancellation.
+        let read = async {
+            if let Some(mut session) = adapter.operation_lifecycle(operation, input, None)? {
+                operation_lifecycle::read(session.as_mut()).await
+            } else {
+                adapter.read(operation, input).await
+            }
+        };
         let value = if adapter.uses_rpc_reads(operation, input)
             || matches!(
                 operation,
                 "gofin.snapshot" | "fin.snapshot" | "bridge.status" | "bridge.recovery"
             ) {
-            adapter.read(operation, input).await
+            read.await
         } else {
-            bounded_evidence(
-                operation,
-                "read",
-                READ_COMMAND_TIMEOUT,
-                adapter.read(operation, input),
-            )
-            .await
+            bounded_evidence(operation, "read", READ_COMMAND_TIMEOUT, read).await
         }?;
         if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let mut snapshot: StateSnapshot = serde_json::from_value(value).map_err(|_| {
@@ -653,7 +656,11 @@ impl Engine {
         let linked = self.amendment_preparation_context(input)?;
         let compound = self.compound_preparation_context(input)?;
         let mut preview = bounded_evidence(operation, "preflight", PREFLIGHT_TIMEOUT, async {
-            if let Some(compound) = &compound {
+            if let Some(mut session) =
+                adapter.operation_lifecycle(operation, input, Some(&context))?
+            {
+                operation_lifecycle::prepare(session.as_mut()).await
+            } else if let Some(compound) = &compound {
                 adapter
                     .prepare_with_compound_context(operation, input, &context, compound)
                     .await
@@ -1774,7 +1781,13 @@ impl Engine {
                         gofin_domain::execution_progress::Stage::Preparing,
                     );
                     bounded_evidence(&request.operation, "preflight", PREFLIGHT_TIMEOUT, async {
-                        if let Some(compound) = &compound {
+                        if let Some(mut session) = adapter.operation_lifecycle(
+                            &request.operation,
+                            &request.input,
+                            Some(&context),
+                        )? {
+                            operation_lifecycle::prepare(session.as_mut()).await
+                        } else if let Some(compound) = &compound {
                             adapter
                                 .prepare_with_compound_context(
                                     &request.operation,
@@ -2059,53 +2072,71 @@ impl Engine {
                 preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
             })
             && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
-        let mut refreshed = if reuse_preparation
-            && adapter.supports_approved_reprepare(&adapter_candidate)
-        {
-            bounded_evidence(
-                &request.operation,
-                "revalidation",
-                PREFLIGHT_TIMEOUT,
-                adapter.revalidate(&adapter_candidate),
-            )
-            .await?
-        } else if reuse_preparation {
-            adapter_candidate.clone()
-        } else if matches!(&route, ExecutionRoute::Financial)
-            && adapter.supports_approved_reprepare(&adapter_candidate)
-        {
-            let mut fresh = bounded_evidence(
-                &request.operation,
-                "fresh candidate",
-                PREFLIGHT_TIMEOUT,
-                adapter.prepare_with_context(&request.operation, &request.input, &context),
-            )
-            .await?;
-            financial_plans::carry_action_deadline(&prepared, &mut fresh)?;
-            adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &fresh)?;
-            bounded_evidence(
-                &request.operation,
-                "revalidation",
-                PREFLIGHT_TIMEOUT,
-                adapter.revalidate(&fresh),
-            )
-            .await?
-        } else {
-            bounded_evidence(
-                &request.operation,
-                "revalidation",
-                PREFLIGHT_TIMEOUT,
-                async {
-                    match &route {
-                        ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
-                        ExecutionRoute::Configuration(_) => {
-                            adapter.revalidate_configuration(&adapter_candidate).await
+        let mut refreshed =
+            if reuse_preparation && adapter.supports_approved_reprepare(&adapter_candidate) {
+                bounded_evidence(
+                    &request.operation,
+                    "revalidation",
+                    PREFLIGHT_TIMEOUT,
+                    lifecycle_revalidate(adapter.as_ref(), &adapter_candidate, Some(&context)),
+                )
+                .await?
+            } else if reuse_preparation {
+                adapter_candidate.clone()
+            } else if matches!(&route, ExecutionRoute::Financial)
+                && adapter.supports_approved_reprepare(&adapter_candidate)
+            {
+                let mut fresh = bounded_evidence(
+                    &request.operation,
+                    "fresh candidate",
+                    PREFLIGHT_TIMEOUT,
+                    async {
+                        if let Some(mut session) = adapter.operation_lifecycle(
+                            &request.operation,
+                            &request.input,
+                            Some(&context),
+                        )? {
+                            operation_lifecycle::prepare(session.as_mut()).await
+                        } else {
+                            adapter
+                                .prepare_with_context(&request.operation, &request.input, &context)
+                                .await
                         }
-                    }
-                },
-            )
-            .await?
-        };
+                    },
+                )
+                .await?;
+                financial_plans::carry_action_deadline(&prepared, &mut fresh)?;
+                adapter.validate_approved_candidate(&strip_plan_metadata(&prepared), &fresh)?;
+                bounded_evidence(
+                    &request.operation,
+                    "revalidation",
+                    PREFLIGHT_TIMEOUT,
+                    lifecycle_revalidate(adapter.as_ref(), &fresh, Some(&context)),
+                )
+                .await?
+            } else {
+                bounded_evidence(
+                    &request.operation,
+                    "revalidation",
+                    PREFLIGHT_TIMEOUT,
+                    async {
+                        match &route {
+                            ExecutionRoute::Financial => {
+                                lifecycle_revalidate(
+                                    adapter.as_ref(),
+                                    &adapter_candidate,
+                                    Some(&context),
+                                )
+                                .await
+                            }
+                            ExecutionRoute::Configuration(_) => {
+                                adapter.revalidate_configuration(&adapter_candidate).await
+                            }
+                        }
+                    },
+                )
+                .await?
+            };
         financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
         gofin_domain::product_names::preserve_approved_spelling(
             &prepared.binding,
@@ -2158,6 +2189,11 @@ impl Engine {
             Vec::new()
         };
         let mut nonce_claimed = false;
+        let mut final_lifecycle = if matches!(&route, ExecutionRoute::Financial) {
+            adapter.operation_lifecycle(&refreshed.operation, &refreshed.input, Some(&context))?
+        } else {
+            None
+        };
         if matches!(&route, ExecutionRoute::Financial) {
             // Another invocation may have admitted a nonce while this one was
             // awaiting approval. Refresh under the resource lock before signing.
@@ -2187,7 +2223,13 @@ impl Engine {
                     &request.operation,
                     "admission revalidation",
                     PREFLIGHT_TIMEOUT,
-                    adapter.revalidate(&current),
+                    async {
+                        if let Some(session) = final_lifecycle.as_mut() {
+                            operation_lifecycle::refresh(session.as_mut(), &current).await
+                        } else {
+                            adapter.revalidate(&current).await
+                        }
+                    },
                 )
                 .await?;
                 financial_plans::carry_action_deadline(&prepared, &mut latest)?;
@@ -2246,9 +2288,13 @@ impl Engine {
         gofin_domain::execution_progress::emit(gofin_domain::execution_progress::Stage::Submitting);
         let submission = match &route {
             ExecutionRoute::Financial => {
-                adapter
-                    .submit_revalidated(&validated, journal.clone())
-                    .await
+                if let Some(session) = final_lifecycle.as_mut() {
+                    session.execute(&validated, journal.clone()).await
+                } else {
+                    adapter
+                        .submit_revalidated(&validated, journal.clone())
+                        .await
+                }
             }
             ExecutionRoute::Configuration(_) => {
                 adapter
@@ -2550,6 +2596,16 @@ impl Engine {
                 && definition.execution_actor == ExecutionActor::HumanInteractive
             {
                 adapter.reconcile_configuration(&adapter_record).await
+            } else if let Some(mut session) = adapter.operation_lifecycle(
+                &adapter_record.operation,
+                adapter_record
+                    .preview
+                    .as_ref()
+                    .map_or(&adapter_record.input, |preview| &preview.input),
+                None,
+            )? {
+                session.observe(&adapter_record).await?;
+                session.evaluate_observation(&adapter_record)
             } else if let Some(compound) = &compound {
                 adapter
                     .reconcile_with_compound_context(&adapter_record, compound)
@@ -18078,6 +18134,7 @@ mod tests {
     mod final_validation;
     #[path = "included_cost_conversion_tests.rs"]
     mod included_cost_conversion_tests;
+    mod operation_lifecycle;
     #[path = "pending_request_credit_workflow_tests.rs"]
     mod pending_request_credit_workflow_tests;
     #[path = "position_predecessor_tests.rs"]

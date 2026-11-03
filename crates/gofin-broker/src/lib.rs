@@ -4,6 +4,7 @@
 //! is rooted at the installed paths; the separately named composition entry
 //! point exists for synthetic adapter/credential harnesses.
 
+mod aave_mcp_lifecycle;
 mod amm_deployments;
 mod artifacts;
 mod bridge;
@@ -3815,96 +3816,6 @@ impl BrokerRuntime {
         Ok(())
     }
 
-    async fn discover_aave_mcp_reads(&self) -> gofin_domain::Result<Value> {
-        self.clear_aave_mcp_read_definitions()?;
-        let catalog = self
-            .aave_mcp_client()?
-            .refresh_read_tools()
-            .await
-            .map_err(|_| {
-                error(
-                    "AAVE_MCP_READ_UNAVAILABLE",
-                    "read",
-                    "The official Aave MCP read catalog could not be retrieved or validated.",
-                    "Retry this explicit read when the official Aave MCP is available. The offline GoFin catalog remains usable.",
-                )
-            })?;
-        *self
-            .aave_mcp_read_definitions
-            .lock()
-            .map_err(|_| internal_error())? = aave_mcp_read_definitions(&catalog);
-        serde_json::to_value(catalog)
-            .map(|mut value| {
-                value["provenance"] = json!("unverified_official_mcp");
-                value
-            })
-            .map_err(|_| internal_error())
-    }
-
-    async fn read_aave_mcp_tool(
-        &self,
-        operation: &str,
-        input: Value,
-    ) -> gofin_domain::Result<Value> {
-        let tool_name = aave_mcp_read_tool_name(operation).ok_or_else(|| {
-            error(
-                "AAVE_MCP_READ_UNAVAILABLE",
-                "read",
-                "This Aave MCP operation is not a locally permitted read-only tool name.",
-                "Discover available tools with `gofin read aave.mcp.tools --input '{}'`.",
-            )
-        })?;
-        if broker_has_sensitive_input_key(&input) {
-            return Err(error(
-                "AAVE_MCP_READ_INPUT_INVALID",
-                "validation",
-                "Aave MCP read arguments cannot include credentials, signatures, permits or secrets.",
-                "Pass only public address and query parameters from the upstream read schema.",
-            ));
-        }
-        let client = self.aave_mcp_client()?;
-        let result = client
-            .call_read_tool(tool_name, input)
-            .await
-            .map_err(|mcp_error| match mcp_error {
-                gofin_ethereum::aave_mcp::AaveMcpError::InvalidReadArguments(_) => error(
-                    "AAVE_MCP_READ_INPUT_INVALID",
-                    "validation",
-                    "The Aave MCP read arguments do not satisfy the discovered bounded input schema.",
-                    "Use the exact upstream input schema from `gofin read aave.mcp.tools --input '{}'`.",
-                ),
-                _ => {
-                    let _ = self.clear_aave_mcp_read_definitions();
-                    error(
-                        "AAVE_MCP_READ_UNAVAILABLE",
-                        "read",
-                        "The official Aave MCP read could not be completed or validated.",
-                        "Inspect the discovered schema and retry only this read when the upstream tool is available.",
-                    )
-                }
-            })?;
-        if result.result.get("isError") == Some(&Value::Bool(true)) {
-            return Err(error(
-                "AAVE_MCP_READ_FAILED",
-                "read",
-                "The upstream Aave MCP reported that this read failed.",
-                "Inspect the preserved upstream result details, then retry this read only if appropriate.",
-            )
-            .with_details(json!({
-                "operation":operation,
-                "tool_name":result.tool_name,
-                "upstream_result":result.result,
-                "provenance":"unverified_official_mcp"
-            })));
-        }
-        Ok(json!({
-            "operation":operation,
-            "tool_name":result.tool_name,
-            "result":result.result,
-            "provenance":"unverified_official_mcp"
-        }))
-    }
-
     /// Enable the separate configuration-approval route for an explicitly
     /// isolated development runtime. Protected production composition never
     /// calls this method and therefore cannot use DevelopmentConfigure.
@@ -4506,18 +4417,8 @@ impl BrokerRuntime {
                 json!({"configurationVersion":self.config.version,"approverConfigured":true,"adapters":self.adapters.iter().flat_map(|a|a.definitions()).map(|d| d.name).collect::<Vec<_>>(),"protectedInstallationRequired":true,"financialReadiness":"requires-live-probes","rpc_health":observed_rpc_health(&self.adapters)}),
             ),
             R::Read { operation, input } => {
-                if operation == "aave.mcp.tools" {
-                    if !input.as_object().is_some_and(serde_json::Map::is_empty) {
-                        return Err(error(
-                            "AAVE_MCP_READ_INPUT_INVALID",
-                            "validation",
-                            "Aave MCP tool discovery accepts only an empty object.",
-                            "Call `gofin read aave.mcp.tools --input '{}'`.",
-                        ));
-                    }
-                    self.discover_aave_mcp_reads().await
-                } else if operation.starts_with("aave.mcp.") {
-                    self.read_aave_mcp_tool(&operation, input).await
+                if operation.starts_with("aave.mcp.") {
+                    aave_mcp_lifecycle::read(self, &operation, input).await
                 } else {
                     serde_json::to_value(self.engine.read(&operation, &input).await?)
                         .map_err(|_| internal_error())
@@ -9530,7 +9431,7 @@ mod tests {
         assert_eq!(captures.load(Ordering::SeqCst), 0);
     }
 
-    fn runtime() -> Arc<BrokerRuntime> {
+    pub(super) fn runtime() -> Arc<BrokerRuntime> {
         runtime_with_capture_counter().0
     }
 

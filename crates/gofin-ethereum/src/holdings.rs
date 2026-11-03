@@ -1,26 +1,13 @@
 //! Balance-only metadata caching. Financial preparation continues to use fresh
 //! `token()` reads and never trusts this display cache for transaction authority.
 use super::*;
-use abi::{Erc20, Multicall3};
-use gofin_evm::{
-    RpcReadRequirements,
-    alloy::{
-        primitives::keccak256,
-        sol_types::{SolCall, SolValue},
-    },
-    rpc_bytes,
-};
-use tokio::task::JoinSet;
-
-const MULTICALL: &str = "0xca11bde05977b3631167028862be2a173976ca11";
-const BATCH_SIZE: usize = 32;
-const CONCURRENCY: usize = 4;
-const DIRECT_CONCURRENCY: usize = 8;
-#[derive(Clone)]
-struct Call {
-    target: Address,
-    data: Vec<u8>,
-}
+#[cfg(test)]
+use crate::collection::{BATCH_SIZE, CONCURRENCY, DIRECT_CONCURRENCY, MULTICALL};
+use crate::collection::{ReadCall as Call, ReadCollector};
+use abi::Erc20;
+#[cfg(test)]
+use abi::Multicall3;
+use gofin_evm::alloy::sol_types::{SolCall, SolValue};
 #[derive(Clone, Serialize, Deserialize)]
 struct Metadata {
     token: reads::Token,
@@ -90,155 +77,6 @@ impl EthereumAdapter {
         });
         if ttl == -1 || ttl > 0 { ttl } else { 86400 }
     }
-    async fn verified_multicall(&self, block: u64) -> Option<Address> {
-        if !matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663) {
-            return None;
-        }
-        let contract = address(MULTICALL).ok()?;
-        let raw = self
-            .runtime
-            .rpc
-            .request_checked(
-                "eth_getCode",
-                json!([MULTICALL, gofin_evm::block_tag(Some(block))]),
-                RpcReadRequirements {
-                    pin_block: Some(block),
-                    ..Default::default()
-                },
-            )
-            .await
-            .ok()?;
-        let code = rpc_bytes(&raw).ok()?;
-        let canonical =
-            hex::decode(include_str!("multicall/multicall3-runtime.hex").trim()).ok()?;
-        (keccak256(&code) == keccak256(&canonical)).then_some(contract)
-    }
-    async fn direct_call(&self, call: Call, block: u64) -> Result<Vec<u8>> {
-        let raw = self
-            .runtime
-            .rpc
-            .request_checked(
-                "eth_call",
-                json!([{
-                "to": lower_address(call.target),
-                "data": gofin_evm::hex_bytes(&call.data)
-            }, gofin_evm::block_tag(Some(block))]),
-                RpcReadRequirements {
-                    pin_block: Some(block),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        rpc_bytes(&raw).map(|bytes| bytes.to_vec())
-    }
-    async fn direct_calls(&self, calls: Vec<Call>, block: u64) -> Vec<Result<Vec<u8>>> {
-        let mut output = Vec::with_capacity(calls.len());
-        // At most eight direct calls per reader, including when aggregation fails.
-        for chunk in calls.chunks(DIRECT_CONCURRENCY) {
-            let mut jobs = JoinSet::new();
-            for (i, call) in chunk.iter().cloned().enumerate() {
-                let adapter = self.clone();
-                jobs.spawn(async move { (i, adapter.direct_call(call, block).await) });
-            }
-            let mut part: Vec<_> = (0..chunk.len())
-                .map(|_| {
-                    Err(error(
-                        "HOLDINGS_READ_FAILED",
-                        "read",
-                        "A holdings read did not complete.",
-                    ))
-                })
-                .collect();
-            while let Some(result) = jobs.join_next().await {
-                if let Ok((i, value)) = result {
-                    part[i] = value;
-                }
-            }
-            output.extend(part);
-        }
-        output
-    }
-    async fn aggregate_chunk(
-        &self,
-        calls: Vec<Call>,
-        block: u64,
-        multicall: Address,
-    ) -> Option<Vec<Result<Vec<u8>>>> {
-        let request = Multicall3::aggregate3Call {
-            calls: calls
-                .iter()
-                .map(|call| Multicall3::Call3 {
-                    target: call.target,
-                    allowFailure: true,
-                    callData: call.data.clone().into(),
-                })
-                .collect(),
-        };
-        let result = self
-            .runtime
-            .call(multicall, &request, Some(block))
-            .await
-            .ok()?;
-        if result.len() != calls.len() {
-            return None;
-        }
-        Some(
-            result
-                .into_iter()
-                .map(|value| {
-                    if value.success {
-                        Ok(value.returnData.to_vec())
-                    } else {
-                        Err(error(
-                            "TOKEN_CALL_FAILED",
-                            "read",
-                            "Token read reverted in Multicall.",
-                        ))
-                    }
-                })
-                .collect(),
-        )
-    }
-    async fn batch_calls(
-        &self,
-        calls: Vec<Call>,
-        block: u64,
-        multicall: Option<Address>,
-    ) -> Vec<Result<Vec<u8>>> {
-        let Some(multicall) = multicall else {
-            return self.direct_calls(calls, block).await;
-        };
-        let chunks: Vec<_> = calls
-            .chunks(BATCH_SIZE)
-            .map(|chunk| chunk.to_vec())
-            .collect();
-        let mut output = Vec::with_capacity(calls.len());
-        for group in chunks.chunks(CONCURRENCY) {
-            let mut jobs = JoinSet::new();
-            for (i, chunk) in group.iter().cloned().enumerate() {
-                let adapter = self.clone();
-                jobs.spawn(
-                    async move { (i, adapter.aggregate_chunk(chunk, block, multicall).await) },
-                );
-            }
-            let mut parts: Vec<Option<Vec<Result<Vec<u8>>>>> =
-                (0..group.len()).map(|_| None).collect();
-            while let Some(result) = jobs.join_next().await {
-                if let Ok((i, value)) = result {
-                    parts[i] = value;
-                }
-            }
-            // Fallback is outside concurrent aggregation tasks so the eight-call
-            // direct limit remains global to this balance read.
-            for (chunk, part) in group.iter().zip(parts) {
-                match part {
-                    Some(part) => output.extend(part),
-                    None => output.extend(self.direct_calls(chunk.clone(), block).await),
-                }
-            }
-        }
-        output
-    }
     pub(crate) async fn read_holdings(
         &self,
         owner_string: &str,
@@ -249,9 +87,9 @@ impl EthereumAdapter {
     ) -> Result<(Vec<ResourceAmount>, TokenDiscoveryResult)> {
         let mut scope = self.wallet_tokens(owner_string, explicit).await?;
         let candidates = scope.candidates.clone();
-        let (native, multicall) = tokio::join!(
+        let (native, mut collector) = tokio::join!(
             self.runtime.balance(owner, Some(block)),
-            self.verified_multicall(block)
+            ReadCollector::new(self, block)
         );
         let mut holdings = vec![ResourceAmount {
             resource: resource(self.config.chain_id, owner),
@@ -260,13 +98,13 @@ impl EthereumAdapter {
         let calls = candidates
             .iter()
             .map(|reference| {
-                Ok(Call {
-                    target: address(reference)?,
-                    data: Erc20::balanceOfCall { owner }.abi_encode(),
-                })
+                Ok(Call::new(
+                    address(reference)?,
+                    &Erc20::balanceOfCall { owner },
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let balances = self.batch_calls(calls, block, multicall).await;
+        let balances = collector.collect(calls).await;
         let now = self.clock.now().timestamp();
         let mut pending = Vec::new();
         let mut learned: BTreeSet<_> = self.remembered_tokens(owner_string).into_iter().collect();
@@ -310,22 +148,13 @@ impl EthereumAdapter {
             if metadata.is_none() {
                 let target = address(reference)?;
                 calls.extend([
-                    Call {
-                        target,
-                        data: Erc20::decimalsCall {}.abi_encode(),
-                    },
-                    Call {
-                        target,
-                        data: Erc20::symbolCall {}.abi_encode(),
-                    },
-                    Call {
-                        target,
-                        data: Erc20::nameCall {}.abi_encode(),
-                    },
+                    Call::new(target, &Erc20::decimalsCall {}),
+                    Call::new(target, &Erc20::symbolCall {}),
+                    Call::new(target, &Erc20::nameCall {}),
                 ]);
             }
         }
-        let mut fresh = self.batch_calls(calls, block, multicall).await.into_iter();
+        let mut fresh = collector.collect(calls).await.into_iter();
         for (reference, balance, cached) in pending {
             let was_cached = cached.is_some();
             let metadata = if let Some(cached) = cached {
@@ -439,6 +268,7 @@ mod tests {
         canonical: AtomicBool,
         aggregation_fails: AtomicBool,
         corrupt_aggregate: AtomicBool,
+        incomplete_aggregate: AtomicBool,
         bad_token: AtomicBool,
         balance: AtomicU64,
         metadata_reads: AtomicUsize,
@@ -454,6 +284,7 @@ mod tests {
                 canonical: AtomicBool::new(canonical),
                 aggregation_fails: AtomicBool::new(false),
                 corrupt_aggregate: AtomicBool::new(false),
+                incomplete_aggregate: AtomicBool::new(false),
                 bad_token: AtomicBool::new(false),
                 balance: AtomicU64::new(123),
                 metadata_reads: AtomicUsize::new(0),
@@ -528,7 +359,7 @@ mod tests {
                         }
                         let calls = Multicall3::aggregate3Call::abi_decode(&data).unwrap().calls;
                         assert!(calls.len() <= BATCH_SIZE);
-                        let results: Vec<_> = calls
+                        let mut results: Vec<_> = calls
                             .into_iter()
                             .map(|call| match self.call(call.target, &call.callData) {
                                 Ok(data) => Multicall3::Result3 {
@@ -541,6 +372,9 @@ mod tests {
                                 },
                             })
                             .collect();
+                        if self.incomplete_aggregate.load(Ordering::SeqCst) {
+                            results.pop();
+                        }
                         Ok(json!(gofin_evm::hex_bytes(&results.abi_encode())))
                     } else {
                         self.direct.fetch_add(1, Ordering::SeqCst);
@@ -608,6 +442,43 @@ mod tests {
                 assert_eq!(params[1], json!("0x4d2"));
             }
         }
+    }
+    #[tokio::test]
+    async fn collector_reports_per_target_failure_and_incomplete_results_without_fallback() {
+        let rpc = Arc::new(Rpc::new(true));
+        rpc.bad_token.store(true, Ordering::SeqCst);
+        let a = adapter(rpc.clone(), 0, 86400);
+        let mut collector = ReadCollector::new(&a, 1234).await;
+        let calls = vec![
+            Call::new(
+                super::super::tests::addr(101),
+                &Erc20::balanceOfCall {
+                    owner: super::super::tests::addr(1),
+                },
+            ),
+            Call::new(
+                super::super::tests::addr(102),
+                &Erc20::balanceOfCall {
+                    owner: super::super::tests::addr(1),
+                },
+            ),
+        ];
+        let results = collector.collect(calls.clone()).await;
+        assert!(results[0].is_ok());
+        assert_eq!(results[1].as_ref().unwrap_err().code, "TOKEN_CALL_FAILED");
+        assert_eq!(collector.stats.logical_calls, 2);
+        assert_eq!(collector.stats.aggregate_requests, 1);
+        assert_eq!(collector.stats.direct_requests, 0);
+        rpc.incomplete_aggregate.store(true, Ordering::SeqCst);
+        let results = collector.collect(calls).await;
+        assert!(
+            results
+                .iter()
+                .all(|r| r.as_ref().unwrap_err().code == "MULTICALL_INCOMPLETE")
+        );
+        assert_eq!(collector.stats.aggregate_requests, 2);
+        assert_eq!(collector.stats.fallback_chunks, 0);
+        assert_eq!(rpc.direct.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn metadata_expiration_does_not_slide_and_refresh_is_explicit() {

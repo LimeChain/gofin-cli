@@ -56,6 +56,9 @@ impl EthereumAdapter {
         // Select and heap-pin before polling. Keeping the large protocol future
         // inline in an async dispatcher also enlarges every prepare/revalidate
         // caller's poll frame, overflowing normal broker worker stacks.
+        if operation.starts_with("aave.") {
+            return Box::pin(self.prepare_aave_typed(operation, input, original, context));
+        }
         if operation == "swap.execute" {
             return Box::pin(self.prepare_swap_execute(input, original, context));
         }
@@ -135,7 +138,7 @@ impl EthereumAdapter {
         operation: &str,
         input: &Value,
         original: Option<&Binding>,
-        context: &PreparationContext,
+        _context: &PreparationContext,
     ) -> Result<PreparedOperation> {
         require(
             !request::is_read(operation),
@@ -147,54 +150,6 @@ impl EthereumAdapter {
         let w = self.resolve(&r, true)?;
         let owner = address(&w.address)?;
         self.runtime.assert_chain().await?;
-        // Supply observations share one canonical block and one short-lived cache.
-        // Simulation and dispatch continue to use the original live runtime.
-        let capture = if matches!(operation, "aave.supply" | "aave.borrow") {
-            let block = gofin_evm::rpc_u64(
-                &self
-                    .runtime
-                    .rpc
-                    .request("eth_blockNumber", json!([]))
-                    .await?,
-            )?;
-            let params = json!([gofin_evm::block_tag(Some(block)), false]);
-            let header = self
-                .runtime
-                .rpc
-                .request("eth_getBlockByNumber", params)
-                .await?;
-            gofin_evm::hash(header["hash"].as_str().unwrap_or(""))?;
-            require(
-                gofin_evm::rpc_u64(&header["number"])? == block,
-                "AAVE_READ_CHANGED",
-                "Preparation block identity differs.",
-            )?;
-            let mut reader = self.clone();
-            reader.runtime = Arc::new(EvmRuntime::new(
-                Arc::new(snapshot::SnapshotRpc::preparation(
-                    self.runtime.rpc.clone(),
-                    block,
-                )),
-                self.config.chain_id,
-                None,
-            ));
-            Some((reader, block, header))
-        } else {
-            None
-        };
-        let state = capture
-            .as_ref()
-            .map(|(reader, _, _)| reader)
-            .unwrap_or(self);
-        let capture_proxy = if operation == "aave.borrow" {
-            Some(
-                state
-                    .aave_proxy_identity_at(Some(capture.as_ref().expect("borrow capture").1))
-                    .await?,
-            )
-        } else {
-            None
-        };
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
         } else if matches!(
@@ -205,29 +160,16 @@ impl EthereumAdapter {
         } else {
             r.token.as_deref().expect("schema").to_owned()
         };
-        let token = state.token(&token_ref, None).await?;
+        let token = self.token(&token_ref, None).await?;
         let all_amount = r.amount.as_deref() == Some("all");
-        let repay_all = operation == "aave.repay" && all_amount;
-        let withdraw_all = operation == "aave.withdraw" && all_amount;
-        let mut qty = if operation == "aave.collateral" {
-            U256::ZERO
-        } else {
-            exact(
-                if all_amount {
-                    r.max_amount.as_deref().expect("schema")
-                } else {
-                    r.amount.as_deref().expect("schema")
-                },
-                token.decimals,
-            )?
-        };
-        if matches!(operation, "aave.repay" | "aave.withdraw") && all_amount {
-            require(
-                qty < U256::MAX,
-                "ALL_AMOUNT_CAP_INVALID",
-                "Aave full repayment and withdrawal require a finite max_amount below uint256 maximum.",
-            )?;
-        }
+        let mut qty = exact(
+            if all_amount {
+                r.max_amount.as_deref().expect("schema")
+            } else {
+                r.amount.as_deref().expect("schema")
+            },
+            token.decimals,
+        )?;
         if all_amount
             && matches!(
                 operation,
@@ -247,7 +189,7 @@ impl EthereumAdapter {
             qty = observed;
         }
         require(
-            qty > U256::ZERO || matches!(operation, "wallet.approve" | "aave.collateral"),
+            qty > U256::ZERO || operation == "wallet.approve",
             "ZERO_AMOUNT",
             "Movement amount must be positive.",
         )?;
@@ -306,7 +248,7 @@ impl EthereumAdapter {
             a_token: None,
             debt_token: None,
             scaled_before: None,
-            repay_all,
+            repay_all: false,
             all_amount,
             aave_emode: None,
             supply_anchor: None,
@@ -330,7 +272,7 @@ impl EthereumAdapter {
         let mut value = U256::ZERO;
         let mut permit2_authorization: Option<AuthorizedPermit> = None;
         let mut eip2612_authorization: Option<AuthorizedPermit> = None;
-        let mut calldata: Bytes = match operation {
+        let calldata: Bytes = match operation {
             "wallet.wrap" => {
                 require(
                     token.decimals == 18,
@@ -1033,503 +975,8 @@ impl EthereumAdapter {
                     calldata
                 }
             }
-            _ => {
-                let reserve = state.reserve(&token.reference, None).await?;
-                require(
-                    reserve.active && !reserve.paused,
-                    "RESERVE_UNAVAILABLE",
-                    "Aave reserve must be active and unpaused.",
-                )?;
-                let user = state.user_reserve(&token, owner, None).await?;
-                let pool = address(&state.aave()?.pool)?;
-                to = pool;
-                b.aave_emode = Some(quantity(state.aave_mode(owner, None).await?));
-                b.pool = Some(state.aave()?.pool.clone());
-                b.spender = Some(state.aave()?.pool.clone());
-                b.a_token = Some(reserve.a_token.clone());
-                b.debt_token = Some(reserve.variable_debt_token.clone());
-                b.supplied_before = Some(user.supplied.clone());
-                b.debt_before = Some(user.variable_debt.clone());
-                b.collateral_before = Some(user.collateral_enabled);
-                let asset = address(&token.reference)?;
-                if matches!(operation, "aave.supply" | "aave.withdraw") {
-                    require(
-                        state
-                            .runtime
-                            .call(
-                                address(&reserve.a_token)?,
-                                &AToken::ATOKEN_REVISIONCall {},
-                                None,
-                            )
-                            .await?
-                            == state.supply_revision(),
-                        "ATOKEN_REVISION_UNSUPPORTED",
-                        "Selected supply writes require reviewed aToken revision 5 backing math.",
-                    )?;
-                }
-                if matches!(operation, "aave.borrow" | "aave.repay") {
-                    require(
-                        state
-                            .runtime
-                            .call(
-                                address(&reserve.variable_debt_token)?,
-                                &AToken::DEBT_TOKEN_REVISIONCall {},
-                                None,
-                            )
-                            .await?
-                            == state.debt_revision(),
-                        "DEBT_REVISION_UNSUPPORTED",
-                        "Selected debt writes require the selected reviewed debt token backing math.",
-                    )?;
-                }
-                state
-                    .verify_receipt_identity(&token, &reserve, None)
-                    .await?;
-                b.supply_anchor = Some(
-                    state
-                        .context_anchor(
-                            context,
-                            &token,
-                            owner,
-                            address(&reserve.a_token)?,
-                            PositionKind::Supply,
-                            original.is_none(),
-                        )
-                        .await?,
-                );
-                b.debt_anchor = Some(
-                    state
-                        .context_anchor(
-                            context,
-                            &token,
-                            owner,
-                            address(&reserve.variable_debt_token)?,
-                            PositionKind::VariableDebt,
-                            original.is_none(),
-                        )
-                        .await?,
-                );
-                if original.is_none() {
-                    let relevant = match operation {
-                        "aave.borrow" | "aave.repay" => b.debt_anchor.as_ref(),
-                        "aave.supply" | "aave.withdraw" => b.supply_anchor.as_ref(),
-                        _ => None,
-                    };
-                    if let Some(anchor) = relevant
-                        && !context.positions.iter().any(|old| {
-                            old.resource == anchor.resource
-                                && old.position == anchor.position
-                                && old.position_kind == anchor.position_kind
-                                && old.principal.asset == anchor.principal.asset
-                        })
-                    {
-                        b.verified_baseline_anchors.push(anchor.clone());
-                    }
-                }
-                require(
-                    b.supply_anchor
-                        .as_ref()
-                        .expect("anchor")
-                        .scaled_receipt
-                        .as_ref()
-                        == Some(&quantity(
-                            state
-                                .runtime
-                                .call(
-                                    address(&reserve.a_token)?,
-                                    &AToken::scaledBalanceOfCall { user: owner },
-                                    None,
-                                )
-                                .await?,
-                        ))
-                        && b.debt_anchor
-                            .as_ref()
-                            .expect("anchor")
-                            .scaled_receipt
-                            .as_ref()
-                            == Some(&user.scaled_variable_debt),
-                    "POSITION_PRINCIPAL_CHANGED",
-                    "Current scaled principal differs from broker-proved prior anchor.",
-                )?;
-                let supply_position = position(&state.aave()?.pool, &token.reference, "supply");
-                let debt_position =
-                    position(&state.aave()?.pool, &token.reference, "variable-debt");
-                match operation {
-                    "aave.supply" => {
-                        require(
-                            !reserve.frozen,
-                            "RESERVE_FROZEN",
-                            "Frozen reserves cannot accept supply.",
-                        )?;
-                        let cap = mul(u256(&reserve.supply_cap)?, pow10(token.decimals)?)?;
-                        require(
-                            cap.is_zero() || add(u256(&reserve.total_supply)?, qty)? <= cap,
-                            "SUPPLY_CAP",
-                            "Supply exceeds the observed reserve cap.",
-                        )?;
-                        require(
-                            {
-                                let allowance = state.allowance(&token, owner, pool, None).await?;
-                                allowance >= qty && allowance < U256::MAX
-                            },
-                            "ALLOWANCE_INSUFFICIENT",
-                            "Finite Pool allowance must cover exact supply.",
-                        )?;
-                        let a_token = address(&reserve.a_token)?;
-                        require(
-                            state
-                                .runtime
-                                .call(a_token, &AToken::ATOKEN_REVISIONCall {}, None)
-                                .await?
-                                == state.supply_revision(),
-                            "ATOKEN_REVISION_UNSUPPORTED",
-                            "Exact supply backing proof supports the selected reviewed aToken revision.",
-                        )?;
-                        b.scaled_before = Some(quantity(
-                            state
-                                .runtime
-                                .call(a_token, &AToken::scaledBalanceOfCall { user: owner }, None)
-                                .await?,
-                        ));
-                        intent.debits.push(ResourceAmount {
-                            resource: resource.clone(),
-                            amount: amount(&principal_asset, qty),
-                        });
-                        intent.expected.push(EffectConstraint::Debit {
-                            resource: resource.clone(),
-                            asset: principal_asset.clone(),
-                            maximum_debit: quantity(qty),
-                        });
-                        intent.expected.push(EffectConstraint::Position {
-                            resource: resource.clone(),
-                            position: supply_position.clone(),
-                            asset: principal_asset.clone(),
-                            direction: Direction::Increase,
-                            maximum_change: quantity(qty),
-                        });
-                        warnings.push("Supply may enable collateral automatically. Collateral settings and allowances persist until explicitly changed by another approved write.".into());
-                        Bytes::new()
-                    }
-                    "aave.borrow" => {
-                        require(
-                            !reserve.frozen && reserve.borrowing,
-                            "BORROW_UNAVAILABLE",
-                            "Reserve must permit variable borrowing and be unfrozen.",
-                        )?;
-                        let cap = mul(u256(&reserve.borrow_cap)?, pow10(token.decimals)?)?;
-                        require(
-                            cap.is_zero() || add(u256(&reserve.total_debt)?, qty)? <= cap,
-                            "BORROW_CAP",
-                            "Borrow exceeds the observed reserve cap.",
-                        )?;
-                        require(
-                            u256(&reserve.liquidity)? >= qty,
-                            "LIQUIDITY_INSUFFICIENT",
-                            "Reserve lacks exact underlying liquidity.",
-                        )?;
-                        let account = state
-                            .runtime
-                            .call(pool, &Pool::getUserAccountDataCall { user: owner }, None)
-                            .await?;
-                        let debt_index = state
-                            .runtime
-                            .call(
-                                pool,
-                                &Pool::getReserveNormalizedVariableDebtCall { asset },
-                                None,
-                            )
-                            .await?;
-                        let rounding_limit = aave::math::borrow_rounding_limit(debt_index)?;
-                        b.debt_rounding_maximum = Some(quantity(rounding_limit));
-                        let block = capture.as_ref().expect("borrow capture").1;
-                        let (collateral_base, debt, projected) = state
-                            .aave_borrow_projection_at(
-                                owner,
-                                &token,
-                                add(qty, rounding_limit)?,
-                                block,
-                            )
-                            .await?;
-                        state.aave_debt_limits(&r, collateral_base, debt)?;
-                        let added = debt.saturating_sub(account.totalDebtBase);
-                        let minimum = exact(r.min_health_factor.as_deref().expect("schema"), 18)?;
-                        require(
-                            minimum > pow10(18)?
-                                && projected >= minimum
-                                && added <= account.availableBorrowsBase,
-                            "HEALTH_FACTOR_LIMIT",
-                            "Borrow exceeds collateral capacity or explicit minimum health factor.",
-                        )?;
-                        intent.expected.push(EffectConstraint::Debt {
-                            resource: resource.clone(),
-                            debt: debt_position.clone(),
-                            asset: principal_asset.clone(),
-                            direction: Direction::Increase,
-                            // Opening debt includes its already-priced finite
-                            // rounding exposure. With an existing verified debt
-                            // baseline, principal and accrual stay separate.
-                            maximum_change: quantity(
-                                if b.debt_anchor
-                                    .as_ref()
-                                    .expect("anchor")
-                                    .principal
-                                    .atoms
-                                    .is_zero()
-                                    && user.scaled_variable_debt.is_zero()
-                                {
-                                    add(qty, rounding_limit)?
-                                } else {
-                                    qty
-                                },
-                            ),
-                        });
-                        intent.expected.push(EffectConstraint::Credit {
-                            to: resource.clone(),
-                            asset: principal_asset.clone(),
-                            minimum_credit: quantity(qty),
-                        });
-                        warnings.push("The minimum health factor is a fresh preflight constraint; variable interest continues after execution.".into());
-                        Bytes::new()
-                    }
-                    "aave.repay" => {
-                        let debt = u256(&user.variable_debt)?;
-                        require(
-                            debt > U256::ZERO,
-                            "NO_VARIABLE_DEBT",
-                            "No variable debt exists for this reserve.",
-                        )?;
-                        let allowance = state.allowance(&token, owner, pool, None).await?;
-                        require(
-                            allowance < U256::MAX
-                                && allowance >= if repay_all { debt } else { qty },
-                            "ALLOWANCE_INSUFFICIENT",
-                            "Repayment requires finite sufficient Pool allowance.",
-                        )?;
-                        if repay_all {
-                            require(
-                                debt <= qty && allowance <= qty,
-                                "REPAY_MAXIMUM",
-                                "Repay all debt/allowance exceeds explicit max_amount.",
-                            )?;
-                        }
-                        intent.debits.push(ResourceAmount {
-                            resource: resource.clone(),
-                            amount: amount(&principal_asset, qty),
-                        });
-                        intent.expected.push(EffectConstraint::Debit {
-                            resource: resource.clone(),
-                            asset: principal_asset.clone(),
-                            maximum_debit: quantity(qty),
-                        });
-                        intent.expected.push(EffectConstraint::Debt {
-                            resource: resource.clone(),
-                            debt: debt_position.clone(),
-                            asset: principal_asset.clone(),
-                            direction: Direction::Decrease,
-                            maximum_change: quantity(qty),
-                        });
-                        Bytes::new()
-                    }
-                    "aave.withdraw" => {
-                        let claim = u256(&user.supplied)?;
-                        require(
-                            if withdraw_all {
-                                claim > U256::ZERO
-                                    && claim <= qty
-                                    && claim <= u256(&reserve.liquidity)?
-                            } else {
-                                qty <= claim && qty <= u256(&reserve.liquidity)?
-                            },
-                            "WITHDRAW_LIMIT",
-                            "Withdrawal must fit its exact claim, finite cap and available liquidity.",
-                        )?;
-                        let minimum = if withdraw_all {
-                            original
-                                .and_then(|old| old.minimum_output.as_ref())
-                                .map(u256)
-                                .transpose()?
-                                .unwrap_or(claim)
-                        } else {
-                            qty
-                        };
-                        require(
-                            claim >= minimum,
-                            "WITHDRAW_MINIMUM",
-                            "Current claim decreased below the frozen return minimum.",
-                        )?;
-                        b.minimum_output = if withdraw_all {
-                            Some(quantity(minimum))
-                        } else {
-                            None
-                        };
-                        if user.collateral_enabled {
-                            state
-                                .aave_removal_risk(
-                                    owner,
-                                    &token,
-                                    Some(if withdraw_all { claim } else { qty }),
-                                    r.min_health_factor.as_deref(),
-                                )
-                                .await?;
-                        }
-                        let recipient = address(r.recipient.as_deref().expect("schema"))?;
-                        require(
-                            recipient != Address::ZERO,
-                            "ZERO_ADDRESS",
-                            "Withdraw recipient must be nonzero.",
-                        )?;
-                        require(
-                            recipient == owner,
-                            "AAVE_MCP_RECIPIENT_UNSUPPORTED",
-                            "The official Aave MCP withdrawal action targets the signing wallet; choose that wallet as recipient.",
-                        )?;
-                        b.recipient = Some(lower_address(recipient));
-                        intent.expected.push(EffectConstraint::Position {
-                            resource: resource.clone(),
-                            position: supply_position.clone(),
-                            asset: principal_asset.clone(),
-                            direction: Direction::Decrease,
-                            maximum_change: quantity(if withdraw_all {
-                                qty
-                            } else {
-                                add(
-                                    qty,
-                                    (u256(&reserve.normalized_income)? + pow10(27)?
-                                        - U256::from(1))
-                                        / pow10(27)?
-                                        + U256::from(2),
-                                )?
-                            }),
-                        });
-                        intent.expected.push(EffectConstraint::Credit {
-                            to: super::resource(state.config.chain_id, recipient),
-                            asset: principal_asset.clone(),
-                            minimum_credit: quantity(minimum),
-                        });
-                        Bytes::new()
-                    }
-                    "aave.collateral" => {
-                        require(
-                            !user.supplied.is_zero(),
-                            "NO_SUPPLIED_POSITION",
-                            "Collateral toggles require an existing supplied position.",
-                        )?;
-                        let enabled = r.enabled.expect("schema");
-                        require(
-                            !enabled || (reserve.collateral_eligible && !reserve.ltv.is_zero()),
-                            "COLLATERAL_UNAVAILABLE",
-                            "Reserve is ineligible for collateral use.",
-                        )?;
-                        if !enabled && user.collateral_enabled {
-                            state
-                                .aave_removal_risk(
-                                    owner,
-                                    &token,
-                                    None,
-                                    r.min_health_factor.as_deref(),
-                                )
-                                .await?;
-                        }
-                        b.enabled = Some(enabled);
-                        intent.expected.push(EffectConstraint::Authority {
-                            resource: resource.clone(),
-                            authority: collateral(&state.aave()?.pool, &token.reference),
-                            before: user.collateral_enabled.to_string(),
-                            after: enabled.to_string(),
-                        });
-                        Bytes::new()
-                    }
-                    _ => return Err(GoFinError::validation("Unsupported write.")),
-                }
-            }
+            _ => return Err(GoFinError::validation("Unsupported write.")),
         };
-        if operation.starts_with("aave.") {
-            use crate::aave_mcp::{
-                AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields,
-            };
-            let action = match operation {
-                "aave.supply" => AaveMcpAction::Supply,
-                "aave.borrow" => AaveMcpAction::Borrow,
-                "aave.repay" => AaveMcpAction::Repay,
-                "aave.withdraw" => AaveMcpAction::Withdraw,
-                "aave.collateral" => AaveMcpAction::Collateral,
-                _ => unreachable!("registered Aave write"),
-            };
-            let amount = if action == AaveMcpAction::Collateral {
-                None
-            } else if repay_all || withdraw_all {
-                Some(AaveMcpAmount::Max { cap: qty })
-            } else {
-                Some(AaveMcpAmount::Exact(qty))
-            };
-            let mcp_intent = AaveMcpIntent {
-                chain_id: self.config.chain_id,
-                pool: address(&self.aave()?.pool)?,
-                owner,
-                token: address(&token.reference)?,
-                action,
-                amount,
-                recipient: b.recipient.as_deref().map(address).transpose()?,
-                enabled: b.enabled,
-                decimals: token.decimals,
-            };
-            calldata = if let Some(old) = original {
-                // Revalidation keeps the exact approved bytes and never asks
-                // the MCP for a replacement action.
-                rpc_bytes(&json!(old.transaction.calldata))?
-            } else {
-                self.aave_mcp
-                    .prepare(&mcp_intent)
-                    .await
-                    .map_err(|e| error("AAVE_MCP_REJECTED", "preview", &e.to_string()))?
-                    .calldata
-            };
-            validate_transaction_fields(
-                &mcp_intent,
-                self.config.chain_id,
-                to,
-                owner,
-                value,
-                &calldata,
-            )
-            .map_err(|e| error("AAVE_CALLDATA_INVALID", "preview", &e.to_string()))?;
-            let captured_current = if let Some(expected) = &capture_proxy {
-                let current = self.aave_proxy_identity().await?;
-                require(
-                    &current == expected,
-                    "AAVE_IMPLEMENTATION_CHANGED",
-                    "Pool implementation changed during borrow preparation.",
-                )?;
-                Some(current)
-            } else {
-                None
-            };
-            if let Some(old) = original {
-                let identity = old.aave_proxy_identity.as_ref().ok_or_else(|| {
-                    error(
-                        "AAVE_PREVIEW_REFRESH_REQUIRED",
-                        "revalidation",
-                        "This legacy Aave preview did not bind the selected Pool proxy and implementation. Create a fresh preview before execution.",
-                    )
-                })?;
-                let current = match captured_current {
-                    Some(current) => current,
-                    None => self.aave_proxy_identity().await?,
-                };
-                require(
-                    &current == identity,
-                    "AAVE_IMPLEMENTATION_CHANGED",
-                    "The selected Pool proxy or implementation changed after preview; create a fresh preview.",
-                )?;
-                b.aave_proxy_identity = Some(identity.clone());
-            } else {
-                b.aave_proxy_identity = Some(match captured_current {
-                    Some(current) => current,
-                    None => self.aave_proxy_identity().await?,
-                });
-            }
-            warnings.push("The official Aave MCP supplies candidate unsigned transaction data; GoFin validates the selected Pool call locally before approval and signing.".into());
-        }
         if matches!(
             operation,
             "wallet.unwrap"
@@ -1538,28 +985,11 @@ impl EthereumAdapter {
                 | "ramses.swap"
                 | "sushi.swap"
                 | "pancakeswap.swap"
-                | "aave.supply"
-                | "aave.repay"
         ) {
             require(
-                state.balance_of(&token, owner, None).await? >= qty,
+                self.balance_of(&token, owner, None).await? >= qty,
                 "INSUFFICIENT_BALANCE",
                 "Exact reserved principal exceeds spendable holdings.",
-            )?;
-        }
-        if let Some((_, block, header)) = &capture {
-            let after = self
-                .runtime
-                .rpc
-                .request(
-                    "eth_getBlockByNumber",
-                    json!([gofin_evm::block_tag(Some(*block)), false]),
-                )
-                .await?;
-            require(
-                gofin_evm::rpc_u64(&after["number"])? == *block && after["hash"] == header["hash"],
-                "AAVE_READ_CHANGED",
-                "Preparation block became noncanonical.",
             )?;
         }
         let maximum_fee = exact(r.max_fee_eth.as_deref().expect("schema"), 18)?;
@@ -1622,39 +1052,6 @@ impl EthereumAdapter {
                 accepted,
                 "ERC20_RETURN_FALSE",
                 "Token simulation returned false.",
-            )?;
-        }
-        if operation == "aave.repay" {
-            let paid = Pool::repayCall::abi_decode_returns(&simulation).map_err(|_| {
-                error(
-                    "SIMULATION_RETURN_INVALID",
-                    "preview",
-                    "Repay simulation lacks exact underlying amount.",
-                )
-            })?;
-            require(
-                paid > U256::ZERO && paid <= qty,
-                "REPAY_SIMULATION_LIMIT",
-                "Simulated repayment exceeds the approved finite debit or clears no debt.",
-            )?;
-        }
-        if operation == "aave.withdraw" {
-            let received = Pool::withdrawCall::abi_decode_returns(&simulation).map_err(|_| {
-                error(
-                    "SIMULATION_RETURN_INVALID",
-                    "preview",
-                    "Withdraw simulation lacks exact underlying amount.",
-                )
-            })?;
-            require(
-                if withdraw_all {
-                    received <= qty
-                        && received >= u256(b.minimum_output.as_ref().expect("minimum"))?
-                } else {
-                    received == qty
-                },
-                "WITHDRAW_SIMULATION_LIMIT",
-                "Simulated withdrawal differs from requested exact cash amount.",
             )?;
         }
         if matches!(
@@ -1763,161 +1160,6 @@ impl EthereumAdapter {
                 "Financial binding changed since approval.",
             )?;
         }
-        if operation.starts_with("aave.") {
-            let supply_pos = position(&self.aave()?.pool, &token.reference, "supply");
-            let debt_pos = position(&self.aave()?.pool, &token.reference, "variable-debt");
-            let cash = AccountingLocation::Cash {
-                resource: resource.clone(),
-            };
-            let supply = AccountingLocation::Position {
-                resource: resource.clone(),
-                position: supply_pos.clone(),
-                position_kind: PositionKind::Supply,
-            };
-            let debt = AccountingLocation::Position {
-                resource: resource.clone(),
-                position: debt_pos.clone(),
-                position_kind: PositionKind::VariableDebt,
-            };
-            let index: Quantity = serde_json::from_value(
-                b.supply_anchor.as_ref().expect("anchor").evidence["normalized_index"].clone(),
-            )
-            .map_err(|_| GoFinError::validation("Invalid trusted index."))?;
-            let quantum = aave::math::supply_rounding_limit(u256(&index)?)?;
-            let ceiling = add(qty, quantum)?;
-            if matches!(operation, "aave.supply" | "aave.withdraw") {
-                // A complete withdrawal's observed claim, including yield,
-                // must fit its finite max_amount. Partial withdrawals keep
-                // their prior claim-plus-request envelope.
-                let maximum_change = if operation == "aave.withdraw" && withdraw_all {
-                    qty
-                } else {
-                    add(qty, u256(b.supplied_before.as_ref().expect("claim"))?)?
-                };
-                intent.expected.push(EffectConstraint::Accrual {
-                    resource: resource.clone(),
-                    position: supply_pos.clone(),
-                    asset: principal_asset.clone(),
-                    position_kind: PositionKind::Supply,
-                    maximum_change: quantity(maximum_change),
-                });
-                let before = b.collateral_before.expect("collateral").to_string();
-                intent.expected.push(EffectConstraint::AuthorityTransition {
-                    resource: resource.clone(),
-                    authority: collateral(&self.aave()?.pool, &token.reference),
-                    before: before.clone(),
-                    allowed_after: vec![
-                        before,
-                        if operation == "aave.supply" {
-                            "true".into()
-                        } else {
-                            "false".into()
-                        },
-                    ]
-                    .into_iter()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                });
-            }
-            if matches!(operation, "aave.borrow" | "aave.repay") {
-                // For repay-all the complete paid debt, including accrued
-                // interest, must fit this fresh preview's finite max_amount.
-                // Partial repayment keeps its distinct debt-plus-installment
-                // envelope.
-                let finite_full_close = operation == "aave.repay" && repay_all;
-                let maximum_change = if finite_full_close {
-                    qty
-                } else {
-                    add(qty, u256(b.debt_before.as_ref().expect("claim"))?)?
-                };
-                intent.expected.push(EffectConstraint::Accrual {
-                    resource: resource.clone(),
-                    position: debt_pos.clone(),
-                    asset: principal_asset.clone(),
-                    position_kind: PositionKind::VariableDebt,
-                    maximum_change: quantity(maximum_change),
-                });
-            }
-            match operation {
-                "aave.supply" => {
-                    intent.expected.push(EffectConstraint::OriginMovement {
-                        from: cash,
-                        to: supply,
-                        debit_asset: principal_asset.clone(),
-                        credit_asset: principal_asset.clone(),
-                        maximum_debit: quantity(qty),
-                        minimum_credit: quantity(qty.saturating_sub(quantum).max(U256::from(1))),
-                    });
-                    intent.maximum_costs.push(CostBound {
-                        location: AccountingLocation::Cash {
-                            resource: resource.clone(),
-                        },
-                        amount: amount(&principal_asset, quantum),
-                        treatment: CostTreatment::IncludedInDebit,
-                    });
-                }
-                "aave.borrow" => intent.expected.push(EffectConstraint::OriginMovement {
-                    from: debt,
-                    to: cash,
-                    debit_asset: principal_asset.clone(),
-                    credit_asset: principal_asset.clone(),
-                    maximum_debit: quantity(qty),
-                    minimum_credit: quantity(qty),
-                }),
-                "aave.repay" => {
-                    intent.expected.push(EffectConstraint::OriginMovement {
-                        from: cash,
-                        to: debt,
-                        debit_asset: principal_asset.clone(),
-                        credit_asset: principal_asset.clone(),
-                        maximum_debit: quantity(qty),
-                        minimum_credit: Quantity::from_u64(1),
-                    });
-                    intent.maximum_costs.push(CostBound {
-                        location: AccountingLocation::Cash {
-                            resource: resource.clone(),
-                        },
-                        amount: amount(&principal_asset, qty),
-                        treatment: CostTreatment::IncludedInDebit,
-                    });
-                }
-                "aave.withdraw" => {
-                    for e in &mut intent.expected {
-                        if let EffectConstraint::Position { maximum_change, .. } = e {
-                            *maximum_change = quantity(if withdraw_all { qty } else { ceiling });
-                        }
-                    }
-                    intent.expected.push(EffectConstraint::OriginMovement {
-                        from: supply,
-                        to: AccountingLocation::Cash {
-                            resource: super::resource(
-                                self.config.chain_id,
-                                address(b.recipient.as_deref().expect("recipient"))?,
-                            ),
-                        },
-                        debit_asset: principal_asset.clone(),
-                        credit_asset: principal_asset.clone(),
-                        maximum_debit: quantity(if withdraw_all { qty } else { ceiling }),
-                        minimum_credit: if withdraw_all {
-                            b.minimum_output.clone().expect("minimum")
-                        } else {
-                            quantity(qty)
-                        },
-                    });
-                    intent.maximum_costs.push(CostBound {
-                        location: AccountingLocation::Position {
-                            resource: resource.clone(),
-                            position: supply_pos.clone(),
-                            position_kind: PositionKind::Supply,
-                        },
-                        amount: amount(&principal_asset, quantum),
-                        treatment: CostTreatment::IncludedInDebit,
-                    });
-                }
-                _ => {}
-            }
-        }
         let gas = b.transaction.maximum_cost()?;
         intent.maximum_costs.push(CostBound {
             location: AccountingLocation::Cash {
@@ -1933,11 +1175,7 @@ impl EthereumAdapter {
             ),
             treatment: CostTreatment::AdditionalDebit,
         });
-        let mut movement = if operation == "aave.collateral" {
-            b.supplied_before.clone().unwrap_or_default()
-        } else {
-            quantity(qty)
-        };
+        let mut movement = quantity(qty);
         let mut valuation_asset = principal_asset.clone();
         if operation == "wallet.approve"
             && let Some((underlying, claim)) = self
@@ -2009,17 +1247,7 @@ impl EthereumAdapter {
                 .expect("principal row")
                 .source
                 .clone();
-            let additional_allocation = if operation == "aave.borrow" {
-                usd_from_row(
-                    &principal_asset,
-                    quantity(add(
-                        qty,
-                        u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
-                    )?),
-                )?
-            } else {
-                Quantity::zero()
-            };
+            let additional_allocation = Quantity::zero();
             let valuation_observed = price_observations
                 .into_iter()
                 .min_by_key(|timestamp| {
@@ -2202,55 +1430,6 @@ impl EthereumAdapter {
                 r.max_price_impact_bps.unwrap_or(10_000),
                 b.deadline.expect("swap deadline"),
                 quantity(gas).to_decimal(18),
-            )
-        } else if operation.starts_with("aave.") {
-            let quantity = quantity(qty).to_decimal(token.decimals);
-            let label = super::amm_permissions::safe_display_label(Some(&token.symbol));
-            let recipient = if operation == "aave.withdraw" {
-                format!("; recipient {}", r.recipient.as_deref().unwrap_or(""))
-            } else {
-                String::new()
-            };
-            let risk = r
-                .min_health_factor
-                .as_deref()
-                .map(|hf| format!("; minimum health factor {hf}"))
-                .unwrap_or_default();
-            let debt_limit = r
-                .max_debt_usd
-                .as_deref()
-                .map(|v| format!("; maximum outstanding debt ${v}"))
-                .unwrap_or_default();
-            let ratio = r
-                .max_debt_to_collateral_bps
-                .map(|v| format!("; maximum debt/collateral {v} bps"))
-                .unwrap_or_default();
-            let action = if operation == "aave.collateral" {
-                format!(
-                    "{} {} collateral",
-                    if r.enabled == Some(true) {
-                        "Enable"
-                    } else {
-                        "Disable"
-                    },
-                    label
-                )
-            } else {
-                format!(
-                    "{} {} {}",
-                    operation.strip_prefix("aave.").unwrap_or(operation),
-                    if all_amount {
-                        format!("all, capped at {quantity}")
-                    } else {
-                        quantity
-                    },
-                    label
-                )
-            };
-            format!(
-                "{action} on Aave V3, chain {}; maximum fee {} ETH{recipient}{risk}{debt_limit}{ratio}. Supplied assets and borrowed debt remain separate from wallet cash.",
-                self.config.chain_id,
-                r.max_fee_eth.as_deref().unwrap_or("")
             )
         } else {
             format!(

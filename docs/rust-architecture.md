@@ -456,7 +456,7 @@ existing provider/revision checks, with the Pool implementation identity bound
 through preview and final revalidation. Historical reconciliation retains the
 original submission and evidence.
 
-Supply and borrow preparation, including each revalidation, create separate
+Aave write preparation, including each revalidation, creates separate
 canonical block snapshots for financial observations. Exact identical reads at
 that block share a capture-local cache; required older anchor evidence remains
 at its original block. An uncached header check rejects a changed block before
@@ -472,122 +472,92 @@ reserve list is not an ID mapping after reserve drops. Direct reserve identity
 and provider observations must agree with these flags. Missing, duplicate or mismatched
 mappings fail closed, while a flag with zero balance remains a valid observed
 state. The selected debt asset is independently verified even when unflagged.
-Eligibility and health projection share the resulting observations at the same
-block, retaining stable/variable debt, eMode, isolation, siloed borrowing and
-market-wide health/debt constraints. Inactive market reserves do not add borrow
-reads. Other risk paths retain their existing observation behavior.
+Borrow eligibility and removal health projection share typed observations at
+the same block, retaining stable/variable debt, eMode, isolation, siloed borrowing
+and market-wide health/debt constraints. Exposure collection uses active reserve
+IDs rather than scanning unrelated market reserves.
 
 Official MCP results remain informational discovery/planning evidence, never the
 completeness source for borrow authorization. MCP transaction data remains a
 locally validated candidate; it does not replace exact on-chain checks or frozen
 transaction simulation.
 
-### Proposed shared operation lifecycle
+### Aave operation lifecycle
 
-This is the next design direction, not an interface implemented by this change.
-The current supply/borrow optimization retains the existing `Adapter` contract;
-its helpers still mix evidence acquisition and financial evaluation. Complete and
-verify that bounded optimization before migrating adapters to the phases below.
+Aave writes, native reads and the dynamic informational MCP read family use the
+shared typed operation lifecycle. The engine and router hooks are additive;
+other adapters retain their existing lifecycle. There is one adapter instance
+with an `OperationLifecycle<Op>` implementation per Aave operation marker, rather
+than a new adapter or orchestration loop for each intent. Supply, borrow, repay,
+withdraw and collateral changes have operation-bound input, evidence, candidate
+and validated types, while sharing transport, market configuration and reviewed
+accounting kernels. Exact/all modes remain within their owning operation.
 
-Keep one adapter instance for a protocol/network and implement a shared generic
-trait once per operation marker. Associated types give each implementation its
-own input, evidence, candidate, refreshed evidence, validated execution and
-observation types. For example, the same Aave adapter implements
-`OperationLifecycle<Supply>`, `OperationLifecycle<Borrow>` and
-`OperationLifecycle<Repay>` while sharing market configuration and transport.
-Exact/all amount modes belong to the relevant operation's typed input; they do
-not require another adapter. An intent describes approved financial bounds; it
-does not select a separate adapter instance or own another execution loop.
-
-The broker's existing engine orchestrates the lifecycle. Application adapters own
-the evidence and protocol rules; shared domain contracts remain independent of
-Alloy and application implementations. An illustrative contract is:
-
-```rust
-trait OperationLifecycle<Op> {
-    type Input;
-    type Evidence;
-    type Candidate;
-    type FinalEvidence;
-    type Prepared;
-    type FreshEvidence;
-    type Validated;
-    type ExecutionRef;
-    type Observation;
-    type Output;
-
-    async fn collect(&self, input: &Self::Input) -> Result<Self::Evidence>;
-    fn evaluate(input: &Self::Input, evidence: &Self::Evidence)
-        -> Result<Self::Candidate>;
-    async fn collect_final(&self, input: &Self::Input, candidate: &Self::Candidate)
-        -> Result<Self::FinalEvidence>;
-    fn finalize_candidate(input: &Self::Input, candidate: &Self::Candidate,
-        evidence: &Self::FinalEvidence) -> Result<Self::Prepared>;
-    async fn refresh(&self, prepared: &Self::Prepared)
-        -> Result<Self::FreshEvidence>;
-    fn revalidate(prepared: &Self::Prepared, fresh: &Self::FreshEvidence)
-        -> Result<Self::Validated>;
-    async fn execute(&self, validated: &Self::Validated,
-        admission: &DurableAdmission) -> Result<Self::ExecutionRef>;
-    async fn observe(&self, original: &DurableOperation)
-        -> Result<Self::Observation>;
-    fn evaluate_observation(original: &DurableOperation,
-        evidence: &Self::Observation) -> Result<ObservationResult<Self::Output>>;
-}
-```
-
-Names and supporting types above are illustrative. The implementation must
-provide a registry bridge for heterogeneous operations without erasing concrete
-evidence into an untyped JSON bag. The phase responsibilities are:
+The [shared contract](../crates/gofin-domain/src/operation_lifecycle.rs) owns the
+phase interface and an object-safe session bridge. Concrete evidence stays typed
+inside the adapter; it is not erased into JSON or persisted as an executable
+capability. The engine explicitly drives the following methods:
 
 | Phase | Adapter responsibility | Engine responsibility |
 | --- | --- | --- |
-| Collect | Acquire typed, attributed facts efficiently, including evidence of completeness. | Select the operation and supply input/context. |
-| Evaluate | Interpret only supplied facts and produce a candidate with exact or bounded native terms. | Validate accounting and present the resulting approval request. |
-| Authorize | Supply protocol-specific terms through the candidate. | Obtain or reuse valid authority; the adapter cannot grant it. |
-| Refresh and revalidate | Acquire facts that must be fresh and check the approved candidate against them. | Run post-approval freshness and the separate locked-admission check; independently enforce authority. |
-| Execute | Dispatch the validated immutable request through the runtime. | Persist submission identity and reservations before dispatch, using the existing journal admission path. |
-| Observe and evaluate observation | Acquire receipt/status and financial proof facts; interpret pending, failed or settled outcomes. | Reconcile the original submission and atomically settle verified effects. |
+| `collect` → `evaluate` | Acquire typed, attributed facts efficiently, including completeness evidence; synchronously interpret them to produce a candidate. | Select the operation and supply broker-owned context. |
+| `collect_final` → `finalize_candidate` | Acquire candidate-dependent transaction/simulation/price facts and purely finalize native financial terms. | Validate accounting and present the completed approval request. |
+| Authorize | Supply protocol-specific terms through the prepared candidate. | Obtain or reuse valid authority; an adapter cannot grant it. |
+| `refresh` → `revalidate` → `confirm` → `finalize_validation` | Recollect necessary exact facts, purely recheck financial limits, collect exact frozen-transaction confirmation facts, and finalize validation. | Run this path after approval and separately under the resource lock; preserve approved deadlines/spelling and independently enforce authority. |
+| `execute` | Dispatch the immutable validated request through the runtime and journal handoff. | Persist submission identity and reservations before dispatch; bind the complete validated candidate, not only its calldata. |
+| `observe` → `evaluate_observation` | Acquire receipt/status and typed financial proof facts; synchronously decide pending, failed or settled outcomes. | Reconstruct from durable original input after restart and atomically settle verified effects. |
 
-Evaluation functions are synchronous and have no adapter receiver, transport,
-signer, journal or clock access. Required timestamps are captured data. Merely
-wrapping a completed `PreparedOperation` or `Reconciliation` from an old async
-helper as "evidence" does not establish this boundary: eligibility, health,
-amount, accounting and settlement decisions must actually use the typed facts.
+Evaluation and finalization functions have no adapter receiver, transport,
+signer, journal or clock access. Required timestamps are explicit evidence.
+Eligibility, health, amount, accounting and receipt interpretation use raw typed
+facts. A collector does not call the old preparation/reconciliation path and
+present its completed result as evidence. Legacy public adapter entrypoints run
+the same Aave typed phases, avoiding a second financial decision algorithm.
 
-Collection can have dependency rounds. For example, an Aave borrow first needs
-the verified Pool identity and user bitmap, then reserve identities and exact
-balances for the flagged exposures. Sender-independent calls can be collected
-through verified Multicall at one pinned block. Mandatory subcall failures must
-remain errors; bounded direct fallback must not turn a target revert into a
-zero balance. The current borrow change deduplicates direct RPC reads; it does
-not yet batch Aave evidence through Multicall.
+Collection has dependency rounds. Aave first obtains verified provider and
+reserve identities, then collects dependent receipt, balance, index and risk
+facts. Reviewed sender-independent calls use verified Multicall3 at the pinned
+block. One block-bound collector is reused across rounds and anchors in that
+capture; historical blocks use their own collectors. The exact runtime bytecode
+must match the reviewed artifact. Missing or incompatible Multicall falls back
+to bounded direct reads; mandatory subcall failure or an incomplete result is an
+error, never an observed zero or a reason to hide a target revert. Snapshot
+wrappers preserve the transport's block/hash and freshness requirements, and a
+weaker cached read cannot satisfy stronger requirements.
 
-Some evidence depends on an earlier candidate. For example, after pure borrow
-evaluation chooses an exact amount, a collector can request candidate calldata
-from MCP, prepare gas/nonce information and simulate that exact transaction.
-A subsequent pure finalization checks those facts and freezes the approved
-request. This is what "materialize" would mean; use explicit collection and
-finalization stages instead of hiding those reads inside evaluation. Complete
-non-time-sensitive preparation before approval. Refresh only the evidence whose
-freshness is required, preserving block/market identity, approved bounds and the
-separate admission checks. No capture-local cache crosses approval.
+Some evidence depends on a candidate. After pure borrow evaluation selects an
+exact amount, `collect_final` can obtain unsigned MCP calldata, gas/nonce facts
+and exact transaction simulation. Pure finalization checks those facts and
+freezes the request before approval. Revalidation uses the frozen calldata
+without another MCP builder request. Simulation keeps its original sender and
+live runtime behavior; it is not an aggregate call. No capture-local evidence
+cache crosses approval or a preparation pass.
 
-MCP remains preferred for informational discovery and planning, and for the
-independently validated unsigned candidate already used by Aave writes. Replacing
-an exact RPC fact requires equivalent precision, provenance, freshness and
-coverage; rounded or incomplete MCP output cannot prove exposure completeness
-or authorize financial effects. Native reads need only collection and evaluation;
-the dynamic MCP read namespace remains one catalog-driven informational family.
+MCP remains preferred for informational discovery and planning, and supplies
+independently validated unsigned transaction candidates. Replacing an exact RPC
+fact requires equivalent precision, provenance, freshness and completeness;
+rounded or incomplete MCP output cannot prove exposure or authorize financial
+effects. Native market/reserve/position reads use the read-only portion of the
+lifecycle. The dynamic MCP namespace is one catalog-driven informational family,
+with typed untrusted catalog/result evidence, preserved warnings and coverage,
+and no wallet, signer or financial execution authority.
 
 Observation is repeatable and resumes from the original durable operation after
-a restart. Submission acceptance is not settlement. Observation must distinguish
-canonical inclusion, finality, reversion, reorg and missing or uncertain evidence;
-it cannot authorize, dispatch or replay a write. Compound actions use the same
-child lifecycle under the parent's authority and dependency rules. An observed
-child outcome can make the next stage ready, but only the engine can admit and
-execute that stage. Migration must preserve existing durable identities and
-records rather than requiring a journal reset.
+a restart. The collector supplies receipt identity, actual finalized heights and
+canonical hashes, historical/inclusion anchors and exact post-state facts. Pure
+evaluation checks them against the immutable network and Pool, independently
+decides finality/reorg state, and constructs verified financial effects. The EVM
+runtime supplies data-only finalized nonce-replacement proof facts with a pure
+identity-bound constructor; existing runtime callers retain their compatibility
+facade. Missing or uncertain evidence stays pending. A failed canonical receipt
+settles only actual gas, and submission acceptance is never settlement.
+
+Observation cannot authorize, dispatch or replay a write. Compound actions use
+the same child lifecycle under existing parent authority and dependency rules.
+An observed child outcome can make the next stage ready, but only the engine can
+admit and execute it. Exact native terms, expiry, resolved deadlines and durable
+submission identities remain independently checked. This migration requires no
+journal reset or schema change and preserves existing records and anchors.
 
 Synthetic tests inject MCP transport responses. Owned fork development examples
 use a deterministic builder fixture so current upstream account state cannot be
