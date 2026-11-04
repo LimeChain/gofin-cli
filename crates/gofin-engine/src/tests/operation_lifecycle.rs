@@ -1,6 +1,6 @@
 use super::*;
 use gofin_domain::operation_lifecycle::{
-    CandidateResult, LifecycleSession, OperationLifecycle, TypedSession,
+    AuthorizedOperation, CandidateResult, LifecycleSession, OperationLifecycle, TypedSession,
 };
 
 struct Marker;
@@ -20,33 +20,40 @@ impl OperationLifecycle<Marker> for PhasedAdapter {
     type Input = FixtureInput;
     type Evidence = u64;
     type Candidate = u64;
-    type FinalEvidence = u64;
-    type FinalCandidate = PreparedOperation;
-    type FreshEvidence = u64;
-    type Validated = u64;
-    type Confirmation = u64;
-    type FinalValidated = PreparedOperation;
+    type Prepared = u64;
+    type Simulated = PreparedOperation;
     type ExecutionRef = Submission;
     type Observation = Reconciliation;
     type Output = Value;
     async fn collect(&self, input: &FixtureInput) -> Result<u64> {
         event(input, "collect");
+        if input
+            .trace
+            .lock()
+            .unwrap()
+            .contains(&"financial_context_changed")
+        {
+            return Err(GoFinError::validation(
+                "Financial bounds would no longer pass",
+            ));
+        }
         Ok(3)
     }
     fn evaluate(input: &FixtureInput, evidence: &u64) -> Result<u64> {
         event(input, "evaluate");
         Ok(evidence + 1)
     }
-    async fn collect_final(&self, input: &FixtureInput, candidate: &u64) -> Result<u64> {
-        event(input, "collect_final");
+    async fn prepare(&self, input: &FixtureInput, candidate: &u64) -> Result<u64> {
+        event(input, "prepare");
         Ok(candidate + 1)
     }
-    fn finalize_candidate(
+    async fn simulate(
+        &self,
         input: &FixtureInput,
         candidate: &u64,
         evidence: &u64,
     ) -> Result<PreparedOperation> {
-        event(input, "finalize_candidate");
+        event(input, "simulate");
         assert_eq!((*candidate, *evidence), (4, 5));
         Ok(input.prepared.clone())
     }
@@ -56,57 +63,13 @@ impl OperationLifecycle<Marker> for PhasedAdapter {
     fn output_value(value: Value) -> Result<Value> {
         Ok(value)
     }
-    async fn refresh(&self, input: &FixtureInput, _: &PreparedOperation) -> Result<u64> {
-        event(input, "refresh");
-        Ok(7)
-    }
-    fn revalidate(input: &FixtureInput, _: &PreparedOperation, evidence: &u64) -> Result<u64> {
-        event(input, "revalidate");
-        Ok(evidence + 1)
-    }
-    async fn confirm(
-        &self,
-        input: &FixtureInput,
-        _: &PreparedOperation,
-        validated: &u64,
-    ) -> Result<u64> {
-        event(input, "confirm");
-        Ok(validated + 1)
-    }
-    fn finalize_validation(
-        input: &FixtureInput,
-        prepared: &PreparedOperation,
-        validated: &u64,
-        confirmation: &u64,
-    ) -> Result<PreparedOperation> {
-        event(input, "finalize_validation");
-        assert_eq!((*validated, *confirmation), (8, 9));
-        let mut result = prepared.clone();
-        match input.prepared.binding["test_metadata_mode"].as_str() {
-            Some("drop_deadline") => result.action_deadline = None,
-            Some("rewrite_spelling") => {
-                let value = result
-                    .binding
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("_fin_fixture")
-                    .unwrap();
-                result.binding["_gofin_fixture"] = value;
-            }
-            _ => {}
-        }
-        Ok(result)
-    }
-    fn validated_prepared(validated: &PreparedOperation) -> Result<PreparedOperation> {
-        Ok(validated.clone())
-    }
     async fn execute(
         &self,
-        _: &PreparedOperation,
-        handoff: &gofin_domain::RevalidatedOperation,
+        _: &FixtureInput,
+        handoff: &AuthorizedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
-        handoff.assert_fresh()?;
+        handoff.assert_authorized()?;
         journal.assert_candidate(handoff.prepared())?;
         journal.assert_authorized()?;
         let submission = Submission {
@@ -199,8 +162,20 @@ impl Adapter for PhasedAdapter {
     }
 }
 
+struct ContextChangingAuthorizer {
+    trace: Arc<Mutex<Vec<&'static str>>>,
+}
+#[async_trait]
+impl Authorizer for ContextChangingAuthorizer {
+    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        let audit = SyntheticAuthorizer.authorize(challenge).await?;
+        self.trace.lock().unwrap().push("financial_context_changed");
+        Ok(audit)
+    }
+}
+
 #[tokio::test]
-async fn phased_write_refreshes_after_lock_and_reconciles_original_without_replay() {
+async fn phased_write_checks_execution_after_lock_without_repeating_financial_evaluation() {
     let mut prepared = SyntheticAdapter::new()
         .prepare("synthetic.transfer", &json!({}))
         .await
@@ -222,7 +197,9 @@ async fn phased_write_refreshes_after_lock_and_reconciles_original_without_repla
         Engine::new_with_shared_store(
             store.clone(),
             vec![adapter.clone()],
-            Arc::new(SyntheticAuthorizer),
+            Arc::new(ContextChangingAuthorizer {
+                trace: trace.clone(),
+            }),
             EngineOptions::default(),
         )
         .unwrap(),
@@ -244,7 +221,7 @@ async fn phased_write_refreshes_after_lock_and_reconciles_original_without_repla
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|e| **e == "refresh")
+                .filter(|e| **e == "simulate")
                 .count()
                 == 1
             {
@@ -261,10 +238,14 @@ async fn phased_write_refreshes_after_lock_and_reconciles_original_without_repla
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| **e == "refresh")
+            .filter(|e| **e == "simulate")
             .count(),
         1,
-        "admission refresh must wait for the resource lock"
+        "only the preapproval simulation may run before the resource lock"
+    );
+    assert!(
+        !trace.lock().unwrap().contains(&"write"),
+        "execution must wait for the submission lock"
     );
     drop(guard);
     let first = pending.await.unwrap().unwrap();
@@ -296,10 +277,13 @@ async fn phased_write_refreshes_after_lock_and_reconciles_original_without_repla
     );
     assert_eq!(
         &events[..4],
-        &["collect", "evaluate", "collect_final", "finalize_candidate"]
+        &["collect", "evaluate", "prepare", "simulate"]
     );
-    assert_eq!(events.iter().filter(|e| **e == "refresh").count(), 2);
+    assert_eq!(events.iter().filter(|e| **e == "simulate").count(), 1);
+    assert_eq!(events.iter().filter(|e| **e == "collect").count(), 1);
+    assert_eq!(events.iter().filter(|e| **e == "evaluate").count(), 1);
     assert_eq!(events.iter().filter(|e| **e == "write").count(), 1);
+    assert!(events.contains(&"financial_context_changed"));
     assert!(
         events
             .windows(2)
@@ -318,12 +302,8 @@ impl OperationLifecycle<ReadMarker> for PhasedAdapter {
     type Input = FixtureInput;
     type Evidence = u64;
     type Candidate = u64;
-    type FinalEvidence = ();
-    type FinalCandidate = u64;
-    type FreshEvidence = ();
-    type Validated = ();
-    type Confirmation = ();
-    type FinalValidated = ();
+    type Prepared = ();
+    type Simulated = u64;
     type ExecutionRef = ();
     type Observation = ();
     type Output = Value;
@@ -335,12 +315,12 @@ impl OperationLifecycle<ReadMarker> for PhasedAdapter {
         event(input, "read_evaluate");
         Ok(evidence * 2)
     }
-    async fn collect_final(&self, input: &FixtureInput, _: &u64) -> Result<()> {
-        event(input, "read_collect_final");
+    async fn prepare(&self, input: &FixtureInput, _: &u64) -> Result<()> {
+        event(input, "read_prepare");
         Ok(())
     }
-    fn finalize_candidate(input: &FixtureInput, candidate: &u64, _: &()) -> Result<u64> {
-        event(input, "read_finalize");
+    async fn simulate(&self, input: &FixtureInput, candidate: &u64, _: &()) -> Result<u64> {
+        event(input, "read_simulate");
         Ok(*candidate)
     }
     fn candidate_result(candidate: &u64) -> Result<CandidateResult<Value>> {
@@ -349,25 +329,10 @@ impl OperationLifecycle<ReadMarker> for PhasedAdapter {
     fn output_value(output: Value) -> Result<Value> {
         Ok(output)
     }
-    async fn refresh(&self, _: &FixtureInput, _: &PreparedOperation) -> Result<()> {
-        Err(GoFinError::validation("read only"))
-    }
-    fn revalidate(_: &FixtureInput, _: &PreparedOperation, _: &()) -> Result<()> {
-        Err(GoFinError::validation("read only"))
-    }
-    async fn confirm(&self, _: &FixtureInput, _: &PreparedOperation, _: &()) -> Result<()> {
-        Err(GoFinError::validation("read only"))
-    }
-    fn finalize_validation(_: &FixtureInput, _: &PreparedOperation, _: &(), _: &()) -> Result<()> {
-        Err(GoFinError::validation("read only"))
-    }
-    fn validated_prepared(_: &()) -> Result<PreparedOperation> {
-        Err(GoFinError::validation("read only"))
-    }
     async fn execute(
         &self,
-        _: &(),
-        _: &gofin_domain::RevalidatedOperation,
+        _: &FixtureInput,
+        _: &AuthorizedOperation,
         _: Arc<dyn SubmissionJournal>,
     ) -> Result<()> {
         Err(GoFinError::validation("read only"))
@@ -416,24 +381,53 @@ async fn phased_read_uses_own_generic_implementation_without_write() {
         [
             "read_collect",
             "read_evaluate",
-            "read_collect_final",
-            "read_finalize"
+            "read_prepare",
+            "read_simulate"
         ]
     );
 }
 
-struct NeverJournal;
-impl SubmissionJournal for NeverJournal {
+struct ExactJournal {
+    prepared: PreparedOperation,
+    fail_persist: bool,
+}
+impl SubmissionJournal for ExactJournal {
     fn assert_authorized(&self) -> Result<()> {
-        panic!("mismatched lifecycle must not reach authorization or dispatch")
+        Ok(())
+    }
+    fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
+        if prepared != &self.prepared {
+            return Err(GoFinError::validation("Unapproved candidate"));
+        }
+        Ok(())
     }
     fn persist_submission(&self, _: &Submission) -> Result<()> {
-        panic!("mismatched lifecycle must not persist")
+        if self.fail_persist {
+            Err(GoFinError::validation("Journal unavailable"))
+        } else {
+            Ok(())
+        }
     }
 }
 
 #[tokio::test]
-async fn session_rejects_changed_intent_with_unchanged_execution_binding() {
+async fn authorization_capability_rejects_changed_intent_with_unchanged_execution_binding() {
+    let prepared = SyntheticAdapter::new()
+        .prepare("synthetic.transfer", &json!({}))
+        .await
+        .unwrap();
+    let mut changed = prepared.clone();
+    changed.intent.locks.push(resource("unapproved-change"));
+    assert_eq!(changed.binding, prepared.binding);
+    let journal = Arc::new(ExactJournal {
+        prepared,
+        fail_persist: false,
+    });
+    assert!(AuthorizedOperation::new(changed, journal).is_err());
+}
+
+#[tokio::test]
+async fn execution_requires_authority_and_cannot_broadcast_after_journal_failure() {
     let prepared = SyntheticAdapter::new()
         .prepare("synthetic.transfer", &json!({}))
         .await
@@ -449,78 +443,181 @@ async fn session_rejects_changed_intent_with_unchanged_execution_binding() {
         &adapter,
         FixtureInput {
             prepared: prepared.clone(),
-            trace,
+            trace: trace.clone(),
         },
     );
-    session.refresh(&prepared).await.unwrap();
-    session.revalidate(&prepared).unwrap();
-    session.confirm(&prepared).await.unwrap();
-    assert_eq!(session.finalize_validation(&prepared).unwrap(), prepared);
-    let mut changed = prepared.clone();
-    changed.intent.locks.push(resource("unapproved-change"));
-    assert_eq!(changed.binding, prepared.binding);
-    let handoff = gofin_domain::RevalidatedOperation::after_revalidation(
-        changed,
-        Arc::new(gofin_domain::clock::SystemClock),
-    )
-    .unwrap();
     assert!(
-        session
-            .execute(&handoff, Arc::new(NeverJournal))
-            .await
-            .is_err()
+        session.execute().await.is_err(),
+        "unapproved execution is impossible"
     );
-    let original = gofin_domain::RevalidatedOperation::after_revalidation(
-        prepared,
-        Arc::new(gofin_domain::clock::SystemClock),
-    )
-    .unwrap();
+    let journal = Arc::new(ExactJournal {
+        prepared: prepared.clone(),
+        fail_persist: true,
+    });
+    session
+        .authorize(AuthorizedOperation::new(prepared, journal).unwrap())
+        .unwrap();
+    assert!(session.execute().await.is_err());
     assert!(
-        session
-            .execute(&original, Arc::new(NeverJournal))
-            .await
-            .is_err(),
-        "a failed handoff cannot reuse the consumed validation"
+        !trace.lock().unwrap().contains(&"write"),
+        "failed durable admission must prevent broadcast"
+    );
+    assert!(
+        session.execute().await.is_err(),
+        "execution consumes the authorized candidate even on failure"
     );
 }
 
 #[tokio::test]
-async fn session_preserves_resolved_deadline_and_historical_spelling_before_handoff() {
-    for mode in ["preserve", "drop_deadline", "rewrite_spelling"] {
-        let mut prepared = SyntheticAdapter::new()
-            .prepare("synthetic.transfer", &json!({}))
-            .await
-            .unwrap();
-        prepared.action_deadline = Some(gofin_domain::plan_timing::ResolvedActionDeadline {
-            field: "deadline".into(),
-            window_seconds: 300,
-            resolved_at: now(),
-            deadline_unix_seconds: (Utc::now().timestamp() + 300) as u64,
-        });
-        prepared.binding["_fin_fixture"] = json!({"scope":"approved"});
-        prepared.binding["test_metadata_mode"] = json!(mode);
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        let adapter = PhasedAdapter {
-            input: FixtureInput {
-                prepared: prepared.clone(),
-                trace: trace.clone(),
-            },
-        };
-        let mut session = TypedSession::<_, Marker>::new(
-            &adapter,
-            FixtureInput {
-                prepared: prepared.clone(),
-                trace,
-            },
-        );
-        session.refresh(&prepared).await.unwrap();
-        session.revalidate(&prepared).unwrap();
-        session.confirm(&prepared).await.unwrap();
-        let result = session.finalize_validation(&prepared);
-        if mode == "preserve" {
-            assert_eq!(result.unwrap(), prepared);
+async fn session_consumes_each_preapproval_phase_and_preserves_deadline_and_spelling() {
+    let mut prepared = SyntheticAdapter::new()
+        .prepare("synthetic.transfer", &json!({}))
+        .await
+        .unwrap();
+    prepared.action_deadline = Some(gofin_domain::plan_timing::ResolvedActionDeadline {
+        field: "deadline".into(),
+        window_seconds: 300,
+        resolved_at: now(),
+        deadline_unix_seconds: (Utc::now().timestamp() + 300) as u64,
+    });
+    prepared.binding["_fin_fixture"] = json!({"scope":"approved"});
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let adapter = PhasedAdapter {
+        input: FixtureInput {
+            prepared: prepared.clone(),
+            trace: trace.clone(),
+        },
+    };
+    let mut session = TypedSession::<_, Marker>::new(
+        &adapter,
+        FixtureInput {
+            prepared: prepared.clone(),
+            trace,
+        },
+    );
+    assert!(session.prepare().await.is_err());
+    session.collect().await.unwrap();
+    session.evaluate().unwrap();
+    session.prepare().await.unwrap();
+    match session.simulate().await.unwrap() {
+        CandidateResult::Write(actual) => assert_eq!(*actual, prepared),
+        _ => panic!("write expected"),
+    }
+    assert!(
+        session.simulate().await.is_err(),
+        "prepared phase has been consumed"
+    );
+    let journal = Arc::new(ExactJournal {
+        prepared: prepared.clone(),
+        fail_persist: false,
+    });
+    let authority = AuthorizedOperation::new(prepared.clone(), journal.clone()).unwrap();
+    assert_eq!(authority.prepared(), &prepared);
+    let mut changed = prepared.clone();
+    changed.action_deadline = None;
+    assert!(AuthorizedOperation::new(changed, journal.clone()).is_err());
+    let mut changed = prepared;
+    let value = changed
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove("_fin_fixture")
+        .unwrap();
+    changed.binding["_gofin_fixture"] = value;
+    assert!(AuthorizedOperation::new(changed, journal).is_err());
+}
+
+#[test]
+fn aave_v2_max_amount_drift_settles_actual_effects_and_reports_discrepancy() {
+    // The adapter has already established exact, canonical chain effects. An
+    // exceeded preapproval assessment must not leave that submission pending.
+    let asset = json!({"network":"ethereum:1","reference":"0x0000000000000000000000000000000000000001","decimals":6});
+    for operation in ["aave.repay", "aave.withdraw"] {
+        let expected = if operation == "aave.repay" {
+            json!({"kind":"debit","resource":"wallet","asset":asset,"maximum_debit":"1000"})
         } else {
-            assert!(result.is_err(), "{mode} must fail before handoff");
-        }
+            json!({"kind":"position","resource":"wallet","position":"aave:pool:asset:supply","asset":asset,"direction":"decrease","maximum_change":"1000"})
+        };
+        let effect = if operation == "aave.repay" {
+            json!({"kind":"cash_debit","resource":"wallet","amount":{"asset":asset,"atoms":"1001"}})
+        } else {
+            json!({"kind":"position_change","resource":"wallet","position":"aave:pool:asset:supply","asset":asset,"delta":"-1001","scaled_receipt":null,"anchor":null})
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: "original-transaction".into(),
+            data: json!({}),
+        };
+        let record: OperationRecord = serde_json::from_value(json!({
+            "id":"aave-drift","request_id":"same-logical-action","fingerprint":"f","fingerprint_version":1,
+            "operation":operation,"input":{"amount":"all","max_amount":"0.001"},"status":"pending","created_at":now(),"updated_at":now(),
+            "preview":{"operation":operation,"input":{"amount":"all","max_amount":"0.001"},"binding":{},"summary":"Aave MAX","checks":[],"warnings":[],"observed_at":now(),"expires_at":"2099-01-01T00:00:00Z","operation_version":2,
+                "intent":{"debits":[],"locks":[],"maximum_costs":[],"expected":[expected]}},
+            "approval":null,"submission":submission,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null
+        })).unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .create_request(
+                &record.id,
+                &record.request_id,
+                &record.fingerprint,
+                operation,
+                None,
+                "pending",
+                &to_value(&record).unwrap(),
+                &record.created_at,
+            )
+            .unwrap();
+        store
+            .persist_submission(
+                &record.id,
+                &gofin_store::SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                &now(),
+            )
+            .unwrap();
+        let record: OperationRecord =
+            from_value(store.get_record(&record.id).unwrap().unwrap()).unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut verified = VerifiedEffects {
+            evidence_version: 1,
+            submission,
+            effects: serde_json::from_value(json!([effect])).unwrap(),
+            evidence: json!({"canonical":true,"preapproval_amount_exceeded":true}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = verified_effect_digest(&verified).unwrap();
+        let settled = engine
+            .apply_reconciliation(
+                record,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: verified.evidence.clone(),
+                    verified: Some(verified.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(settled.status, Status::Completed);
+        assert_eq!(settled.effects.as_ref(), Some(&verified));
+        assert_eq!(
+            engine.load_record(&settled.id).unwrap().effects.as_ref(),
+            Some(&verified)
+        );
+        let view = engine.operation_view(&settled).unwrap();
+        assert_eq!(
+            view["outcome"]["attention"]["kind"], "discrepancy",
+            "{operation}"
+        );
+        assert_eq!(view["effects"], to_value(&verified).unwrap());
     }
 }

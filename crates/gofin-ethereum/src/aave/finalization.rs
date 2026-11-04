@@ -40,7 +40,7 @@ fn check_simulation(
         require(
             paid > U256::ZERO && paid <= amount,
             "REPAY_SIMULATION_LIMIT",
-            "Simulated repayment exceeds the approved finite debit or clears no debt.",
+            "Simulated repayment exceeds the requested preapproval debit limit or clears no debt.",
         )?;
     }
     if operation == "aave.withdraw" {
@@ -61,7 +61,7 @@ fn check_simulation(
         require(
             valid,
             "WITHDRAW_SIMULATION_LIMIT",
-            "Simulated withdrawal differs from requested exact cash amount.",
+            "Simulated withdrawal differs from the requested exact amount or preapproval withdrawal range.",
         )?;
     }
     Ok(())
@@ -75,6 +75,10 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         return Err(GoFinError::validation(
             "Unsupported Aave finalization operation.",
         ));
+    }
+    facts.warnings.push("Financial bounds and protocol feasibility are assessed before approval only. GoFin checks execution requirements after approval; market conditions may change before inclusion.".into());
+    if facts.request.amount.as_deref() == Some("all") {
+        facts.warnings.push("The full-position Pool call uses the protocol maximum sentinel. Its finite amount limit is checked in preapproval observations and simulation, not enforced by calldata; the settled amount can change before inclusion.".into());
     }
     let all = facts.request.amount.as_deref() == Some("all");
     let repay_all = facts.operation == "aave.repay" && all;
@@ -127,7 +131,7 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         amount: amount(facts.native_asset, gas),
         treatment: CostTreatment::AdditionalDebit,
     });
-    // USD is intentionally not fetched for approval or revalidation. Protocol
+    // USD is intentionally not fetched for preparation or execution. Protocol
     // risk prices are separate mandatory observations in the initial capture.
     let mut checks = vec![Check {
         name: "chain, deployment, balance and protocol prerequisites".into(), status: CheckStatus::Passed,
@@ -156,18 +160,18 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         .request
         .min_health_factor
         .as_deref()
-        .map(|value| format!("; minimum health factor {value}"))
+        .map(|value| format!("; preapproval minimum health factor {value}"))
         .unwrap_or_default();
     let debt_limit = facts
         .request
         .max_debt_usd
         .as_deref()
-        .map(|value| format!("; maximum outstanding debt ${value}"))
+        .map(|value| format!("; preapproval maximum outstanding debt ${value}"))
         .unwrap_or_default();
     let ratio = facts
         .request
         .max_debt_to_collateral_bps
-        .map(|value| format!("; maximum debt/collateral {value} bps"))
+        .map(|value| format!("; preapproval maximum debt/collateral {value} bps"))
         .unwrap_or_default();
     let action = if facts.operation == "aave.collateral" {
         format!(
@@ -187,7 +191,7 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
                 .strip_prefix("aave.")
                 .unwrap_or(facts.operation),
             if all {
-                format!("all, capped at {quantity}")
+                format!("all, preapproval assessed cap {quantity}")
             } else {
                 quantity
             },
@@ -211,7 +215,7 @@ pub(crate) fn finalize_aave(mut facts: AaveFinalFacts<'_>) -> Result<PreparedOpe
         expires_at: facts.expires_at,
         valuation: None,
         intent: facts.intent,
-        operation_version: 1,
+        operation_version: 2,
         action_deadline: None,
     })
 }
@@ -304,7 +308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preparation_and_refresh_skip_usd_quotes_and_refresh_reuses_calldata() {
+    async fn preparation_skips_usd_quotes_and_execution_compatibility_reuses_calldata() {
         let rpc = Arc::new(crate::tests::Fixture::new());
         let quotes = Arc::new(AtomicUsize::new(0));
         let mcp_calls = Arc::new(AtomicUsize::new(0));
@@ -333,12 +337,22 @@ mod tests {
         assert_eq!(
             mcp_calls.load(Ordering::SeqCst),
             1,
-            "refresh must reuse the approved calldata"
+            "execution must reuse the approved calldata"
         );
     }
 
+    struct TestJournal;
+    impl SubmissionJournal for TestJournal {
+        fn assert_authorized(&self) -> Result<()> {
+            Ok(())
+        }
+        fn persist_submission(&self, _: &Submission) -> Result<()> {
+            panic!("execution requirement failure must precede admission")
+        }
+    }
+
     #[tokio::test]
-    async fn refresh_rechecks_frozen_nonce_and_fee_without_new_mcp_call() {
+    async fn execution_checks_frozen_nonce_and_fee_without_new_mcp_call() {
         let rpc = Arc::new(crate::tests::Fixture::new());
         let fee_changed = Arc::new(AtomicBool::new(false));
         let mcp_calls = Arc::new(AtomicUsize::new(0));
@@ -362,13 +376,21 @@ mod tests {
             .unwrap();
         rpc.nonce.store(1, Ordering::SeqCst);
         assert_eq!(
-            adapter.revalidate(&prepared).await.unwrap_err().code,
+            adapter
+                .submit(&prepared, Arc::new(TestJournal))
+                .await
+                .unwrap_err()
+                .code,
             "NONCE_CHANGED"
         );
         rpc.nonce.store(0, Ordering::SeqCst);
         fee_changed.store(true, Ordering::SeqCst);
         assert_eq!(
-            adapter.revalidate(&prepared).await.unwrap_err().code,
+            adapter
+                .submit(&prepared, Arc::new(TestJournal))
+                .await
+                .unwrap_err()
+                .code,
             "FEE_BOUND_CHANGED"
         );
         assert_eq!(mcp_calls.load(Ordering::SeqCst), 1);

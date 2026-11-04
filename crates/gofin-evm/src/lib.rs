@@ -8,6 +8,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use async_trait::async_trait;
+use gofin_domain::operation_lifecycle::{AuthorizedOperation, NonceReservation};
 use gofin_domain::{
     GoFinError, Quantity, Result, RevalidatedOperation, Submission, SubmissionJournal,
 };
@@ -30,6 +31,23 @@ mod uniswap_provider;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
 use rpc_selection::{ReadTrace, SelectionState};
 pub use uniswap_provider::{ProviderTransactionRequest, TrustedUniswapTypedData};
+
+enum DispatchAuthority<'a> {
+    Revalidated(&'a RevalidatedOperation),
+    Authorized {
+        operation: &'a AuthorizedOperation,
+        observed_block: Option<u64>,
+    },
+}
+
+impl DispatchAuthority<'_> {
+    fn assert_current(&self) -> Result<()> {
+        match self {
+            Self::Revalidated(operation) => operation.assert_fresh(),
+            Self::Authorized { operation, .. } => operation.assert_authorized(),
+        }
+    }
+}
 
 fn error(code: &str, stage: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -2010,17 +2028,75 @@ impl EvmRuntime {
         calldata: Bytes,
         maximum_total_fee: U256,
     ) -> Result<PreparedCall> {
+        self.prepare_inner(sender, to, value, calldata, maximum_total_fee, true)
+            .await
+    }
+
+    /// Build an unsigned envelope without running its explicit simulation.
+    /// Gas estimation remains part of envelope construction; the caller must
+    /// simulate the resulting exact envelope before asking for authorization.
+    pub async fn prepare_envelope(
+        &self,
+        sender: Address,
+        to: Address,
+        value: U256,
+        calldata: Bytes,
+        maximum_total_fee: U256,
+    ) -> Result<FrozenTransaction> {
+        Ok(self
+            .prepare_inner(sender, to, value, calldata, maximum_total_fee, false)
+            .await?
+            .transaction)
+    }
+
+    /// Simulate the exact prepared envelope. This is a pre-approval phase;
+    /// execution-only submission deliberately does not repeat it.
+    pub async fn simulate(&self, transaction: &FrozenTransaction) -> Result<Bytes> {
+        use gofin_domain::evidence_phase::{Phase, during};
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id {
+            return Err(error(
+                "WRONG_CHAIN",
+                "simulation",
+                "Prepared envelope belongs to another chain.",
+            ));
+        }
+        let value = during(
+            Phase::EvmSimulation,
+            self.rpc
+                .request("eth_call", json!([transaction.rpc_call(), "latest"])),
+        )
+        .await?;
+        rpc_bytes(&value)
+    }
+
+    async fn prepare_inner(
+        &self,
+        sender: Address,
+        to: Address,
+        value: U256,
+        calldata: Bytes,
+        maximum_total_fee: U256,
+        simulate: bool,
+    ) -> Result<PreparedCall> {
         use gofin_domain::evidence_phase::{Phase, during};
         during(Phase::EvmChainIdentity, self.assert_chain()).await?;
         let request = json!({"from":lower_address(sender),"to":lower_address(to),"value":hex_quantity(value),"data":hex_bytes(&calldata)});
         let ((simulation, estimate), (required, priority), nonce) = tokio::try_join!(
             async {
                 let (simulation, estimate) = tokio::try_join!(
-                    during(
-                        Phase::EvmSimulation,
-                        self.rpc
-                            .request("eth_call", json!([request.clone(), "latest"]))
-                    ),
+                    async {
+                        if simulate {
+                            during(
+                                Phase::EvmSimulation,
+                                self.rpc
+                                    .request("eth_call", json!([request.clone(), "latest"])),
+                            )
+                            .await
+                        } else {
+                            Ok(json!("0x"))
+                        }
+                    },
                     during(
                         Phase::EvmGasEstimate,
                         self.rpc
@@ -2465,6 +2541,126 @@ impl EvmRuntime {
         self.dispatch(transaction, metadata, journal, None).await
     }
 
+    /// Submit an authorized single-action envelope after execution prerequisites
+    /// only. Financial evidence and simulation belong to the pre-approval phases;
+    /// this path deliberately does not recollect or re-evaluate them.
+    pub async fn submit_authorized(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        authorized: &AuthorizedOperation,
+    ) -> Result<Submission> {
+        authorized.assert_authorized()?;
+        let binding = &authorized.prepared().binding;
+        if binding.get("permit_template").is_some_and(|v| !v.is_null()) {
+            return Err(error(
+                "PERMIT_MATERIALIZATION_REQUIRED",
+                "submission",
+                "A permit template requires its dedicated signature and simulation path.",
+            ));
+        }
+        if binding.get("transaction")
+            != Some(
+                &serde_json::to_value(transaction)
+                    .map_err(|_| GoFinError::validation("Authorized transaction is malformed."))?,
+            )
+        {
+            return Err(error(
+                "BINDING_CHANGED",
+                "submission",
+                "Transaction differs from the authorized candidate.",
+            ));
+        }
+        let observed_block = self
+            .check_execution_requirements(transaction, authorized.nonce_reservation())
+            .await?;
+        authorized.assert_authorized()?;
+        self.dispatch(
+            transaction,
+            metadata,
+            authorized.journal(),
+            Some(DispatchAuthority::Authorized {
+                operation: authorized,
+                observed_block,
+            }),
+        )
+        .await
+    }
+
+    /// Checks that concern submitting the frozen envelope, without simulation,
+    /// gas re-estimation, protocol account reads or financial bound evaluation.
+    async fn check_execution_requirements(
+        &self,
+        transaction: &FrozenTransaction,
+        reservation: Option<&NonceReservation>,
+    ) -> Result<Option<u64>> {
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id {
+            return Err(error(
+                "WRONG_CHAIN",
+                "submission",
+                "Authorized envelope belongs to another chain.",
+            ));
+        }
+        let sender = address(&transaction.sender)?;
+        if let Some(reservation) = reservation {
+            let scope = format!("ethereum:{}:{}", self.chain_id, lower_address(sender));
+            if reservation.scope() != scope || reservation.allocated() != transaction.nonce {
+                return Err(error(
+                    "BINDING_CHANGED",
+                    "submission",
+                    "Broker nonce reservation differs from this chain, sender or envelope nonce.",
+                ));
+            }
+            if reservation.observed() != transaction.nonce {
+                return Err(error(
+                    "NONCE_CHANGED",
+                    "submission",
+                    "Reserved envelope nonce differs from the broker's pending nonce observation.",
+                ));
+            }
+        } else {
+            self.assert_chain().await?;
+        }
+        let (latest, nonce, (), balance) = tokio::try_join!(
+            self.rpc
+                .request("eth_getBlockByNumber", json!(["latest", false])),
+            async {
+                match reservation {
+                    Some(reservation) => Ok(reservation.observed()),
+                    None => self.pending_nonce(sender).await,
+                }
+            },
+            self.revalidate_rollup_fee(transaction),
+            self.balance(sender, None),
+        )?;
+        validate_frozen_fee_bid(transaction, rpc_u256(&latest["baseFeePerGas"])?)?;
+        if nonce != transaction.nonce {
+            return Err(error(
+                "NONCE_CHANGED",
+                "submission",
+                "Pending nonce differs from the authorized envelope.",
+            ));
+        }
+        let debit = u256(&transaction.value)?
+            .checked_add(transaction.maximum_cost()?)
+            .ok_or_else(|| {
+                error(
+                    "U256_OVERFLOW",
+                    "submission",
+                    "Gross debit overflows uint256.",
+                )
+            })?;
+        if balance < debit {
+            return Err(error(
+                "INSUFFICIENT_GAS_BALANCE",
+                "submission",
+                "Sender cannot fund the authorized value and maximum gas cost.",
+            ));
+        }
+        Ok(rpc_u64(&latest["number"]).ok())
+    }
+
     /// Submit the exact envelope already checked by the adapter's final
     /// revalidation. Only permit signature slots may differ, after their exact
     /// materialized transaction has passed simulation.
@@ -2612,8 +2808,13 @@ impl EvmRuntime {
                 "Pending nonce differs from the revalidated envelope.",
             ));
         }
-        self.dispatch(transaction, metadata, journal, Some(validated))
-            .await
+        self.dispatch(
+            transaction,
+            metadata,
+            journal,
+            Some(DispatchAuthority::Revalidated(validated)),
+        )
+        .await
     }
 
     async fn dispatch(
@@ -2621,7 +2822,7 @@ impl EvmRuntime {
         transaction: &FrozenTransaction,
         metadata: Value,
         journal: Arc<dyn SubmissionJournal>,
-        validated: Option<&RevalidatedOperation>,
+        authority: Option<DispatchAuthority<'_>>,
     ) -> Result<Submission> {
         let signer = self.signer.as_ref().ok_or_else(|| {
             error(
@@ -2630,20 +2831,25 @@ impl EvmRuntime {
                 "No protected signing provider is configured.",
             )
         })?;
-        if let Some(validated) = validated {
-            validated.assert_fresh()?;
+        if let Some(authority) = &authority {
+            authority.assert_current()?;
         }
         journal.assert_authorized()?;
         // A best-effort chain height narrows any later finalized replacement
         // search. Failure to obtain it never prevents admission or dispatch.
-        let dispatch_block = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            self.rpc.request("eth_blockNumber", json!([])),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .and_then(|v| rpc_u64(&v).ok());
+        let dispatch_block =
+            if let Some(DispatchAuthority::Authorized { observed_block, .. }) = &authority {
+                *observed_block
+            } else {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(250),
+                    self.rpc.request("eth_blockNumber", json!([])),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|v| rpc_u64(&v).ok())
+            };
         let raw = signer.sign_prepared(transaction).await?;
         let tx_hash = verify_signed_envelope(transaction, &raw)?;
         let submission = Submission {
@@ -2651,8 +2857,8 @@ impl EvmRuntime {
             reference: format!("{tx_hash:#x}"),
             data: json!({"transaction":transaction,"metadata":metadata,"dispatch_block":dispatch_block}),
         };
-        if let Some(validated) = validated {
-            validated.assert_fresh()?;
+        if let Some(authority) = &authority {
+            authority.assert_current()?;
         }
         journal.assert_authorized()?;
         journal.persist_submission(&submission)?;

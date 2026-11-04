@@ -7,8 +7,8 @@ use serde_json::Value;
 pub(super) async fn collect(session: &mut dyn LifecycleSession) -> Result<CandidateResult<Value>> {
     session.collect().await?;
     session.evaluate()?;
-    session.collect_final().await?;
-    session.finalize_candidate()
+    session.prepare().await?;
+    session.simulate().await
 }
 pub(super) async fn prepare(session: &mut dyn LifecycleSession) -> Result<PreparedOperation> {
     match collect(session).await? {
@@ -26,26 +26,14 @@ pub(super) async fn read(session: &mut dyn LifecycleSession) -> Result<Value> {
         )),
     }
 }
-pub(super) async fn refresh(
-    session: &mut dyn LifecycleSession,
-    candidate: &PreparedOperation,
-) -> Result<PreparedOperation> {
-    session.refresh(candidate).await?;
-    session.revalidate(candidate)?;
-    session.confirm(candidate).await?;
-    session.finalize_validation(candidate)
-}
-
 pub(super) async fn revalidate(
     adapter: &dyn Adapter,
     candidate: &PreparedOperation,
     context: Option<&PreparationContext>,
 ) -> Result<PreparedOperation> {
-    if let Some(mut session) =
-        adapter.operation_lifecycle(&candidate.operation, &candidate.input, context)?
-    {
-        refresh(session.as_mut(), candidate).await
-    } else {
-        adapter.revalidate(candidate).await
-    }
+    // Legacy consumers retain this compatibility entry point. Typed lifecycle
+    // adapters validate the retained binding locally; execution owns the only
+    // post-approval transport checks under the submission resource lock.
+    let _ = context;
+    adapter.revalidate(candidate).await
 }

@@ -1,13 +1,12 @@
-//! Typed operation phases and their object-safe, per-pass broker bridge.
+//! Typed operation phases and their object-safe broker bridge.
 //!
-//! Evidence is held only in memory for one pass. The static decision functions
-//! deliberately have no adapter or transport handle. Input, evidence, and
-//! candidate types must be data only, with no network or mutation capability;
-//! clocks and time-sensitive facts must be supplied as explicit evidence.
-//! Durable authority and submission identity remain the journal's responsibility.
+//! Collection and preparation acquire facts; evaluation is pure. Simulation
+//! validates the prepared envelope before approval. After approval, execution
+//! checks transport requirements without recollecting financial evidence.
+//! The journal remains authoritative for live authority and durable admission.
 use crate::{
-    GoFinError, OperationRecord, PreparedOperation, Reconciliation, Result, RevalidatedOperation,
-    Submission, SubmissionJournal,
+    GoFinError, OperationRecord, PreparedOperation, Reconciliation, Result, Submission,
+    SubmissionJournal,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -18,62 +17,105 @@ pub enum CandidateResult<T> {
     Write(Box<PreparedOperation>),
 }
 
+/// An in-process authority capability supplied by the broker. It is neither
+/// serializable nor cloneable. Construction checks the exact candidate through
+/// the broker-owned journal; admission still independently consumes authority.
+pub struct AuthorizedOperation {
+    prepared: PreparedOperation,
+    journal: Arc<dyn SubmissionJournal>,
+    nonce_reservation: Option<NonceReservation>,
+}
+/// Broker-owned nonce observation and allocation made while holding submission
+/// resources. This fact is in-process only and cannot be restored from JSON.
+/// The adapter must match its canonical scope and concrete nonce before reuse.
+pub struct NonceReservation {
+    scope: String,
+    observed: u64,
+    allocated: u64,
+}
+impl NonceReservation {
+    pub fn new(scope: String, observed: u64, allocated: u64) -> Result<Self> {
+        if scope.is_empty() || allocated < observed {
+            return Err(GoFinError::validation(
+                "Submission nonce reservation is invalid.",
+            ));
+        }
+        Ok(Self {
+            scope,
+            observed,
+            allocated,
+        })
+    }
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+    pub fn observed(&self) -> u64 {
+        self.observed
+    }
+    pub fn allocated(&self) -> u64 {
+        self.allocated
+    }
+}
+impl AuthorizedOperation {
+    pub fn new(prepared: PreparedOperation, journal: Arc<dyn SubmissionJournal>) -> Result<Self> {
+        Self::with_nonce_reservation(prepared, journal, None)
+    }
+    pub fn with_nonce_reservation(
+        prepared: PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+        nonce_reservation: Option<NonceReservation>,
+    ) -> Result<Self> {
+        journal.assert_candidate(&prepared)?;
+        Ok(Self {
+            prepared,
+            journal,
+            nonce_reservation,
+        })
+    }
+    pub fn nonce_reservation(&self) -> Option<&NonceReservation> {
+        self.nonce_reservation.as_ref()
+    }
+    pub fn prepared(&self) -> &PreparedOperation {
+        &self.prepared
+    }
+    pub fn assert_authorized(&self) -> Result<()> {
+        self.journal.assert_candidate(&self.prepared)
+    }
+    pub fn journal(&self) -> Arc<dyn SubmissionJournal> {
+        self.journal.clone()
+    }
+}
+
 #[async_trait]
 pub trait OperationLifecycle<Op>: Send + Sync {
     type Input: Send + Sync;
     type Evidence: Send + Sync;
     type Candidate: Send + Sync;
-    type FinalEvidence: Send + Sync;
-    type FinalCandidate: Send + Sync;
-    type FreshEvidence: Send + Sync;
-    type Validated: Send + Sync;
-    type Confirmation: Send + Sync;
-    type FinalValidated: Send + Sync;
+    type Prepared: Send + Sync;
+    type Simulated: Send + Sync;
     type ExecutionRef: Send;
     type Observation: Send + Sync;
     type Output: Send;
 
     async fn collect(&self, input: &Self::Input) -> Result<Self::Evidence>;
     fn evaluate(input: &Self::Input, evidence: &Self::Evidence) -> Result<Self::Candidate>;
-    async fn collect_final(
+    async fn prepare(
         &self,
         input: &Self::Input,
         candidate: &Self::Candidate,
-    ) -> Result<Self::FinalEvidence>;
-    fn finalize_candidate(
+    ) -> Result<Self::Prepared>;
+    async fn simulate(
+        &self,
         input: &Self::Input,
         candidate: &Self::Candidate,
-        evidence: &Self::FinalEvidence,
-    ) -> Result<Self::FinalCandidate>;
-    fn candidate_result(candidate: &Self::FinalCandidate) -> Result<CandidateResult<Self::Output>>;
+        prepared: &Self::Prepared,
+    ) -> Result<Self::Simulated>;
+    fn candidate_result(candidate: &Self::Simulated) -> Result<CandidateResult<Self::Output>>;
     fn output_value(output: Self::Output) -> Result<Value>;
-    async fn refresh(
-        &self,
-        input: &Self::Input,
-        prepared: &PreparedOperation,
-    ) -> Result<Self::FreshEvidence>;
-    fn revalidate(
-        input: &Self::Input,
-        prepared: &PreparedOperation,
-        evidence: &Self::FreshEvidence,
-    ) -> Result<Self::Validated>;
-    async fn confirm(
-        &self,
-        input: &Self::Input,
-        prepared: &PreparedOperation,
-        validated: &Self::Validated,
-    ) -> Result<Self::Confirmation>;
-    fn finalize_validation(
-        input: &Self::Input,
-        prepared: &PreparedOperation,
-        validated: &Self::Validated,
-        confirmation: &Self::Confirmation,
-    ) -> Result<Self::FinalValidated>;
-    fn validated_prepared(validated: &Self::FinalValidated) -> Result<PreparedOperation>;
     async fn execute(
         &self,
-        validated: &Self::FinalValidated,
-        handoff: &RevalidatedOperation,
+        input: &Self::Input,
+        authorized: &AuthorizedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Self::ExecutionRef>;
     fn submission(reference: Self::ExecutionRef) -> Result<Submission>;
@@ -89,44 +131,118 @@ pub trait OperationLifecycle<Op>: Send + Sync {
     ) -> Result<Reconciliation>;
 }
 
-/// Object-safe bridge. Each phase is explicitly invoked by the broker and
-/// concrete evidence never crosses this boundary or survives a process restart.
+/// Phase-specific data, rather than a collection of optional fields. Transitions
+/// consume their predecessor so an evaluated candidate cannot be prepared twice.
+pub struct Candidate<Op, State> {
+    state: State,
+    marker: PhantomData<fn() -> Op>,
+}
+pub struct Collected<E> {
+    evidence: E,
+}
+pub struct Evaluated<C> {
+    candidate: C,
+}
+pub struct Prepared<C, P> {
+    candidate: C,
+    prepared: P,
+}
+pub struct Simulated<S> {
+    simulated: S,
+}
+pub struct Authorised {
+    authorized: AuthorizedOperation,
+}
+impl<Op, State> Candidate<Op, State> {
+    fn new(state: State) -> Self {
+        Self {
+            state,
+            marker: PhantomData,
+        }
+    }
+}
+impl<Op, E> Candidate<Op, Collected<E>> {
+    fn evaluate<L: OperationLifecycle<Op, Evidence = E>>(
+        self,
+        input: &L::Input,
+    ) -> Result<Candidate<Op, Evaluated<L::Candidate>>> {
+        Ok(Candidate::new(Evaluated {
+            candidate: L::evaluate(input, &self.state.evidence)?,
+        }))
+    }
+}
+impl<Op, C> Candidate<Op, Evaluated<C>> {
+    async fn prepare<L: OperationLifecycle<Op, Candidate = C>>(
+        self,
+        lifecycle: &L,
+        input: &L::Input,
+    ) -> Result<Candidate<Op, Prepared<C, L::Prepared>>> {
+        let prepared = lifecycle.prepare(input, &self.state.candidate).await?;
+        Ok(Candidate::new(Prepared {
+            candidate: self.state.candidate,
+            prepared,
+        }))
+    }
+}
+impl<Op, C, P> Candidate<Op, Prepared<C, P>> {
+    async fn simulate<L: OperationLifecycle<Op, Candidate = C, Prepared = P>>(
+        self,
+        lifecycle: &L,
+        input: &L::Input,
+    ) -> Result<Candidate<Op, Simulated<L::Simulated>>> {
+        let simulated = lifecycle
+            .simulate(input, &self.state.candidate, &self.state.prepared)
+            .await?;
+        Ok(Candidate::new(Simulated { simulated }))
+    }
+}
+impl<Op> Candidate<Op, Authorised> {
+    async fn execute<L: OperationLifecycle<Op>>(
+        self,
+        lifecycle: &L,
+        input: &L::Input,
+    ) -> Result<Submission> {
+        self.state.authorized.assert_authorized()?;
+        let journal = self.state.authorized.journal();
+        L::submission(
+            lifecycle
+                .execute(input, &self.state.authorized, journal)
+                .await?,
+        )
+    }
+}
+
+/// Object-safe routing boundary. Ordering is checked here; inside each branch
+/// the compiler checks the consuming typestate transition.
 #[async_trait]
 pub trait LifecycleSession: Send {
     async fn collect(&mut self) -> Result<()>;
     fn evaluate(&mut self) -> Result<()>;
-    async fn collect_final(&mut self) -> Result<()>;
-    fn finalize_candidate(&mut self) -> Result<CandidateResult<Value>>;
-    async fn refresh(&mut self, prepared: &PreparedOperation) -> Result<()>;
-    fn revalidate(&mut self, prepared: &PreparedOperation) -> Result<()>;
-    async fn confirm(&mut self, prepared: &PreparedOperation) -> Result<()>;
-    fn finalize_validation(&mut self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
-    async fn execute(
-        &mut self,
-        handoff: &RevalidatedOperation,
-        journal: Arc<dyn SubmissionJournal>,
-    ) -> Result<Submission>;
+    async fn prepare(&mut self) -> Result<()>;
+    async fn simulate(&mut self) -> Result<CandidateResult<Value>>;
+    /// Enter execution using a broker-checked candidate. This also supports
+    /// restoration from a durable approved record without repeating evaluation.
+    fn authorize(&mut self, authorized: AuthorizedOperation) -> Result<()>;
+    async fn execute(&mut self) -> Result<Submission>;
     async fn observe(&mut self, record: &OperationRecord) -> Result<()>;
     fn evaluate_observation(&mut self, record: &OperationRecord) -> Result<Reconciliation>;
 }
 
+enum Phase<L: OperationLifecycle<Op>, Op> {
+    Collected(Candidate<Op, Collected<L::Evidence>>),
+    Evaluated(Candidate<Op, Evaluated<L::Candidate>>),
+    Prepared(Candidate<Op, Prepared<L::Candidate, L::Prepared>>),
+    Simulated(Candidate<Op, Simulated<L::Simulated>>),
+    Authorised(Box<Candidate<Op, Authorised>>),
+}
 pub struct TypedSession<'a, L, Op>
 where
     L: OperationLifecycle<Op>,
 {
     lifecycle: &'a L,
     input: L::Input,
-    evidence: Option<L::Evidence>,
-    candidate: Option<L::Candidate>,
-    final_evidence: Option<L::FinalEvidence>,
-    fresh: Option<L::FreshEvidence>,
-    refreshed_candidate: Option<PreparedOperation>,
-    provisional: Option<L::Validated>,
-    confirmation: Option<L::Confirmation>,
-    validated: Option<L::FinalValidated>,
-    observation: Option<L::Observation>,
-    observed_record: Option<OperationRecord>,
-    marker: PhantomData<fn() -> Op>,
+    phase: Option<Phase<L, Op>>,
+    observation: Option<(OperationRecord, L::Observation)>,
 }
 impl<'a, L, Op> TypedSession<'a, L, Op>
 where
@@ -136,17 +252,8 @@ where
         Self {
             lifecycle,
             input,
-            evidence: None,
-            candidate: None,
-            final_evidence: None,
-            fresh: None,
-            refreshed_candidate: None,
-            provisional: None,
-            confirmation: None,
-            validated: None,
+            phase: None,
             observation: None,
-            observed_record: None,
-            marker: PhantomData,
         }
     }
 }
@@ -160,153 +267,71 @@ where
     Op: Send + Sync,
 {
     async fn collect(&mut self) -> Result<()> {
-        self.evidence = None;
-        self.candidate = None;
-        self.final_evidence = None;
-        self.evidence = Some(self.lifecycle.collect(&self.input).await?);
+        self.phase = None;
+        self.observation = None;
+        let evidence = self.lifecycle.collect(&self.input).await?;
+        self.phase = Some(Phase::Collected(Candidate::new(Collected { evidence })));
         Ok(())
     }
     fn evaluate(&mut self) -> Result<()> {
-        self.candidate = None;
-        self.final_evidence = None;
-        self.candidate = Some(L::evaluate(
-            &self.input,
-            self.evidence.as_ref().ok_or_else(missing_phase)?,
-        )?);
-        Ok(())
-    }
-    async fn collect_final(&mut self) -> Result<()> {
-        self.final_evidence = None;
-        self.final_evidence = Some(
-            self.lifecycle
-                .collect_final(
-                    &self.input,
-                    self.candidate.as_ref().ok_or_else(missing_phase)?,
-                )
-                .await?,
-        );
-        Ok(())
-    }
-    fn finalize_candidate(&mut self) -> Result<CandidateResult<Value>> {
-        let candidate = L::finalize_candidate(
-            &self.input,
-            self.candidate.as_ref().ok_or_else(missing_phase)?,
-            self.final_evidence.as_ref().ok_or_else(missing_phase)?,
-        )?;
-        match L::candidate_result(&candidate)? {
-            CandidateResult::Read(output) => Ok(CandidateResult::Read(L::output_value(output)?)),
-            CandidateResult::Write(prepared) => Ok(CandidateResult::Write(prepared)),
-        }
-    }
-    async fn refresh(&mut self, prepared: &PreparedOperation) -> Result<()> {
-        self.validated = None;
-        self.refreshed_candidate = None;
-        self.fresh = None;
-        self.provisional = None;
-        self.confirmation = None;
-        self.fresh = Some(self.lifecycle.refresh(&self.input, prepared).await?);
-        self.refreshed_candidate = Some(prepared.clone());
-        Ok(())
-    }
-    fn revalidate(&mut self, prepared: &PreparedOperation) -> Result<()> {
-        self.provisional = None;
-        self.confirmation = None;
-        self.validated = None;
-        if self.refreshed_candidate.as_ref() != Some(prepared) {
+        let Some(Phase::Collected(candidate)) = self.phase.take() else {
             return Err(missing_phase());
-        }
-        self.provisional = Some(L::revalidate(
-            &self.input,
-            prepared,
-            self.fresh.as_ref().ok_or_else(missing_phase)?,
-        )?);
+        };
+        self.phase = Some(Phase::Evaluated(candidate.evaluate::<L>(&self.input)?));
         Ok(())
     }
-    async fn confirm(&mut self, prepared: &PreparedOperation) -> Result<()> {
-        self.confirmation = None;
-        self.validated = None;
-        if self.refreshed_candidate.as_ref() != Some(prepared) {
+    async fn prepare(&mut self) -> Result<()> {
+        let Some(Phase::Evaluated(candidate)) = self.phase.take() else {
             return Err(missing_phase());
-        }
-        self.confirmation = Some(
-            self.lifecycle
-                .confirm(
-                    &self.input,
-                    prepared,
-                    self.provisional.as_ref().ok_or_else(missing_phase)?,
-                )
-                .await?,
-        );
+        };
+        self.phase = Some(Phase::Prepared(
+            candidate.prepare(self.lifecycle, &self.input).await?,
+        ));
         Ok(())
     }
-    fn finalize_validation(&mut self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
-        self.validated = None;
-        if self.refreshed_candidate.as_ref() != Some(prepared) {
+    async fn simulate(&mut self) -> Result<CandidateResult<Value>> {
+        let Some(Phase::Prepared(candidate)) = self.phase.take() else {
             return Err(missing_phase());
-        }
-        let validated = L::finalize_validation(
-            &self.input,
-            prepared,
-            self.provisional.as_ref().ok_or_else(missing_phase)?,
-            self.confirmation.as_ref().ok_or_else(missing_phase)?,
-        )?;
-        let result = L::validated_prepared(&validated)?;
-        // The broker has already resolved the action deadline and retained any
-        // historical metadata spelling on this input. Preserve those values
-        // before the typed result is retained, so the later exact handoff cannot
-        // require mutation of the validated financial candidate.
-        if result.action_deadline != prepared.action_deadline {
-            return Err(GoFinError::validation(
-                "Lifecycle validation changed the resolved action deadline.",
-            ));
-        }
-        let mut normalized_binding = result.binding.clone();
-        crate::product_names::preserve_approved_spelling(
-            &prepared.binding,
-            &mut normalized_binding,
-        )?;
-        if normalized_binding != result.binding {
-            return Err(GoFinError::validation(
-                "Lifecycle validation changed approved metadata spelling.",
-            ));
-        }
-        self.validated = Some(validated);
+        };
+        let candidate = candidate.simulate(self.lifecycle, &self.input).await?;
+        let result = match L::candidate_result(&candidate.state.simulated)? {
+            CandidateResult::Read(output) => CandidateResult::Read(L::output_value(output)?),
+            CandidateResult::Write(prepared) => CandidateResult::Write(prepared),
+        };
+        self.phase = Some(Phase::Simulated(candidate));
         Ok(result)
     }
-    async fn execute(
-        &mut self,
-        handoff: &RevalidatedOperation,
-        journal: Arc<dyn SubmissionJournal>,
-    ) -> Result<Submission> {
-        handoff.assert_fresh()?;
-        let validated = self.validated.take().ok_or_else(missing_phase)?;
-        if L::validated_prepared(&validated)? != *handoff.prepared() {
-            return Err(GoFinError::validation(
-                "Lifecycle execution differs from its revalidated handoff.",
-            ));
+    fn authorize(&mut self, authorized: AuthorizedOperation) -> Result<()> {
+        // The broker may have allocated a nonce under the submission lock. Its
+        // journal independently checks that the concrete candidate stays within
+        // the original approval; a phantom state alone cannot grant authority.
+        authorized.assert_authorized()?;
+        if !matches!(self.phase, None | Some(Phase::Simulated(_))) {
+            return Err(missing_phase());
         }
-        L::submission(self.lifecycle.execute(&validated, handoff, journal).await?)
+        self.phase = Some(Phase::Authorised(Box::new(Candidate::new(Authorised {
+            authorized,
+        }))));
+        Ok(())
+    }
+    async fn execute(&mut self) -> Result<Submission> {
+        let Some(Phase::Authorised(candidate)) = self.phase.take() else {
+            return Err(missing_phase());
+        };
+        (*candidate).execute(self.lifecycle, &self.input).await
     }
     async fn observe(&mut self, record: &OperationRecord) -> Result<()> {
-        self.validated = None;
-        self.provisional = None;
-        self.confirmation = None;
-        self.fresh = None;
-        self.refreshed_candidate = None;
+        self.phase = None;
         self.observation = None;
-        self.observed_record = None;
-        self.observation = Some(self.lifecycle.observe(&self.input, record).await?);
-        self.observed_record = Some(record.clone());
+        let observation = self.lifecycle.observe(&self.input, record).await?;
+        self.observation = Some((record.clone(), observation));
         Ok(())
     }
     fn evaluate_observation(&mut self, record: &OperationRecord) -> Result<Reconciliation> {
-        if self.observed_record.as_ref() != Some(record) {
+        let (observed, observation) = self.observation.as_ref().ok_or_else(missing_phase)?;
+        if observed != record {
             return Err(missing_phase());
         }
-        L::evaluate_observation(
-            &self.input,
-            record,
-            self.observation.as_ref().ok_or_else(missing_phase)?,
-        )
+        L::evaluate_observation(&self.input, record, observation)
     }
 }

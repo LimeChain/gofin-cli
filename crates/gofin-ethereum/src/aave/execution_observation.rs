@@ -381,7 +381,16 @@ impl EthereumAdapter {
                         "Successful Aave receipt is missing financial proof facts.",
                     )
                 })?
-                .evaluate_success(&record.operation, &binding, &mut effects, &mut details)?;
+                .evaluate_success_with_semantics(
+                    &record.operation,
+                    &binding,
+                    &mut effects,
+                    &mut details,
+                    record
+                        .preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.operation_version == 2),
+                )?;
         } else {
             details["outcome_replay_safe"] = json!(true);
         }

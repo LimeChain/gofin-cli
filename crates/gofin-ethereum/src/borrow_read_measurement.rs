@@ -221,8 +221,10 @@ async fn borrow_http_rpc_measurement() {
                 physical.load(Ordering::SeqCst),
             );
             physical.store(0, Ordering::SeqCst);
+            // The legacy Adapter seam is a local immutable-binding check for
+            // Aave v2; financial evidence is never recollected after approval.
             a.revalidate(&first).await.unwrap();
-            check_pass(&counted, "0x14");
+            assert!(counted.requests.lock().unwrap().is_empty());
             let revalidate = (
                 counted.logical.swap(0, Ordering::SeqCst),
                 physical.load(Ordering::SeqCst),
@@ -232,16 +234,18 @@ async fn borrow_http_rpc_measurement() {
             fixture.latest.store(21, Ordering::SeqCst);
             physical.store(0, Ordering::SeqCst);
             a.revalidate(&first).await.unwrap();
-            check_pass(&counted, "0x15");
+            assert!(counted.requests.lock().unwrap().is_empty());
             let historical = (
                 counted.logical.load(Ordering::SeqCst),
                 physical.load(Ordering::SeqCst),
             );
+            assert_eq!(revalidate, (0, 0));
+            assert_eq!(historical, (0, 0));
             stop.store(true, Ordering::Relaxed);
             worker.join().unwrap();
 
             eprintln!(
-                "borrow N={reserve_count} C={active_count} HTTP fixture (logical, physical): cold={cold:?}, warm={warm:?}, revalidate={revalidate:?}, historical={historical:?}"
+                "borrow N={reserve_count} C={active_count} HTTP fixture (logical, physical): cold={cold:?}, warm={warm:?}, local_binding={revalidate:?}, advanced_local_binding={historical:?}"
             );
             measured.push(vec![cold, warm, revalidate, historical]);
         }

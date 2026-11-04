@@ -279,46 +279,27 @@ impl gofin_domain::operation_lifecycle::LifecycleSession for RoutedLifecycle<'_>
     fn evaluate(&mut self) -> gofin_domain::Result<()> {
         self.inner.evaluate()
     }
-    async fn collect_final(&mut self) -> gofin_domain::Result<()> {
-        self.inner.collect_final().await
+    async fn prepare(&mut self) -> gofin_domain::Result<()> {
+        self.inner.prepare().await
     }
-    fn finalize_candidate(
+    async fn simulate(
         &mut self,
     ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>> {
-        let result = self.inner.finalize_candidate()?;
+        let result = self.inner.simulate().await?;
         if let gofin_domain::operation_lifecycle::CandidateResult::Write(candidate) = &result {
             self.check(candidate)?;
         }
         Ok(result)
     }
-    async fn refresh(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.refresh(prepared).await
-    }
-    fn revalidate(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.revalidate(prepared)
-    }
-    async fn confirm(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.confirm(prepared).await
-    }
-    fn finalize_validation(
+    fn authorize(
         &mut self,
-        prepared: &PreparedOperation,
-    ) -> gofin_domain::Result<PreparedOperation> {
-        self.check(prepared)?;
-        let result = self.inner.finalize_validation(prepared)?;
-        self.check(&result)?;
-        Ok(result)
+        authorized: gofin_domain::operation_lifecycle::AuthorizedOperation,
+    ) -> gofin_domain::Result<()> {
+        self.check(authorized.prepared())?;
+        self.inner.authorize(authorized)
     }
-    async fn execute(
-        &mut self,
-        handoff: &gofin_domain::RevalidatedOperation,
-        journal: Arc<dyn SubmissionJournal>,
-    ) -> gofin_domain::Result<Submission> {
-        self.check(handoff.prepared())?;
-        self.inner.execute(handoff, journal).await
+    async fn execute(&mut self) -> gofin_domain::Result<Submission> {
+        self.inner.execute().await
     }
     async fn observe(&mut self, record: &OperationRecord) -> gofin_domain::Result<()> {
         let prepared = record

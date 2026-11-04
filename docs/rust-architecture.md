@@ -449,22 +449,19 @@ validation check canonical calldata and exact transaction identities before
 the existing frozen approval/signing path. This replaces local Aave calldata
 construction, while selected-market RPC observations, risk limits, finite
 allowances, debt/claim backing and typed settlement remain adapter-owned.
-Revalidation checks the frozen bytes without another MCP request. Unknown
+Execution checks the approved bytes locally without another MCP request or financial simulation. Unknown
 methods, bundles, permits and mismatched fields fail closed. ABI decoding is
 not proof of implementation semantics: configured deployments retain their
 existing provider/revision checks, with the Pool implementation identity bound
-through preview and final revalidation. Historical reconciliation retains the
+through preparation and the execution identity check. Historical reconciliation retains the
 original submission and evidence.
 
-Aave write preparation, including each revalidation, creates separate
-canonical block snapshots for financial observations. Exact identical reads at
+Each Aave preapproval assessment creates a canonical block snapshot for financial observations. Exact identical reads at
 that block share a capture-local cache; required older anchor evidence remains
 at its original block. An uncached header check rejects a changed block before
 live transaction simulation. Borrow also binds the Pool proxy implementation and
 code identity at the capture block and checks it against the live identity.
-Simulation, pending nonce and gas preparation retain their live reads. No financial
-state cache survives approval or a preparation pass. Only token metadata hints
-can be reused, after matching their identity and precision against fresh reserve evidence.
+Simulation, pending nonce and gas preparation retain their live reads. No financial state is recollected after approval. The prepared candidate retains its assessed terms and observation anchors; execution does not treat those observations as current state. Only token metadata hints can be reused across new preparations, after matching their identity and precision against fresh reserve evidence.
 
 Borrow establishes exposure completeness from the verified Pool's on-chain user
 configuration, whose two bits per reserve ID identify borrowing and collateral
@@ -495,25 +492,47 @@ and validated types, while sharing transport, market configuration and reviewed
 accounting kernels. Exact/all modes remain within their owning operation.
 
 The [shared contract](../crates/gofin-domain/src/operation_lifecycle.rs) owns the
-phase interface and an object-safe session bridge. Concrete evidence stays typed
-inside the adapter; it is not erased into JSON or persisted as an executable
-capability. The engine explicitly drives the following methods:
+phase interface and an object-safe session bridge. A typed candidate consumes
+its previous state at each transition; each state carries the data available in
+that phase. Concrete evidence stays inside the adapter. Runtime routing erases
+the operation type, but re-enters the typed driver rather than allowing arbitrary
+phase ordering through a set of optional fields.
 
-| Phase | Adapter responsibility | Engine responsibility |
+| Phase | Adapter responsibility | Broker/engine responsibility |
 | --- | --- | --- |
-| `collect` → `evaluate` | Acquire typed, attributed facts efficiently, including completeness evidence; synchronously interpret them to produce a candidate. | Select the operation and supply broker-owned context. |
-| `collect_final` → `finalize_candidate` | Acquire candidate-dependent transaction/simulation facts and purely finalize native financial terms. | Validate accounting and present the completed approval request. |
-| Authorize | Supply protocol-specific terms through the prepared candidate. | Obtain or reuse valid authority; an adapter cannot grant it. |
-| `refresh` → `revalidate` → `confirm` → `finalize_validation` | Recollect necessary exact facts, purely recheck financial limits, collect exact frozen-transaction confirmation facts, and finalize validation. | Run this path after approval and separately under the resource lock; preserve approved deadlines/spelling and independently enforce authority. |
-| `execute` | Dispatch the immutable validated request through the runtime and journal handoff. | Persist submission identity and reservations before dispatch; bind the complete validated candidate, not only its calldata. |
-| `observe` → `evaluate_observation` | Acquire receipt/status and typed financial proof facts; synchronously decide pending, failed or settled outcomes. | Reconstruct from durable original input after restart and atomically settle verified effects. |
+| `collect` | Acquire typed, attributed facts efficiently, including completeness evidence. | Select the operation and supply broker-owned context. |
+| `evaluate` | Purely evaluate collected facts against request bounds and derive the financial candidate. | Retain the same immutable request and limits. |
+| `prepare` | Obtain and locally validate MCP calldata; construct the unsigned transaction envelope. | Retain the evaluated intent. |
+| `simulate` | Simulate the prepared envelope and validate simulation results, accounting and bounds before producing the approval candidate. Pure result interpretation remains an internal function. | Validate the completed terms and present them for authorization. |
+| Authorize | Receive an authorized candidate, not a client-supplied authorization flag. | Obtain or reuse valid authority; retain expiry and independently validate the exact candidate. |
+| `execute` | Check execution requirements once under the submission lock, sign and broadcast through the broker journal. No financial collection, evaluation or simulation occurs here. | Allocate submission resources/nonces; independently check scope and authority; durably admit the immutable submission before broadcast. |
+| `observe` | Collect and interpret receipt/status and typed financial evidence. | Reconstruct from the durable original operation; atomically reconcile verified effects and return the public result. |
 
-Evaluation and finalization functions have no adapter receiver, transport,
-signer, journal or clock access. Required timestamps are explicit evidence.
-Eligibility, health, amount, accounting and receipt interpretation use raw typed
-facts. A collector does not call the old preparation/reconciliation path and
-present its completed result as evidence. Legacy public adapter entrypoints run
-the same Aave typed phases, avoiding a second financial decision algorithm.
+The in-process authorized handoff is nonserializable and holds the exact
+candidate plus broker journal capability. A broker nonce reservation can carry
+the chain/sender-bound observation acquired under the submission lock, so the
+runtime does not repeat chain and pending-nonce RPC reads. Direct adapter calls
+without that capability acquire those facts themselves; the observation is never
+restored as fresh evidence from durable storage. Typestate prevents incorrect local
+sequencing; it cannot replace expiry, revocation, concurrency or single-use
+admission checks. An observation can be pending, successful, failed or uncertain;
+acceptance is not settlement, and an uncertain observation cannot authorize a
+new submission. The pure financial evaluator has no adapter, transport, signer,
+journal or clock access; time-sensitive inputs are explicit evidence.
+
+Aave operation version 2 makes health, debt, liquidity and position bounds
+best-effort preapproval assessments. There is no postapproval `refresh`,
+`revalidate`, `confirm` or `finalize_validation` pass. Conditions may change while
+approval is pending or the transaction is in flight. The direct Pool call does
+not enforce custom health/debt thresholds. Exact-amount calldata, immutable
+account/market/asset identities and authorized native fee ceilings remain bound.
+For full repayment/withdrawal the Pool call contains its full-position sentinel;
+the finite `max_amount` is assessed before approval, not encoded as an onchain
+ceiling. Public schemas, warnings and structured approval terms disclose this.
+Observation preserves independently proved actual effects beyond an assessment
+and reports discrepancies; it does not hide a settled transaction as pending.
+Older unsubmitted approvals require fresh review under the new operation
+semantics; their historical records and submitted identities remain intact.
 
 Collection has dependency rounds. Aave first obtains verified provider and
 reserve identities, then collects dependent receipt, balance, index and risk
@@ -554,23 +573,21 @@ Fresh packed reserve precision must match any hint before amount conversion;
 MCP never supplies financial risk, proxy identity or exposure completeness.
 Verified current metadata is reusable under existing token-cache expiry rules;
 explicit historical reads fetch their own token labels and never overwrite the
-current cache. Financial state remains fresh in every pass.
+current cache. Financial state is freshly collected for each new preapproval assessment.
 
-Some evidence depends on a candidate. After pure borrow evaluation selects an
-exact amount, `collect_final` can obtain unsigned MCP calldata, gas/nonce facts
-and exact transaction simulation. Pure finalization checks those facts and
-freezes the request before approval. Revalidation uses the frozen calldata
-without another MCP builder request. Simulation keeps its original sender and
-live runtime behavior; it is not an aggregate call. No capture-local evidence
-cache crosses approval or a preparation pass.
+Some evidence depends on a candidate. After pure evaluation selects an exact
+amount, `prepare` obtains unsigned MCP calldata and gas/nonce facts. `simulate`
+runs the exact transaction with its original sender, validates its return data
+and completes approval accounting. Simulation is not a Multicall subcall. A
+canonicality check after preparation and simulation detects a reorg of the
+financial snapshot during those phases.
 
-Aave write preparation does not acquire optional display USD valuations:
-`valuation` is absent rather than refreshed during approval or admission.
-Protocol-intrinsic oracle evidence for health and explicit debt bounds remains
-mandatory. One uncached captured-block canonicality check follows the candidate's
-MCP preparation and exact simulation, catching a reorg during either operation.
-Initial captured headers are reused for anchor facts; independent end-of-pass
-canonicality checks remain live observations.
+Aave does not acquire optional display USD valuations for approval or admission.
+Protocol-intrinsic oracle facts for health and explicit debt bounds remain
+mandatory during preapproval collection. Submission checks only execution
+requirements, such as pending nonce, native gas affordability, fee viability and
+bound deployment identity. It does not re-run oracle, reserve, collateral, debt
+or position reads. The broker retains local scope, expiry and authority checks.
 
 MCP remains preferred for informational discovery and planning, and supplies
 independently validated unsigned transaction candidates. Replacing an exact RPC
@@ -591,8 +608,7 @@ identity-bound constructor; existing runtime callers retain their compatibility
 facade. Missing or uncertain evidence stays pending. A failed canonical receipt
 settles only actual gas, and submission acceptance is never settlement.
 
-Observation cannot authorize, dispatch or replay a write. Compound actions use
-the same child lifecycle under existing parent authority and dependency rules.
+Observation cannot authorize, dispatch or replay a write. The Aave lifecycle models a single action; existing compound orchestration retains responsibility for parent authority and dependencies when invoking a child.
 An observed child outcome can make the next stage ready, but only the engine can
 admit and execute it. Exact native terms, expiry, resolved deadlines and durable
 submission identities remain independently checked. This migration requires no
@@ -833,7 +849,7 @@ Configuration separates networks, deployments, connections, credential reference
 
 Each operation owns typed request, prepared execution, and evidence structures. Use JSON at client/storage boundaries rather than passing untyped maps through the financial engine. Reject unknown write fields and ambiguous quantities. Runtime dispatch may erase types internally, but must re-enter the registered typed implementation before preparation or execution.
 
-An operation implements preparation, revalidation, submission, and reconciliation. Its definition also includes description, examples, input/output/error schemas, field semantics, authority requirements, read/write/configuration classification, and completion criteria.
+Legacy operations implement preparation, revalidation, submission and reconciliation; the Aave proof of concept uses the typed lifecycle described above. Its definition also includes description, examples, input/output/error schemas, field semantics, authority requirements, read/write/configuration classification, and completion criteria.
 
 The engine owns final validation and checks native authority, candidate binding,
 deadline, signer allocation and replay identity before handing the immutable candidate to `submit_revalidated`.
@@ -844,8 +860,7 @@ monotonic and wall-clock ages must fit. Delayed approval or preparation falls ba
 to adapter revalidation or a freshly prepared candidate when the adapter can
 independently validate it against every approved native term.
 Reuse never restores evidence from the journal or changes approved financial
-bounds. Aave risk paths retain final revalidation. This in-process handoff is not serialized or restored from
-the journal. Final admission still checks the exact candidate and current
+bounds. Aave uses its separate versioned preapproval-only financial assessment contract. This in-process handoff is not serialized or restored from the journal. Final admission still checks the exact candidate and current
 authority; protocol-critical quote, deadline and simulation requirements remain
 adapter-specific. Optional USD reporting prices do not authorize a write. EVM
 submission rereads the pending nonce and verifies the exact frozen envelope;

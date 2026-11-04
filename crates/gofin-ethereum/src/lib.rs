@@ -1180,10 +1180,18 @@ impl Adapter for EthereumAdapter {
             );
         }
         if same_intent
-            && matches!(
+            && (matches!(
                 approved.operation.as_str(),
                 "sushi.swap" | "pancakeswap.swap" | "ramses.swap"
-            )
+            ) || (approved.operation_version == 2
+                && matches!(
+                    approved.operation.as_str(),
+                    "aave.supply"
+                        | "aave.borrow"
+                        | "aave.repay"
+                        | "aave.withdraw"
+                        | "aave.collateral"
+                )))
         {
             let mut original = native_authorization_binding(approved)["execution"].clone();
             let mut refreshed = native_authorization_binding(candidate)["execution"].clone();
@@ -1333,8 +1341,8 @@ impl Adapter for EthereumAdapter {
         if let Some(mut session) = self.aave_read_lifecycle(operation, input)? {
             session.collect().await?;
             session.evaluate()?;
-            session.collect_final().await?;
-            return match session.finalize_candidate()? {
+            session.prepare().await?;
+            return match session.simulate().await? {
                 gofin_domain::operation_lifecycle::CandidateResult::Read(value) => Ok(value),
                 _ => Err(GoFinError::validation(
                     "Native read produced a write candidate.",
@@ -1389,8 +1397,8 @@ impl Adapter for EthereumAdapter {
         if let Some(mut session) = self.aave_write_lifecycle(operation, input, Some(context))? {
             session.collect().await?;
             session.evaluate()?;
-            session.collect_final().await?;
-            return match session.finalize_candidate()? {
+            session.prepare().await?;
+            return match session.simulate().await? {
                 gofin_domain::operation_lifecycle::CandidateResult::Write(prepared) => {
                     Ok(*prepared)
                 }
@@ -1563,13 +1571,9 @@ impl Adapter for EthereumAdapter {
     }
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
-        if let Some(mut session) =
-            self.aave_write_lifecycle(&prepared.operation, &prepared.input, None)?
-        {
-            session.refresh(prepared).await?;
-            session.revalidate(prepared)?;
-            session.confirm(prepared).await?;
-            return session.finalize_validation(prepared);
+        if prepared.operation.starts_with("aave.") {
+            self.aave_validate_prepared(prepared)?;
+            return Ok(prepared.clone());
         }
         if uniswap_api::is_api(prepared) {
             return self.uniswap_api_revalidate(prepared).await;
@@ -1630,6 +1634,14 @@ impl Adapter for EthereumAdapter {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
+        if prepared.operation.starts_with("aave.") {
+            self.aave_validate_prepared(prepared)?;
+            let authorized = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+                prepared.clone(),
+                journal,
+            )?;
+            return self.aave_submit(&authorized).await;
+        }
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.submit(prepared, journal).await;
         }
@@ -1649,6 +1661,14 @@ impl Adapter for EthereumAdapter {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
         let prepared = validated.prepared();
+        if prepared.operation.starts_with("aave.") {
+            self.aave_validate_prepared(prepared)?;
+            let authorized = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+                prepared.clone(),
+                journal,
+            )?;
+            return self.aave_submit(&authorized).await;
+        }
         if uniswap_api::is_api(prepared) {
             return self.uniswap_api_submit(validated, journal).await;
         }
@@ -1681,78 +1701,6 @@ impl Adapter for EthereumAdapter {
                 "Original binding is malformed.",
             )
         })?;
-        if prepared.operation.starts_with("aave.") {
-            use aave_mcp::{
-                AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields,
-            };
-            let request = request::parse(&prepared.operation, &prepared.input)?;
-            let action = match prepared.operation.as_str() {
-                "aave.supply" => AaveMcpAction::Supply,
-                "aave.borrow" => AaveMcpAction::Borrow,
-                "aave.repay" => AaveMcpAction::Repay,
-                "aave.withdraw" => AaveMcpAction::Withdraw,
-                "aave.collateral" => AaveMcpAction::Collateral,
-                _ => unreachable!("registered Aave write"),
-            };
-            let all = request.amount.as_deref() == Some("all");
-            let units = if action == AaveMcpAction::Collateral {
-                U256::ZERO
-            } else {
-                exact(
-                    if all {
-                        request.max_amount.as_deref().expect("validated schema")
-                    } else {
-                        request.amount.as_deref().expect("validated schema")
-                    },
-                    binding.token.decimals,
-                )?
-            };
-            require(
-                quantity(units) == binding.units,
-                "AAVE_CALLDATA_INVALID",
-                "Aave request amount differs from the revalidated frozen binding.",
-            )?;
-            require(
-                binding.pool.as_deref() == Some(self.aave()?.pool.as_str()),
-                "AAVE_CALLDATA_INVALID",
-                "Aave transaction market differs from the selected reviewed Pool.",
-            )?;
-            if all {
-                require(
-                    units < U256::MAX,
-                    "ALL_AMOUNT_CAP_INVALID",
-                    "Aave full repayment and withdrawal require a finite cap below uint256 maximum.",
-                )?;
-            }
-            let amount = if action == AaveMcpAction::Collateral {
-                None
-            } else if all {
-                Some(AaveMcpAmount::Max { cap: units })
-            } else {
-                Some(AaveMcpAmount::Exact(units))
-            };
-            let intent = AaveMcpIntent {
-                chain_id: self.config.chain_id,
-                pool: address(&self.aave()?.pool)?,
-                owner: address(&binding.transaction.sender)?,
-                token: address(&binding.token.reference)?,
-                action,
-                amount,
-                recipient: binding.recipient.as_deref().map(address).transpose()?,
-                enabled: binding.enabled,
-                decimals: binding.token.decimals,
-            };
-            let tx = &binding.transaction;
-            validate_transaction_fields(
-                &intent,
-                tx.chain_id,
-                address(&tx.to)?,
-                address(&tx.sender)?,
-                u256(&tx.value)?,
-                &gofin_evm::rpc_bytes(&json!(tx.calldata))?,
-            )
-            .map_err(|e| error("AAVE_CALLDATA_INVALID", "submission", &e.to_string()))?;
-        }
         let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
         if let Some(template) = &binding.permit_template {
             return self

@@ -1,4 +1,36 @@
 //! Lifecycle loopback measurements, no external calls.
+// Synthetic key and signed transactions are confined to the localhost fixture.
+const MEASUREMENT_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+fn measurement_owner() -> Address {
+    gofin_evm::LocalEnvelopeSigner::from_private_key(MEASUREMENT_KEY)
+        .unwrap()
+        .address()
+}
+
+struct MeasurementJournal {
+    expected: PreparedOperation,
+    saved: Mutex<Option<Submission>>,
+}
+impl gofin_domain::SubmissionJournal for MeasurementJournal {
+    fn assert_authorized(&self) -> Result<()> {
+        Ok(())
+    }
+    fn assert_candidate(&self, candidate: &PreparedOperation) -> Result<()> {
+        if candidate == &self.expected {
+            Ok(())
+        } else {
+            Err(GoFinError::validation("Measurement candidate changed."))
+        }
+    }
+    fn persist_submission(&self, submission: &Submission) -> Result<()> {
+        let mut saved = self.saved.lock().unwrap();
+        if saved.is_some() {
+            return Err(GoFinError::validation("Duplicate fixture admission."));
+        }
+        *saved = Some(submission.clone());
+        Ok(())
+    }
+}
 use super::*;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -179,6 +211,16 @@ async fn synthetic_reply(
     method: &str,
     mut params: Value,
 ) -> Result<Value> {
+    if method == "eth_getCode" && params[0] == json!(lower_address(measurement_owner())) {
+        return Ok(json!("0x"));
+    }
+    if method == "eth_sendRawTransaction" {
+        let raw = gofin_evm::rpc_bytes(&params[0])?;
+        return Ok(json!(format!(
+            "{:#x}",
+            gofin_evm::alloy::primitives::keccak256(raw)
+        )));
+    }
     // The synthetic Fixture accepts numeric tags; emulate EIP-1898 faithfully.
     let index = if method == "eth_getStorageAt" { 2 } else { 1 };
     if let Some(hash_value) = params[index]["blockHash"].as_str() {
@@ -244,7 +286,7 @@ fn install_success_fixture(
     let mut state = fixture.states.lock().unwrap().get(&21).unwrap().clone();
     let index = state.income;
     let debt_index = state.debt_index;
-    let owner = addr(1);
+    let owner = address(&binding.transaction.sender)?;
     let token = addr(101);
     let pool = addr(300);
     let a_token = addr(110);
@@ -482,39 +524,43 @@ async fn preview(
     if let Err(e) = result {
         return (Err(e), phases);
     }
-    let result = session.collect_final().await;
+    let result = session.prepare().await;
     phases.push(measure());
     if let Err(e) = result {
         return (Err(e), phases);
     }
-    let result = session.finalize_candidate();
+    let result = session.simulate().await;
     phases.push(measure());
     (result, phases)
 }
-async fn revalidate_session(
+async fn execute_session(
     session: &mut dyn gofin_domain::operation_lifecycle::LifecycleSession,
     original: &PreparedOperation,
+    reservation: Option<gofin_domain::operation_lifecycle::NonceReservation>,
     measure: &impl Fn() -> Counts,
-) -> (Result<PreparedOperation>, Vec<Counts>) {
-    let mut phases = Vec::new();
-    let result = session.refresh(original).await;
-    phases.push(measure());
-    if let Err(e) = result {
-        return (Err(e), phases);
+) -> (Result<Submission>, Vec<Counts>) {
+    let journal = Arc::new(MeasurementJournal {
+        expected: original.clone(),
+        saved: Mutex::new(None),
+    });
+    let authorization =
+        gofin_domain::operation_lifecycle::AuthorizedOperation::with_nonce_reservation(
+            original.clone(),
+            journal.clone(),
+            reservation,
+        )
+        .and_then(|authorized| session.authorize(authorized));
+    let authorized_counts = measure();
+    assert_eq!(authorized_counts, (0, 0, 0, 0, 0));
+    if let Err(error) = authorization {
+        return (Err(error), vec![authorized_counts]);
     }
-    let result = session.revalidate(original);
-    phases.push(measure());
-    if let Err(e) = result {
-        return (Err(e), phases);
+    let submitted = session.execute().await;
+    let execution_counts = measure();
+    if let Ok(submission) = &submitted {
+        assert_eq!(journal.saved.lock().unwrap().as_ref(), Some(submission));
     }
-    let result = session.confirm(original).await;
-    phases.push(measure());
-    if let Err(e) = result {
-        return (Err(e), phases);
-    }
-    let result = session.finalize_validation(original);
-    phases.push(measure());
-    (result, phases)
+    (submitted, vec![authorized_counts, execution_counts])
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_action_and_read_http_counts() {
@@ -762,6 +808,8 @@ async fn after_action_and_read_http_counts() {
             }
             let physical = Arc::new(AtomicUsize::new(0));
             let worker_physical = physical.clone();
+            let methods = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let worker_methods = methods.clone();
             let aggregates = Arc::new(AtomicUsize::new(0));
             let worker_aggregates = aggregates.clone();
             let subcalls = Arc::new(AtomicUsize::new(0));
@@ -827,6 +875,11 @@ async fn after_action_and_read_http_counts() {
                         serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
                     worker_physical.fetch_add(1, Ordering::SeqCst);
                     let method = request["method"].as_str().unwrap();
+                    *worker_methods
+                        .lock()
+                        .unwrap()
+                        .entry(method.into())
+                        .or_default() += 1;
                     let params = request["params"].clone();
                     let multicall = address(crate::collection::MULTICALL).unwrap();
                     if worker_tracking.load(Ordering::SeqCst)
@@ -836,7 +889,12 @@ async fn after_action_and_read_http_counts() {
                     {
                         *worker_facts.lock().unwrap().entry(key).or_default() += 1;
                     }
-                    let result = if method == "eth_getCode"
+                    let result = if method == "eth_call" && worker_fault.load(Ordering::SeqCst) == 4
+                    {
+                        Err(GoFinError::validation(
+                            "Financial reads and simulation are unavailable after approval.",
+                        ))
+                    } else if method == "eth_getCode"
                         && params[0] == json!(lower_address(multicall))
                     {
                         if worker_fault.load(Ordering::SeqCst) == 3 {
@@ -934,14 +992,67 @@ async fn after_action_and_read_http_counts() {
                     remote_calls: metadata_remote_calls.clone(),
                 }));
             }
-            adapter.runtime = Arc::new(EvmRuntime::new(counted.clone(), 1, None));
+            adapter.wallets[0].address = lower_address(measurement_owner());
+            adapter.runtime = Arc::new(EvmRuntime::new(
+                counted.clone(),
+                1,
+                Some(Arc::new(
+                    gofin_evm::LocalEnvelopeSigner::from_private_key(MEASUREMENT_KEY).unwrap(),
+                )),
+            ));
             let measure = || {
                 let phase = phase_index.fetch_add(1, Ordering::SeqCst);
+                let observed_methods = std::mem::take(&mut *methods.lock().unwrap());
+                let write = !matches!(case.op, "aave.markets" | "aave.reserves" | "aave.positions");
+                if write && matches!(phase, 9 | 11) {
+                    assert_eq!(
+                        observed_methods,
+                        BTreeMap::from([
+                            ("eth_chainId".into(), 1),
+                            ("eth_getBalance".into(), 1),
+                            ("eth_getBlockByNumber".into(), 1),
+                            ("eth_getCode".into(), 2),
+                            ("eth_getStorageAt".into(), 1),
+                            ("eth_getTransactionCount".into(), 1),
+                            ("eth_sendRawTransaction".into(), 1),
+                        ]),
+                        "execution must only check deployment identity and envelope requirements"
+                    );
+                }
+                if write && phase == 14 {
+                    assert_eq!(
+                        observed_methods,
+                        BTreeMap::from([
+                            ("eth_getBalance".into(), 1),
+                            ("eth_getBlockByNumber".into(), 1),
+                            ("eth_getCode".into(), 2),
+                            ("eth_getStorageAt".into(), 1),
+                            ("eth_sendRawTransaction".into(), 1),
+                        ]),
+                        "broker-observed chain and nonce must not be read twice"
+                    );
+                }
+                if !observed_methods.is_empty() {
+                    eprintln!(
+                        "METHODS N={} {} phase={} {}",
+                        market_size,
+                        case.label,
+                        phase,
+                        serde_json::to_string(&observed_methods).unwrap()
+                    );
+                }
                 let metadata = metadata_calls.swap(0, Ordering::SeqCst);
                 let posts = mcp_posts.swap(0, Ordering::SeqCst);
                 let tools = mcp_tool_calls.swap(0, Ordering::SeqCst);
                 let local = catalog_lookups.swap(0, Ordering::SeqCst);
                 let remote = metadata_remote_calls.swap(0, Ordering::SeqCst);
+                if write && matches!(phase, 8..=14) {
+                    assert_eq!(
+                        metadata + posts + tools + local + remote,
+                        0,
+                        "execution must not recollect metadata or request MCP transactions"
+                    );
+                }
                 if metadata + posts + local + remote > 0 {
                     eprintln!(
                         "EXTERNAL N={} {} phase={} token_metadata_rpc={} mcp_posts={} mcp_tool_calls={} local_catalog_lookups={} metadata_service_calls={}",
@@ -991,6 +1102,9 @@ async fn after_action_and_read_http_counts() {
             if reads && case.scoped {
                 input["tokens"] = json!([lower_address(addr(101))]);
             }
+            if case.op == "aave.withdraw" {
+                input["recipient"] = json!(lower_address(measurement_owner()));
+            }
             if case.op == "aave.collateral" {
                 input["enabled"] = json!(case.enabled);
                 if case.debt > 0 {
@@ -1032,7 +1146,11 @@ async fn after_action_and_read_http_counts() {
             );
             for phase in [&cold, &warm] {
                 assert_eq!(phase[1], (0, 0, 0, 0, 0));
-                assert_eq!(phase[3], (0, 0, 0, 0, 0));
+                if reads {
+                    assert_eq!(phase[3], (0, 0, 0, 0, 0));
+                } else {
+                    assert!(phase[3].1 > 0, "simulate must perform envelope simulation");
+                }
             }
             if reads {
                 input["block_number"] = json!(19);
@@ -1058,18 +1176,57 @@ async fn after_action_and_read_http_counts() {
             } else if let Ok(gofin_domain::operation_lifecycle::CandidateResult::Write(prepared)) =
                 cold_result
             {
-                let (reval_result, reval) =
-                    revalidate_session(cold_session.as_mut(), &prepared, &measure).await;
+                // Contract reads/simulations are deliberately unavailable after
+                // approval; executing the approved envelope must not need them.
+                fault.store(4, Ordering::SeqCst);
+                let (execution_result, execution) =
+                    execute_session(cold_session.as_mut(), &prepared, None, &measure).await;
                 let next = fixture.states.lock().unwrap().get(&20).unwrap().clone();
                 fixture.states.lock().unwrap().insert(21, next);
                 fixture.latest.store(21, Ordering::SeqCst);
-                let (history_result, historical) =
-                    revalidate_session(cold_session.as_mut(), &prepared, &measure).await;
+                let (advanced_result, advanced_execution) =
+                    execute_session(warm_session.as_mut(), &prepared, None, &measure).await;
+                // Exercise the same adapter nonce discovery used under the
+                // broker's resource lock, then hand that fact to execution.
+                // The store allocation itself is covered by engine tests.
+                let (scope, observed_nonce) =
+                    adapter.evm_nonce_scope(&prepared).await.unwrap().unwrap();
+                let nonce_scope_counts = measure();
+                assert_eq!(nonce_scope_counts, (2, 2, 0, 0, 0));
+                let reservation = gofin_domain::operation_lifecycle::NonceReservation::new(
+                    scope,
+                    observed_nonce,
+                    observed_nonce,
+                )
+                .unwrap();
+                let mut broker_session = adapter
+                    .operation_lifecycle(case.op, &input, None)
+                    .unwrap()
+                    .unwrap();
+                let (broker_result, broker_counts) = execute_session(
+                    broker_session.as_mut(),
+                    &prepared,
+                    Some(reservation),
+                    &measure,
+                )
+                .await;
+                assert!(
+                    broker_result.is_ok(),
+                    "{} broker-observation execution: {:?}",
+                    case.label,
+                    broker_result.err()
+                );
+                assert_eq!(broker_counts[1], (6, 6, 0, 0, 0));
+                eprintln!(
+                    "BROKER_EXECUTION N={} {} nonce_scope={:?} authorization={:?} execute={:?}",
+                    market_size, case.label, nonce_scope_counts, broker_counts[0], broker_counts[1]
+                );
+                fault.store(0, Ordering::SeqCst);
                 let signature = [
                     cold.clone(),
                     warm.clone(),
-                    reval.clone(),
-                    historical.clone(),
+                    execution.clone(),
+                    advanced_execution.clone(),
                 ];
                 if let Some(previous) = fixed_exposure_counts.get(case.label) {
                     assert_eq!(
@@ -1092,15 +1249,13 @@ async fn after_action_and_read_http_counts() {
                 };
                 let evaluated_counts = measure();
                 assert!(
-                    reval_result.is_ok() && history_result.is_ok(),
-                    "{} N={} revalidation failed",
+                    execution_result.is_ok() && advanced_result.is_ok(),
+                    "{} N={} execution failed: {:?} / {:?}",
                     case.label,
-                    market_size
+                    market_size,
+                    execution_result.as_ref().err(),
+                    advanced_result.as_ref().err()
                 );
-                for phases in [&reval, &historical] {
-                    assert_eq!(phases[1], (0, 0, 0, 0, 0));
-                    assert_eq!(phases[3], (0, 0, 0, 0, 0));
-                }
                 assert_eq!(pending.as_deref(), Ok("Pending"));
                 assert_eq!(evaluated_counts, (0, 0, 0, 0, 0));
                 let install = install_success_fixture(case, &fixture, &adapter, &prepared);
@@ -1132,18 +1287,18 @@ async fn after_action_and_read_http_counts() {
                     market_size, case.label, completed.0, completed.1, completed.2
                 );
                 eprintln!(
-                    "AFTER N={} {} cold={:?} warm={:?} revalidation={:?} historical={:?} pending={:?}/{:?} results=ok/{:?}/{:?}/{:?}/{:?}",
+                    "AFTER N={} {} cold={:?} warm={:?} execution={:?} advanced_execution={:?} pending={:?}/{:?} results=ok/{:?}/{:?}/{:?}/{:?}",
                     market_size,
                     case.label,
                     cold,
                     warm,
-                    reval,
-                    historical,
+                    execution,
+                    advanced_execution,
                     observed_counts,
                     evaluated_counts,
                     warm_result.map(|_| "ok").map_err(|e| e.code),
-                    reval_result.map(|_| "ok").map_err(|e| e.code),
-                    history_result.map(|_| "ok").map_err(|e| e.code),
+                    execution_result.map(|_| "ok").map_err(|e| e.code),
+                    advanced_result.map(|_| "ok").map_err(|e| e.code),
                     pending
                 );
             } else {

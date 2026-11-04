@@ -190,7 +190,18 @@ The Touch ID challenge remains valid for at most 90 seconds, including for compo
 
 Standalone approval covers one submitted attempt. A submitted failed attempt, including a gas-burning revert, needs new authority. Compound approval covers only declared stages through its bound admission deadline (`actionDeadline` for `bridge.execute`); it does not receive an extra 30 minutes. This is independent of a provider-enforced protocol completion deadline; unsupported protocol guarantees are rejected. Before every admission the broker checks authority, stage prerequisites, native economic bounds and cumulative native fee caps, including costs already spent. Successful stages are immutable and never re-granted or repeated.
 
-An adapter may explicitly opt into bounded reuse of initial preparation before standalone admission. The reuse window starts before preparation and cannot extend candidate, price or approval deadlines. The broker still performs full revalidation under the submission resource lock before admission; boundary and plan attempts cannot use this standalone-only optimization.
+An adapter may explicitly opt into bounded reuse of initial preparation before standalone admission. The reuse window starts before preparation and cannot extend candidate, price or approval deadlines. For adapters using the legacy lifecycle, the broker still performs full revalidation under the submission resource lock before admission; boundary and plan attempts cannot use this standalone-only optimization.
+
+Aave's typed single-action path evaluates financial conditions and simulates the
+prepared envelope before approval. Health, debt, liquidity and position bounds
+are best-effort assessments at that time; they are not refreshed during approval
+or before submission, and custom health/debt thresholds are not enforced by the
+Pool transaction. Full repayment/withdrawal uses the Pool's full-position
+sentinel: its finite `max_amount` is a preapproval assessment cap, not an encoded
+onchain ceiling. Exact-amount calldata, account/market/asset identity, native fee
+ceilings and authority remain independently bound. After the submission resource
+lock, the adapter checks execution requirements once without repeating financial
+reads or simulation. Other adapters retain their existing revalidation contracts.
 
 The journal atomically records concrete attempt identity, candidate binding, authority consumption and signer allocation before dispatch. Repeating execute observes the existing logical action. Continuation uses a broker-issued token with durable idempotency, including concurrent calls and lost responses. Explicit reauthorization binds a broker token and revised native input to a fresh review of unfinished work, retaining completed stages and spent fees. Repeating the token is idempotent. Financial invocation termination closes further admission; already admitted immutable submissions may finish. Status is bounded observation only and needs no approval. There is no background runner. If approval persistence succeeds but admission setup is interrupted, startup restores only the missing passive recovery metadata from the retained approved binding. It preserves the original expiry; an expired approval requires explicit reauthorization of the original action before any submission.
 

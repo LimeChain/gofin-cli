@@ -132,6 +132,251 @@ fn validated_transaction(tx: &FrozenTransaction) -> gofin_domain::RevalidatedOpe
 }
 
 #[tokio::test]
+async fn envelope_preparation_and_simulation_are_distinct_phases() {
+    let mut fixture = rpc(Arc::new(Mutex::new(vec![])));
+    fixture.simulation_failure = true;
+    let transport = Arc::new(CountedRpc {
+        inner: fixture,
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = EvmRuntime::new(transport.clone(), 1, None);
+    let original = frozen();
+    let envelope = runtime
+        .prepare_envelope(
+            address(&original.sender).unwrap(),
+            address(&original.to).unwrap(),
+            u256(&original.value).unwrap(),
+            Bytes::new(),
+            U256::from(1_000_000_000_000u64),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "eth_call")
+    );
+    transport.calls.lock().unwrap().clear();
+    assert_eq!(
+        runtime.simulate(&envelope).await.unwrap_err().code,
+        "SYNTHETIC_SIMULATION_FAILED"
+    );
+    assert_eq!(&*transport.calls.lock().unwrap(), &["eth_call"]);
+}
+
+#[tokio::test]
+async fn authorized_submission_checks_execution_only_and_journals_before_broadcast() {
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut fixture = rpc(events.clone());
+    // Post-approval contract state is deliberately unsimulatable. Submission
+    // must still proceed using the approved, pre-approval simulation semantics.
+    fixture.simulation_failure = true;
+    fixture.lost = true;
+    let transport = Arc::new(CountedRpc {
+        inner: fixture,
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = EvmRuntime::new(
+        transport.clone(),
+        1,
+        Some(Arc::new(AlteringSigner {
+            mutation: None,
+            events: events.clone(),
+        })),
+    );
+    let journal = Arc::new(Journal {
+        saved: Mutex::new(None),
+        events: events.clone(),
+        authorized: true,
+        fail_persist: false,
+    });
+    let tx = frozen();
+    let authorized = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+        validated_transaction(&tx).prepared().clone(),
+        journal.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .submit_authorized(&tx, json!({}), &authorized)
+            .await
+            .unwrap_err()
+            .code,
+        "RPC_UNAVAILABLE"
+    );
+    let mut calls = transport.calls.lock().unwrap().clone();
+    calls.sort();
+    assert_eq!(
+        calls,
+        [
+            "eth_chainId",
+            "eth_getBalance",
+            "eth_getBlockByNumber",
+            "eth_getTransactionCount",
+            "eth_sendRawTransaction"
+        ]
+    );
+    assert_eq!(&*events.lock().unwrap(), &["sign", "persist", "send"]);
+    let saved = journal.saved.lock().unwrap().clone().unwrap();
+    assert_eq!(saved.data["transaction"], json!(tx));
+    assert_eq!(saved.data["dispatch_block"], 10);
+}
+
+#[tokio::test]
+async fn authorized_submission_rejects_execution_changes_and_failed_durable_admission() {
+    for scenario in ["binding", "nonce", "balance", "fee", "chain", "persist"] {
+        let events = Arc::new(Mutex::new(vec![]));
+        let mut fixture = rpc(events.clone());
+        match scenario {
+            "nonce" => fixture.nonce += 1,
+            "balance" => fixture.balance = U256::ZERO,
+            "fee" => fixture.base_fee.store(100_000_000, Ordering::SeqCst),
+            "chain" => fixture.wrong_chain = true,
+            _ => {}
+        }
+        let transport = Arc::new(CountedRpc {
+            inner: fixture,
+            calls: Mutex::new(vec![]),
+        });
+        let runtime = EvmRuntime::new(
+            transport.clone(),
+            1,
+            Some(Arc::new(AlteringSigner {
+                mutation: None,
+                events: events.clone(),
+            })),
+        );
+        let original = frozen();
+        let journal = Arc::new(Journal {
+            saved: Mutex::new(None),
+            events: events.clone(),
+            authorized: true,
+            fail_persist: scenario == "persist",
+        });
+        let authorized = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+            validated_transaction(&original).prepared().clone(),
+            journal.clone(),
+        )
+        .unwrap();
+        let mut changed = original;
+        if scenario == "binding" {
+            changed.value = Quantity::from_u64(9);
+        }
+        assert!(
+            runtime
+                .submit_authorized(&changed, json!({}), &authorized)
+                .await
+                .is_err(),
+            "{scenario}"
+        );
+        assert!(journal.saved.lock().unwrap().is_none(), "{scenario}");
+        assert!(
+            !events.lock().unwrap().contains(&"send".into()),
+            "{scenario}"
+        );
+        assert_eq!(
+            events.lock().unwrap().contains(&"sign".into()),
+            scenario == "persist",
+            "{scenario}"
+        );
+        assert!(
+            !transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "eth_call" || m == "eth_estimateGas"),
+            "{scenario}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn broker_nonce_observation_is_reused_only_for_the_exact_reserved_envelope() {
+    use gofin_domain::operation_lifecycle::{AuthorizedOperation, NonceReservation};
+    for scenario in ["valid", "scope", "allocation", "observation"] {
+        let events = Arc::new(Mutex::new(vec![]));
+        let mut fixture = rpc(events.clone());
+        fixture.lost = true;
+        let transport = Arc::new(CountedRpc {
+            inner: fixture,
+            calls: Mutex::new(vec![]),
+        });
+        let runtime = EvmRuntime::new(
+            transport.clone(),
+            1,
+            Some(Arc::new(AlteringSigner {
+                mutation: None,
+                events: events.clone(),
+            })),
+        );
+        let tx = frozen();
+        let journal = Arc::new(Journal {
+            saved: Mutex::new(None),
+            events: events.clone(),
+            authorized: true,
+            fail_persist: false,
+        });
+        let scope = if scenario == "scope" {
+            "ethereum:2:wrong-signer".into()
+        } else {
+            format!("ethereum:1:{}", tx.sender)
+        };
+        let reservation = NonceReservation::new(
+            scope,
+            if scenario == "observation" {
+                tx.nonce - 1
+            } else {
+                tx.nonce
+            },
+            if scenario == "allocation" {
+                tx.nonce + 1
+            } else {
+                tx.nonce
+            },
+        )
+        .unwrap();
+        let authorized = AuthorizedOperation::with_nonce_reservation(
+            validated_transaction(&tx).prepared().clone(),
+            journal.clone(),
+            Some(reservation),
+        )
+        .unwrap();
+        let result = runtime.submit_authorized(&tx, json!({}), &authorized).await;
+        let mut calls = transport.calls.lock().unwrap().clone();
+        calls.sort();
+        if scenario == "valid" {
+            assert_eq!(result.unwrap_err().code, "RPC_UNAVAILABLE");
+            assert_eq!(
+                calls,
+                [
+                    "eth_getBalance",
+                    "eth_getBlockByNumber",
+                    "eth_sendRawTransaction"
+                ]
+            );
+            assert_eq!(&*events.lock().unwrap(), &["sign", "persist", "send"]);
+            assert!(journal.saved.lock().unwrap().is_some());
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                if scenario == "observation" {
+                    "NONCE_CHANGED"
+                } else {
+                    "BINDING_CHANGED"
+                }
+            );
+            assert!(calls.is_empty(), "{scenario}");
+            assert!(events.lock().unwrap().is_empty(), "{scenario}");
+            assert!(journal.saved.lock().unwrap().is_none(), "{scenario}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn validated_submission_reuses_simulation_and_preserves_original_uncertain_identity() {
     let events = Arc::new(Mutex::new(vec![]));
     let mut fixture = rpc(events.clone());

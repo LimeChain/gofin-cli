@@ -410,46 +410,27 @@ impl gofin_domain::operation_lifecycle::LifecycleSession for RoutedLifecycle<'_>
     fn evaluate(&mut self) -> gofin_domain::Result<()> {
         self.inner.evaluate()
     }
-    async fn collect_final(&mut self) -> gofin_domain::Result<()> {
-        self.inner.collect_final().await
+    async fn prepare(&mut self) -> gofin_domain::Result<()> {
+        self.inner.prepare().await
     }
-    fn finalize_candidate(
+    async fn simulate(
         &mut self,
     ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>> {
-        let result = self.inner.finalize_candidate()?;
+        let result = self.inner.simulate().await?;
         if let gofin_domain::operation_lifecycle::CandidateResult::Write(candidate) = &result {
             self.check(candidate)?;
         }
         Ok(result)
     }
-    async fn refresh(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.refresh(prepared).await
-    }
-    fn revalidate(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.revalidate(prepared)
-    }
-    async fn confirm(&mut self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
-        self.check(prepared)?;
-        self.inner.confirm(prepared).await
-    }
-    fn finalize_validation(
+    fn authorize(
         &mut self,
-        prepared: &PreparedOperation,
-    ) -> gofin_domain::Result<PreparedOperation> {
-        self.check(prepared)?;
-        let result = self.inner.finalize_validation(prepared)?;
-        self.check(&result)?;
-        Ok(result)
+        authorized: gofin_domain::operation_lifecycle::AuthorizedOperation,
+    ) -> gofin_domain::Result<()> {
+        self.check(authorized.prepared())?;
+        self.inner.authorize(authorized)
     }
-    async fn execute(
-        &mut self,
-        handoff: &gofin_domain::RevalidatedOperation,
-        journal: Arc<dyn SubmissionJournal>,
-    ) -> gofin_domain::Result<Submission> {
-        self.check(handoff.prepared())?;
-        self.inner.execute(handoff, journal).await
+    async fn execute(&mut self) -> gofin_domain::Result<Submission> {
+        self.inner.execute().await
     }
     async fn observe(&mut self, record: &OperationRecord) -> gofin_domain::Result<()> {
         let prepared = record
@@ -777,10 +758,10 @@ mod tests {
         fn evaluate(&mut self) -> gofin_domain::Result<()> {
             Ok(())
         }
-        async fn collect_final(&mut self) -> gofin_domain::Result<()> {
+        async fn prepare(&mut self) -> gofin_domain::Result<()> {
             Ok(())
         }
-        fn finalize_candidate(
+        async fn simulate(
             &mut self,
         ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>>
         {
@@ -788,26 +769,13 @@ mod tests {
                 Box::new(self.candidate.clone()),
             ))
         }
-        async fn refresh(&mut self, _: &PreparedOperation) -> gofin_domain::Result<()> {
-            Ok(())
-        }
-        fn revalidate(&mut self, _: &PreparedOperation) -> gofin_domain::Result<()> {
-            Ok(())
-        }
-        async fn confirm(&mut self, _: &PreparedOperation) -> gofin_domain::Result<()> {
-            Ok(())
-        }
-        fn finalize_validation(
+        fn authorize(
             &mut self,
-            prepared: &PreparedOperation,
-        ) -> gofin_domain::Result<PreparedOperation> {
-            Ok(prepared.clone())
+            _: gofin_domain::operation_lifecycle::AuthorizedOperation,
+        ) -> gofin_domain::Result<()> {
+            Ok(())
         }
-        async fn execute(
-            &mut self,
-            _: &gofin_domain::RevalidatedOperation,
-            _: Arc<dyn SubmissionJournal>,
-        ) -> gofin_domain::Result<Submission> {
+        async fn execute(&mut self) -> gofin_domain::Result<Submission> {
             Err(GoFinError::validation("not used"))
         }
         async fn observe(&mut self, _: &OperationRecord) -> gofin_domain::Result<()> {
@@ -1090,13 +1058,18 @@ mod tests {
             .unwrap();
         session.collect().await.unwrap();
         session.evaluate().unwrap();
-        session.collect_final().await.unwrap();
+        session.prepare().await.unwrap();
         assert!(matches!(
-            session.finalize_candidate().unwrap(),
+            session.simulate().await.unwrap(),
             gofin_domain::operation_lifecycle::CandidateResult::Write(_)
         ));
         let wrong_family = prepared("solana");
-        assert!(session.refresh(&wrong_family).await.is_err());
+        let authority = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+            wrong_family,
+            Arc::new(TestJournal),
+        )
+        .unwrap();
+        assert!(session.authorize(authority).is_err());
     }
 
     #[tokio::test]

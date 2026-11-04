@@ -295,7 +295,53 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn aave_submit_revalidation_binds_and_requires_present_proxy_implementation_code() {
+    async fn aave_execute_reaches_signer_without_financial_reads_after_approval_drift() {
+        for operation in ["aave.supply", "aave.borrow"] {
+            let rpc = Arc::new(Fixture::new());
+            {
+                let mut states = rpc.states.lock().unwrap();
+                let state = states.get_mut(&20).unwrap();
+                state.scaled_supply = U256::from(10_000_000);
+                state.collateral = true;
+            }
+            let signer = Arc::new(CountingSigner::default());
+            let adapter = counted_adapter(rpc.clone(), signer.clone());
+            let prepared = adapter
+                .prepare(operation, &aave_input(operation))
+                .await
+                .unwrap();
+            *rpc.paused.lock().unwrap() = true;
+            *rpc.allowance.lock().unwrap() = U256::ZERO;
+            *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
+            {
+                let mut states = rpc.states.lock().unwrap();
+                let state = states.get_mut(&20).unwrap();
+                state.collateral = false;
+                state.scaled_debt = U256::from(100_000_000);
+            }
+            rpc.calls.lock().unwrap().clear();
+            let journal = Arc::new(CountingJournal::default());
+            let error = adapter
+                .submit(&prepared, journal.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "SYNTHETIC_SIGNER_REACHED", "{operation}");
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|method| matches!(method.as_str(), "eth_call" | "eth_estimateGas")),
+                "{operation} must not simulate or recollect financial facts after approval"
+            );
+            assert_no_dispatch(&rpc);
+        }
+    }
+
+    #[tokio::test]
+    async fn aave_execution_binds_and_requires_present_proxy_implementation_code() {
         for case in [
             "implementation_changed",
             "implementation_missing",
@@ -343,9 +389,7 @@ mod final_submission_valuation_tests {
 
             assert_eq!(
                 error.code,
-                if case == "proxy_code_missing" {
-                    "CONTRACT_UNAVAILABLE"
-                } else if case.ends_with("missing") {
+                if case.ends_with("missing") {
                     "AAVE_IMPLEMENTATION_UNKNOWN"
                 } else {
                     "AAVE_IMPLEMENTATION_CHANGED"
@@ -362,7 +406,7 @@ mod final_submission_valuation_tests {
                 estimates_before,
                 "{case} must fail before a fresh simulation"
             );
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            assert!(journal.authorized.load(Ordering::SeqCst) > 0, "{case}");
             assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
             assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
             assert_no_dispatch(&rpc);
@@ -731,7 +775,10 @@ mod final_submission_valuation_tests {
                     .code,
                 "SYNTHETIC_SIGNER_REACHED"
             );
-            assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
+            assert!(
+                journal.authorized.load(Ordering::SeqCst) >= 1,
+                "live authority remains checked before signing"
+            );
             assert_eq!(signer.0.load(Ordering::SeqCst), 1);
             prices.unit_price.store(3_031_000_000, Ordering::SeqCst);
             assert_eq!(
@@ -4379,7 +4426,7 @@ async fn bounded_all_requires_attached_exact_cap_and_freezes_complete_cash() {
     assert_eq!(a.revalidate(&p).await.unwrap_err().code, "BINDING_CHANGED");
 }
 #[tokio::test]
-async fn bounded_withdraw_all_requires_exact_complete_scaled_close_and_finite_credit() {
+async fn legacy_withdraw_all_requires_exact_complete_scaled_close_and_finite_credit() {
     let rpc = Arc::new(Fixture::new());
     let a = adapter(rpc.clone());
     let q = U256::from(999999);
@@ -4392,7 +4439,8 @@ async fn bounded_withdraw_all_requires_exact_complete_scaled_close_and_finite_cr
     let mut v = aave_input("aave.withdraw");
     v["amount"] = json!("all");
     v["max_amount"] = json!("1.02");
-    let p = a.prepare("aave.withdraw", &v).await.unwrap();
+    let mut p = a.prepare("aave.withdraw", &v).await.unwrap();
+    p.operation_version = 1; // Historical submitted records retain their old interpretation.
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     let calldata = gofin_evm::rpc_bytes(&json!(b.transaction.calldata)).unwrap();
     assert_eq!(
@@ -4468,6 +4516,162 @@ async fn bounded_withdraw_all_requires_exact_complete_scaled_close_and_finite_cr
         "WITHDRAW_MAXIMUM"
     );
 }
+#[tokio::test]
+async fn aave_all_observation_preserves_actual_effects_when_accrual_exceeds_preapproval_cap() {
+    for operation in ["aave.withdraw", "aave.repay"] {
+        let rpc = Arc::new(Fixture::new());
+        let initial = U256::from(1_000_000);
+        rpc.states.lock().unwrap().insert(
+            20,
+            AtBlock {
+                scaled_supply: if operation == "aave.withdraw" {
+                    initial
+                } else {
+                    U256::ZERO
+                },
+                scaled_debt: if operation == "aave.repay" {
+                    initial
+                } else {
+                    U256::ZERO
+                },
+                income: ray(),
+                debt_index: ray(),
+                supply_previous: ray(),
+                debt_previous: ray(),
+                ..Default::default()
+            },
+        );
+        let a = adapter(rpc.clone());
+        let mut input = aave_input(operation);
+        input["amount"] = json!("all");
+        input["max_amount"] = json!("1.02");
+        *rpc.allowance.lock().unwrap() = U256::from(1_020_000);
+        let prepared = a.prepare(operation, &input).await.unwrap();
+        assert!(
+            prepared
+                .summary
+                .contains("all, preapproval assessed cap 1.02")
+        );
+        assert!(!prepared.summary.contains("all, capped at"));
+        let review = gofin_domain::approval_review::approval_review(&prepared).unwrap();
+        let cap = review
+            .terms
+            .iter()
+            .find(|term| term.label == "Full-position preapproval cap")
+            .unwrap();
+        assert_eq!(
+            cap.enforcement,
+            gofin_domain::approval_review::ApprovalTermEnforcement::Estimate
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            let leg = if operation == "aave.repay" {
+                review.input.as_ref()
+            } else {
+                review.output.as_ref()
+            }
+            .unwrap();
+            assert!(reason.contains(leg.amount.as_deref().unwrap()), "{reason}");
+        }
+        // Independently changed allowance can fund the larger MAX repayment;
+        // observation must report what settled rather than erase that result.
+        *rpc.allowance.lock().unwrap() = U256::from(1_100_000);
+        let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+        let index = ray() + ray() / U256::from(10);
+        let actual = U256::from(1_100_000);
+        rpc.post(
+            21,
+            AtBlock {
+                income: index,
+                debt_index: index,
+                supply_previous: index,
+                debt_previous: index,
+                ..Default::default()
+            },
+        );
+        let logs = if operation == "aave.withdraw" {
+            vec![
+                event(
+                    addr(300),
+                    Pool::Withdraw {
+                        reserve: addr(101),
+                        user: addr(1),
+                        to: addr(1),
+                        amount: actual,
+                    },
+                    21,
+                ),
+                event(
+                    addr(101),
+                    Erc20::Transfer {
+                        from: addr(110),
+                        to: addr(1),
+                        value: actual,
+                    },
+                    21,
+                ),
+            ]
+        } else {
+            vec![
+                event(
+                    addr(300),
+                    Pool::Repay {
+                        reserve: addr(101),
+                        user: addr(1),
+                        repayer: addr(1),
+                        amount: actual,
+                        useATokens: false,
+                    },
+                    21,
+                ),
+                event(
+                    addr(101),
+                    Erc20::Transfer {
+                        from: addr(1),
+                        to: addr(110),
+                        value: actual,
+                    },
+                    21,
+                ),
+            ]
+        };
+        rpc.set_receipt(&binding, 21, logs);
+        let record = record(prepared);
+        let result = a.reconcile(&record).await.unwrap();
+        assert_eq!(result.status, Status::Completed, "{operation}");
+        let verified = result.verified.unwrap();
+        assert_eq!(
+            verified.evidence["preapproval_bounds_discrepancies"][0]["observed"],
+            json!("1100000")
+        );
+        assert_eq!(
+            verified.evidence["preapproval_bounds_discrepancies"][0]["maximum"],
+            json!("1020000")
+        );
+        assert!(
+            verified.effects.iter().any(|effect| match effect {
+                FinancialEffect::CashDebit { amount, .. } if operation == "aave.repay" =>
+                    amount.atoms == quantity(actual),
+                FinancialEffect::UsableCredit { amount, .. } if operation == "aave.withdraw" =>
+                    amount.atoms == quantity(actual),
+                _ => false,
+            }),
+            "{operation}"
+        );
+        let mut legacy = record;
+        legacy.preview.as_mut().unwrap().operation_version = 1;
+        assert_eq!(
+            a.reconcile(&legacy).await.unwrap_err().code,
+            if operation == "aave.withdraw" {
+                "WITHDRAW_MAXIMUM"
+            } else {
+                "REPAY_PROOF_MISMATCH"
+            }
+        );
+    }
+}
+
 #[tokio::test]
 async fn withdrawal_credits_exact_proved_yield_and_closes_scaled_claim() {
     let rpc = Arc::new(Fixture::new());

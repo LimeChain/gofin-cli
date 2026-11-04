@@ -44,6 +44,21 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
     let prepared = a.prepare("aave.borrow", &input).await.unwrap();
     assert!(
         prepared
+            .summary
+            .contains("preapproval minimum health factor")
+    );
+    assert!(
+        prepared
+            .summary
+            .contains("preapproval maximum outstanding debt $100")
+    );
+    assert!(
+        prepared
+            .summary
+            .contains("preapproval maximum debt/collateral 2000 bps")
+    );
+    assert!(
+        prepared
             .intent
             .maximum_costs
             .iter()
@@ -564,11 +579,11 @@ async fn reopening_closed_positions_reobserves_zero_but_frozen_attempts_never_ch
     rpc.pruned_through.store(22, Ordering::SeqCst);
     rpc.inner.latest.store(23, Ordering::SeqCst);
     assert_eq!(
-        a.revalidate(&prepared).await.unwrap_err().code,
-        "RPC_HISTORICAL_STATE_UNAVAILABLE",
-        "Frozen preview must validate its original block, never silently reanchor"
+        a.revalidate(&prepared).await.unwrap(),
+        prepared,
+        "Postapproval execution preserves the original anchor without recollecting financial history"
     );
-    assert!(rpc.historical_reads.load(Ordering::SeqCst) > 0);
+    assert_eq!(rpc.historical_reads.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
 async fn closed_lineage_rejects_changed_canonical_hash_and_malformed_zero_evidence() {
@@ -1200,7 +1215,7 @@ async fn supply_preparation_rpc_measurement() {
 }
 
 #[tokio::test]
-async fn supply_revalidation_observes_new_allowance_balance_and_reserve_state() {
+async fn supply_execution_retains_preapproval_facts_without_financial_rechecks() {
     for changed in ["allowance", "balance", "paused"] {
         let rpc = Arc::new(Fixture::new());
         let a = adapter(rpc.clone());
@@ -1214,16 +1229,13 @@ async fn supply_revalidation_observes_new_allowance_balance_and_reserve_state() 
             "paused" => *rpc.paused.lock().unwrap() = true,
             _ => unreachable!(),
         }
-        let error = a.revalidate(&prepared).await.unwrap_err();
+        rpc.calls.lock().unwrap().clear();
         assert_eq!(
-            error.code,
-            match changed {
-                "allowance" => "ALLOWANCE_INSUFFICIENT",
-                "balance" => "INSUFFICIENT_BALANCE",
-                "paused" => "RESERVE_UNAVAILABLE",
-                _ => unreachable!(),
-            }
+            a.revalidate(&prepared).await.unwrap(),
+            prepared,
+            "{changed}"
         );
+        assert!(rpc.calls.lock().unwrap().is_empty(), "{changed}");
     }
 }
 
@@ -1413,9 +1425,15 @@ async fn supply_preparation_http_rpc_measurement() {
     stop.store(true, Ordering::Relaxed);
     worker.join().unwrap();
     assert!(
-        [cold, warm, revalidate, historical]
+        [cold, warm]
             .iter()
             .all(|(logical, physical)| *logical > 0 && *physical > 0)
+    );
+    assert_eq!(revalidate, (0, 0), "postapproval compatibility has no RPC");
+    assert_eq!(
+        historical,
+        (0, 0),
+        "head movement does not trigger financial recollection"
     );
     eprintln!(
         "supply HTTP fixture (logical, physical): cold={cold:?}, warm={warm:?}, revalidate={revalidate:?}, historical={historical:?}"
@@ -1423,7 +1441,7 @@ async fn supply_preparation_http_rpc_measurement() {
 }
 
 #[tokio::test]
-async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes() {
+async fn supply_capture_remains_pinned_and_only_new_preparation_reads_the_new_head() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct MovingHead {
         inner: Arc<Fixture>,
@@ -1477,10 +1495,19 @@ async fn supply_capture_remains_pinned_when_head_moves_and_next_pass_refreshes()
     }
     rpc.call_requests.lock().unwrap().clear();
     let refreshed = a.revalidate(&first).await.unwrap();
-    // Original evidence remains historical; current reserve is read at the new head.
+    // Original evidence remains historical without a postapproval financial read.
     assert_eq!(
         refreshed.binding["supply_anchor"]["evidence"]["block"],
         json!(20)
+    );
+    assert!(rpc.call_requests.lock().unwrap().is_empty());
+    let next = a
+        .prepare("aave.supply", &aave_input("aave.supply"))
+        .await
+        .unwrap();
+    assert_eq!(
+        next.binding["supply_anchor"]["evidence"]["block"],
+        json!(21)
     );
     let calls = rpc.call_requests.lock().unwrap();
     let selector = hex_bytes(&Pool::getReserveDataCall::SELECTOR);
@@ -1536,7 +1563,7 @@ async fn borrow_rejects_invalid_bitmap_reserve_identity_and_flag_mismatch() {
 }
 
 #[tokio::test]
-async fn borrow_revalidation_rechecks_collateral_and_debt() {
+async fn borrow_execution_does_not_recheck_collateral_and_debt() {
     for case in ["collateral", "debt"] {
         let rpc = Arc::new(Fixture::new());
         {
@@ -1559,7 +1586,9 @@ async fn borrow_revalidation_rechecks_collateral_and_debt() {
                 state.scaled_debt = U256::from(1_000_000);
             }
         }
-        assert!(a.revalidate(&prepared).await.is_err(), "{case}");
+        rpc.calls.lock().unwrap().clear();
+        assert_eq!(a.revalidate(&prepared).await.unwrap(), prepared, "{case}");
+        assert!(rpc.calls.lock().unwrap().is_empty(), "{case}");
     }
 }
 
@@ -1786,7 +1815,11 @@ async fn typed_aave_phases_match_adapter_preview_for_all_actions() {
             calls,
             "pure candidate {op}"
         );
-        let final_evidence = a.collect_aave_final(&candidate).await.unwrap();
+        let envelope = a.prepare_aave_envelope(&candidate).await.unwrap();
+        let final_evidence = a
+            .simulate_aave_envelope(&candidate, &envelope)
+            .await
+            .unwrap();
         let calls = rpc.calls.lock().unwrap().len();
         let prepared = finalize_write(&candidate, &final_evidence).unwrap();
         assert_eq!(
@@ -1821,7 +1854,7 @@ async fn typed_aave_phases_match_adapter_preview_for_all_actions() {
 }
 
 #[tokio::test]
-async fn aave_lifecycle_revalidates_with_no_io_in_pure_phases_and_preserves_deadline() {
+async fn aave_lifecycle_prepares_then_simulates_and_does_not_recollect_after_approval() {
     use gofin_domain::operation_lifecycle::CandidateResult;
     let rpc = Arc::new(Fixture::new());
     let a = adapter(rpc.clone());
@@ -1834,30 +1867,44 @@ async fn aave_lifecycle_revalidates_with_no_io_in_pure_phases_and_preserves_dead
     session.collect().await.unwrap();
     let calls = rpc.calls.lock().unwrap().len();
     session.evaluate().unwrap();
-    assert_eq!(rpc.calls.lock().unwrap().len(), calls);
-    session.collect_final().await.unwrap();
+    assert_eq!(
+        rpc.calls.lock().unwrap().len(),
+        calls,
+        "evaluation must be pure"
+    );
+    session.prepare().await.unwrap();
     let calls = rpc.calls.lock().unwrap().len();
-    let mut prepared = match session.finalize_candidate().unwrap() {
+    let mut prepared = match session.simulate().await.unwrap() {
         CandidateResult::Write(prepared) => *prepared,
         CandidateResult::Read(_) => panic!("Aave write returned read output"),
     };
-    assert_eq!(rpc.calls.lock().unwrap().len(), calls);
+    assert!(
+        rpc.calls.lock().unwrap().len() > calls,
+        "simulation must perform I/O"
+    );
     prepared.action_deadline = Some(gofin_domain::plan_timing::ResolvedActionDeadline {
         field: "deadline".into(),
         window_seconds: 60,
         resolved_at: "2026-01-01T00:00:00Z".into(),
         deadline_unix_seconds: 2_000_000_000,
     });
-    session.refresh(&prepared).await.unwrap();
-    let calls = rpc.calls.lock().unwrap().len();
-    session.revalidate(&prepared).unwrap();
-    assert_eq!(rpc.calls.lock().unwrap().len(), calls);
-    session.confirm(&prepared).await.unwrap();
-    let calls = rpc.calls.lock().unwrap().len();
-    let validated = session.finalize_validation(&prepared).unwrap();
-    assert_eq!(rpc.calls.lock().unwrap().len(), calls);
-    assert_eq!(validated.action_deadline, prepared.action_deadline);
-    assert_eq!(validated.binding, prepared.binding);
+    rpc.calls.lock().unwrap().clear();
+    let retained = a.revalidate(&prepared).await.unwrap();
+    assert_eq!(
+        retained, prepared,
+        "local compatibility check preserves all approved data"
+    );
+    assert!(
+        rpc.calls.lock().unwrap().is_empty(),
+        "no postapproval financial recollection"
+    );
+    let mut obsolete = prepared;
+    obsolete.operation_version = 1;
+    assert_eq!(
+        a.revalidate(&obsolete).await.unwrap_err().code,
+        "AAVE_APPROVAL_OBSOLETE"
+    );
+    assert!(rpc.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2120,4 +2167,61 @@ async fn historical_and_unscoped_reserves_do_not_fan_out_metadata_mcp() {
     let unscoped = json!({"wallet":"synthetic","network":"evm","chain_id":1});
     adapter.read("aave.reserves", &unscoped).await.unwrap();
     assert_eq!(mcp.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn aave_v2_approval_allows_only_execution_nonce_to_change() {
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
+    }
+    let a = adapter(rpc.clone());
+    let prepared = a
+        .prepare("aave.borrow", &aave_input("aave.borrow"))
+        .await
+        .unwrap();
+    rpc.calls.lock().unwrap().clear();
+    let next = a.apply_claimed_evm_nonce(&prepared, 42).unwrap();
+    a.validate_approved_candidate(&prepared, &next).unwrap();
+    assert!(rpc.calls.lock().unwrap().is_empty());
+    for pointer in [
+        "/transaction/value",
+        "/transaction/gas",
+        "/transaction/to",
+        "/transaction/max_fee_per_gas",
+        "/pool",
+        "/units",
+        "/recipient",
+        "/token/reference",
+    ] {
+        let mut altered = next.clone();
+        *altered.binding.pointer_mut(pointer).unwrap() = json!("changed");
+        assert_eq!(
+            a.validate_approved_candidate(&prepared, &altered)
+                .unwrap_err()
+                .code,
+            "CANDIDATE_OUTSIDE_APPROVAL",
+            "{pointer}"
+        );
+    }
+    let mut altered = next.clone();
+    altered.input["min_health_factor"] = json!("1.1");
+    assert_eq!(
+        a.validate_approved_candidate(&prepared, &altered)
+            .unwrap_err()
+            .code,
+        "CANDIDATE_OUTSIDE_APPROVAL"
+    );
+    let mut legacy = prepared;
+    legacy.operation_version = 1;
+    let legacy_next = a.apply_claimed_evm_nonce(&legacy, 42).unwrap();
+    assert_eq!(
+        a.validate_approved_candidate(&legacy, &legacy_next)
+            .unwrap_err()
+            .code,
+        "CANDIDATE_OUTSIDE_APPROVAL"
+    );
 }

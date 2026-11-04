@@ -55,13 +55,13 @@
           "type": "string"
         },
         "max_debt_to_collateral_bps": {
-          "description": "Maximum total debt to total collateral of the selected Aave market position after this action, in basis points, including existing debt.",
+          "description": "Preapproval limit on projected total debt to total collateral of the selected Aave market, in basis points, including existing debt. Checked before approval only; later prices and position changes may exceed it.",
           "maximum": 10000,
           "minimum": 1,
           "type": "integer"
         },
         "max_debt_usd": {
-          "description": "Maximum total USD debt across every reserve of the selected Aave market after this action, including existing debt; not the size of this borrow.",
+          "description": "Preapproval limit on projected total USD debt across every reserve of the selected Aave market, including existing debt; not the size of this borrow. Checked before approval only, not rechecked before submission or enforced by the Pool call.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -73,7 +73,7 @@
           "type": "string"
         },
         "min_health_factor": {
-          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
+          "description": "Preapproval minimum projected account-wide health factor of the selected Aave market, including existing debt and collateral. Checked before approval only; not a submission-time or onchain guarantee.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -2111,13 +2111,23 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
-      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "lifecycle": [
+        "collect",
+        "evaluate",
+        "prepare",
+        "simulate",
+        "authorize",
+        "execute",
+        "observe"
+      ],
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
@@ -2181,7 +2191,7 @@
           "type": "string"
         },
         "min_health_factor": {
-          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
+          "description": "Preapproval minimum projected account-wide health factor of the selected Aave market, including existing debt and collateral. Checked before approval only; not a submission-time or onchain guarantee.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -4217,13 +4227,23 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
-      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "lifecycle": [
+        "collect",
+        "evaluate",
+        "prepare",
+        "simulate",
+        "authorize",
+        "execute",
+        "observe"
+      ],
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
@@ -4350,6 +4370,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "reviewed_market_profiles": [
@@ -4444,7 +4465,7 @@
           "markets": []
         }
       ],
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "source_commit": "6a83d11893d6687bf6b9fd091a2a5320b3e1966e"
     }
   },
@@ -4545,7 +4566,7 @@
       "additionalProperties": false,
       "properties": {
         "block_number": {
-          "description": "Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes always use fresh state.",
+          "description": "Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes collect current state before approval.",
           "minimum": 1,
           "type": "integer"
         },
@@ -4639,9 +4660,10 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "state_block": "block_number selects a historical read-only observation with canonical block/hash checks; it never supplies financial write authority or current-funds evidence."
     }
   },
@@ -4734,6 +4756,7 @@
           "type": "string"
         },
         "max_amount": {
+          "description": "Finite cap for the preapproval assessment of amount=all. Aave calldata uses its full-position sentinel; max_amount is not encoded as an onchain ceiling. Execution-time interest or position changes can alter the amount; finite token allowance separately limits repayment.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -6781,17 +6804,27 @@
           "optional_usd_value": "estimate"
         }
       },
-      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "All requires a finite max_amount checked against collected state and exact simulation before approval. The Pool call uses the full-position sentinel, not this cap; the amount can change after approval. Settlement verifies actual effects and whether the selected debt or claim was cleared. Repayment additionally requires a finite allowance.",
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
-      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "lifecycle": [
+        "collect",
+        "evaluate",
+        "prepare",
+        "simulate",
+        "authorize",
+        "execute",
+        "observe"
+      ],
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
@@ -6838,7 +6871,7 @@
       "additionalProperties": false,
       "properties": {
         "block_number": {
-          "description": "Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes always use fresh state.",
+          "description": "Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes collect current state before approval.",
           "minimum": 1,
           "type": "integer"
         },
@@ -6932,9 +6965,10 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "state_block": "block_number selects a historical read-only observation with canonical block/hash checks; it never supplies financial write authority or current-funds evidence."
     }
   },
@@ -9030,13 +9064,23 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
-      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "lifecycle": [
+        "collect",
+        "evaluate",
+        "prepare",
+        "simulate",
+        "authorize",
+        "execute",
+        "observe"
+      ],
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
@@ -9129,6 +9173,7 @@
           "type": "string"
         },
         "max_amount": {
+          "description": "Finite cap for the preapproval assessment of amount=all. Aave calldata uses its full-position sentinel; max_amount is not encoded as an onchain ceiling. Execution-time interest or position changes can alter the amount; finite token allowance separately limits repayment.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -9140,7 +9185,7 @@
           "type": "string"
         },
         "min_health_factor": {
-          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
+          "description": "Preapproval minimum projected account-wide health factor of the selected Aave market, including existing debt and collateral. Checked before approval only; not a submission-time or onchain guarantee.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -11189,18 +11234,28 @@
           "optional_usd_value": "estimate"
         }
       },
-      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "All requires a finite max_amount checked against collected state and exact simulation before approval. The Pool call uses the full-position sentinel, not this cap; the amount can change after approval. Settlement verifies actual effects and whether the selected debt or claim was cleared. Repayment additionally requires a finite allowance.",
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
-      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "lifecycle": [
+        "collect",
+        "evaluate",
+        "prepare",
+        "simulate",
+        "authorize",
+        "execute",
+        "observe"
+      ],
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
+      "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "recipient": "The official Aave MCP withdrawal action currently targets the signing wallet. Other recipients are rejected before requesting transaction data.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
@@ -191106,7 +191161,7 @@
             "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
             "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
             "discovery_scope": "Automatic reads merge local catalog, configured, and previously observed positive holdings, bounded to 512 ERC-20 addresses. Explicit tokens select only those contracts, bounded to 64. Coverage is limited to the reported candidate set.",
-            "metadata_cache": "Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh; financial preparation independently reads current metadata.",
+            "metadata_cache": "Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh. Aave may reuse exact-identity metadata hints only after checking precision against fresh reserve configuration; other financial preparation reads current metadata.",
             "network": "explicit immutable chain/deployment identity",
             "retry": "Reconcile the original persisted hash, never blind replay.",
             "zero_balances": "Native, explicitly requested and configured zero balances are included. Other zero-balance candidates are omitted without metadata reads. Every candidate balance is checked again on the next read."

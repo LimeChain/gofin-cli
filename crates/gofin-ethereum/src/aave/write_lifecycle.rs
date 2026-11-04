@@ -554,7 +554,8 @@ impl EthereumAdapter {
         };
         let evidence = self.collect_aave_write(&typed, original).await?;
         let candidate = evaluate_write(&typed, &evidence)?;
-        let final_evidence = self.collect_aave_final(&candidate).await?;
+        let envelope = self.prepare_aave_envelope(&candidate).await?;
+        let final_evidence = self.simulate_aave_envelope(&candidate, &envelope).await?;
         finalize_write(&candidate, &final_evidence)
     }
 }
@@ -1525,7 +1526,7 @@ pub(crate) fn evaluate_write(input: &WriteInput, e: &WriteEvidence) -> Result<Wr
                 ActionEffects::Borrow { maximum_debt },
                 &mut intent,
             );
-            warnings.push("The minimum health factor is a fresh preflight constraint; variable interest continues after execution.".into());
+            warnings.push("Health and debt bounds are best-effort checks before approval. GoFin does not recheck financial state after approval; prices, balances and interest may change before execution.".into());
         }
         "aave.repay" => {
             evaluate_repay(&RepayEvidence {
@@ -1670,6 +1671,11 @@ pub(crate) enum WriteRiskEvidence {
     Borrow(super::risk::BorrowRiskEvidence),
     Removal(super::risk::HealthEvidence),
 }
+pub(crate) struct WritePreparedEvidence {
+    pub transaction: FrozenTransaction,
+    pub live_proxy: String,
+}
+
 pub(crate) struct WriteFinalEvidence {
     pub transaction: FrozenTransaction,
     pub simulation: gofin_evm::alloy::primitives::Bytes,
@@ -1680,12 +1686,11 @@ pub(crate) struct WriteFinalEvidence {
 }
 
 impl EthereumAdapter {
-    /// Collect the exact transaction and recheck the captured canonical block.
-    /// The candidate and all later economic decisions are pure values.
-    pub(crate) async fn collect_aave_final(
+    /// Build the unsigned envelope without running its explicit simulation.
+    pub(crate) async fn prepare_aave_envelope(
         &self,
         candidate: &WriteCandidate,
-    ) -> Result<WriteFinalEvidence> {
+    ) -> Result<WritePreparedEvidence> {
         use crate::aave_mcp::{
             AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields,
         };
@@ -1759,7 +1764,7 @@ impl EthereumAdapter {
                 "The selected Pool proxy or implementation changed after preview; create a fresh preview.",
             )?;
         }
-        let (transaction, simulation) = if let Some(old) = &candidate.original {
+        let transaction = if let Some(old) = &candidate.original {
             let tx = &old.transaction;
             require(
                 address(&tx.sender)? == candidate.owner
@@ -1769,20 +1774,35 @@ impl EthereumAdapter {
                 "BINDING_CHANGED",
                 "Current protocol route/calldata differs from approved exact envelope.",
             )?;
-            (tx.clone(), adapter.runtime.revalidate(tx).await?)
+            tx.clone()
         } else {
-            let prepared = adapter
+            adapter
                 .runtime
-                .prepare(
+                .prepare_envelope(
                     candidate.owner,
                     address(&candidate.pool)?,
                     U256::ZERO,
                     calldata,
                     candidate.maximum_fee,
                 )
-                .await?;
-            (prepared.transaction, prepared.simulation)
+                .await?
         };
+        Ok(WritePreparedEvidence {
+            transaction,
+            live_proxy,
+        })
+    }
+
+    /// Simulate the prepared envelope before approval, then collect the final
+    /// canonical-block proof used by the pure bounds/accounting finalizer.
+    pub(crate) async fn simulate_aave_envelope(
+        &self,
+        candidate: &WriteCandidate,
+        prepared: &WritePreparedEvidence,
+    ) -> Result<WriteFinalEvidence> {
+        let selected = self.selected_market(&candidate.input)?;
+        let adapter = selected.as_ref().unwrap_or(self);
+        let simulation = adapter.runtime.simulate(&prepared.transaction).await?;
         // Check after provider construction and the exact simulation/fee reads.
         // This is a fresh transport read, not the per-capture read cache.
         let canonical = adapter
@@ -1804,9 +1824,9 @@ impl EthereumAdapter {
         let expires_at = (adapter.clock.now() + chrono::Duration::seconds(300))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         Ok(WriteFinalEvidence {
-            transaction,
+            transaction: prepared.transaction.clone(),
             simulation,
-            live_proxy,
+            live_proxy: prepared.live_proxy.clone(),
             observed_at,
             expires_at,
             native_asset,
@@ -1848,6 +1868,162 @@ pub(crate) fn finalize_write(
         observed_at: evidence.observed_at.clone(),
         expires_at: evidence.expires_at.clone(),
     })
+}
+
+impl EthereumAdapter {
+    /// Validate only immutable request/envelope identity. Financial observations
+    /// belong to the preapproval collect/evaluate/simulate phases.
+    pub(crate) fn aave_validate_prepared(&self, prepared: &PreparedOperation) -> Result<Binding> {
+        let selected = self.selected_market(&prepared.input)?;
+        let adapter = selected.as_ref().unwrap_or(self);
+        if prepared.operation_version != 2 {
+            return Err(GoFinError::new(
+                "AAVE_APPROVAL_OBSOLETE",
+                "authorization",
+                "This unsubmitted Aave approval uses the earlier financial revalidation contract.",
+                "Prepare and approve this action again; submitted transactions remain observable.",
+            ));
+        }
+        require(
+            chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
+                .is_ok_and(|expires| expires > self.clock.now()),
+            "PREVIEW_EXPIRED",
+            "The prepared execution candidate has expired.",
+        )?;
+        let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
+            error(
+                "BINDING_INVALID",
+                "submission",
+                "Original Aave binding is malformed.",
+            )
+        })?;
+        require(
+            binding
+                .aave_proxy_identity
+                .as_ref()
+                .is_some_and(|identity| !identity.is_empty()),
+            "AAVE_PREVIEW_REFRESH_REQUIRED",
+            "The prepared Aave candidate has no bound deployment identity; prepare and approve it again.",
+        )?;
+        let request = request::parse(&prepared.operation, &prepared.input)?;
+        let owner = address(&adapter.resolve(&request, true)?.address)?;
+        require(
+            binding.transaction.chain_id == adapter.config.chain_id
+                && address(&binding.transaction.sender)? == owner
+                && binding.resource == resource(adapter.config.chain_id, owner)
+                && request
+                    .token
+                    .as_deref()
+                    .is_some_and(|token| token.eq_ignore_ascii_case(&binding.token.reference)),
+            "BINDING_CHANGED",
+            "Aave envelope differs from the requested wallet, chain or reserve.",
+        )?;
+        use aave_mcp::{AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields};
+        let request = request::parse(&prepared.operation, &prepared.input)?;
+        let action = match prepared.operation.as_str() {
+            "aave.supply" => AaveMcpAction::Supply,
+            "aave.borrow" => AaveMcpAction::Borrow,
+            "aave.repay" => AaveMcpAction::Repay,
+            "aave.withdraw" => AaveMcpAction::Withdraw,
+            "aave.collateral" => AaveMcpAction::Collateral,
+            _ => unreachable!("registered Aave write"),
+        };
+        let all = request.amount.as_deref() == Some("all");
+        let units = if action == AaveMcpAction::Collateral {
+            U256::ZERO
+        } else {
+            exact(
+                if all {
+                    request.max_amount.as_deref().expect("validated schema")
+                } else {
+                    request.amount.as_deref().expect("validated schema")
+                },
+                binding.token.decimals,
+            )?
+        };
+        require(
+            quantity(units) == binding.units,
+            "AAVE_CALLDATA_INVALID",
+            "Aave request amount differs from the prepared binding.",
+        )?;
+        require(
+            binding.pool.as_deref() == Some(adapter.aave()?.pool.as_str()),
+            "AAVE_CALLDATA_INVALID",
+            "Aave transaction market differs from the selected reviewed Pool.",
+        )?;
+        if all {
+            require(
+                units < U256::MAX,
+                "ALL_AMOUNT_CAP_INVALID",
+                "Aave full repayment and withdrawal require a finite cap below uint256 maximum.",
+            )?;
+        }
+        let amount = if action == AaveMcpAction::Collateral {
+            None
+        } else if all {
+            Some(AaveMcpAmount::Max { cap: units })
+        } else {
+            Some(AaveMcpAmount::Exact(units))
+        };
+        let intent = AaveMcpIntent {
+            chain_id: adapter.config.chain_id,
+            pool: address(&adapter.aave()?.pool)?,
+            owner: address(&binding.transaction.sender)?,
+            token: address(&binding.token.reference)?,
+            action,
+            amount,
+            recipient: binding.recipient.as_deref().map(address).transpose()?,
+            enabled: binding.enabled,
+            decimals: binding.token.decimals,
+        };
+        let tx = &binding.transaction;
+        validate_transaction_fields(
+            &intent,
+            tx.chain_id,
+            address(&tx.to)?,
+            address(&tx.sender)?,
+            u256(&tx.value)?,
+            &gofin_evm::rpc_bytes(&json!(tx.calldata))?,
+        )
+        .map_err(|e| error("AAVE_CALLDATA_INVALID", "submission", &e.to_string()))?;
+
+        binding.transaction.consensus()?;
+        require(
+            binding.permit_template.is_none(),
+            "AAVE_CALLDATA_INVALID",
+            "Aave writes require a concrete Pool envelope.",
+        )?;
+        Ok(binding)
+    }
+
+    pub(crate) async fn aave_submit(
+        &self,
+        authorized: &gofin_domain::operation_lifecycle::AuthorizedOperation,
+    ) -> Result<Submission> {
+        authorized.assert_authorized()?;
+        let prepared = authorized.prepared();
+        let binding = self.aave_validate_prepared(prepared)?;
+        let selected = self.selected_market(&prepared.input)?;
+        let adapter = selected.as_ref().unwrap_or(self);
+        let expected_proxy = binding.aave_proxy_identity.as_deref().ok_or_else(|| {
+            error(
+                "AAVE_APPROVAL_OBSOLETE",
+                "submission",
+                "Prepared Aave deployment identity is missing.",
+            )
+        })?;
+        require(
+            adapter.aave_proxy_identity().await? == expected_proxy,
+            "AAVE_IMPLEMENTATION_CHANGED",
+            "The approved Pool implementation changed before submission.",
+        )?;
+        authorized.assert_authorized()?;
+        let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
+        adapter
+            .runtime
+            .submit_authorized(&binding.transaction, metadata, authorized)
+            .await
+    }
 }
 
 // Marker-bound wrappers make phase values for distinct actions non-interchangeable.
@@ -1896,12 +2072,8 @@ macro_rules! phase {
 phase!(TypedInput, WriteInput);
 phase!(TypedEvidence, WriteEvidence);
 phase!(TypedCandidate, WriteCandidate);
-phase!(TypedFinalEvidence, WriteFinalEvidence);
-phase!(TypedFinalCandidate, PreparedOperation);
-phase!(TypedFreshEvidence, WriteEvidence);
-phase!(TypedValidated, WriteCandidate);
-phase!(TypedConfirmation, WriteFinalEvidence);
-phase!(TypedFinalValidated, PreparedOperation);
+phase!(TypedPrepared, WritePreparedEvidence);
+phase!(TypedSimulated, PreparedOperation);
 phase!(TypedExecutionRef, Submission);
 phase!(
     TypedObservation,
@@ -1972,12 +2144,8 @@ macro_rules! write_lifecycle {
             type Input = TypedInput<$marker>;
             type Evidence = TypedEvidence<$marker>;
             type Candidate = TypedCandidate<$marker>;
-            type FinalEvidence = TypedFinalEvidence<$marker>;
-            type FinalCandidate = TypedFinalCandidate<$marker>;
-            type FreshEvidence = TypedFreshEvidence<$marker>;
-            type Validated = TypedValidated<$marker>;
-            type Confirmation = TypedConfirmation<$marker>;
-            type FinalValidated = TypedFinalValidated<$marker>;
+            type Prepared = TypedPrepared<$marker>;
+            type Simulated = TypedSimulated<$marker>;
             type ExecutionRef = TypedExecutionRef<$marker>;
             type Observation = TypedObservation<$marker>;
             type Output = ();
@@ -1992,27 +2160,31 @@ macro_rules! write_lifecycle {
                     &evidence.inner,
                 )?))
             }
-            async fn collect_final(
+            async fn prepare(
                 &self,
                 _: &Self::Input,
                 candidate: &Self::Candidate,
-            ) -> Result<Self::FinalEvidence> {
-                Ok(TypedFinalEvidence::new(
-                    self.collect_aave_final(&candidate.inner).await?,
+            ) -> Result<Self::Prepared> {
+                Ok(TypedPrepared::new(
+                    self.prepare_aave_envelope(&candidate.inner).await?,
                 ))
             }
-            fn finalize_candidate(
+            async fn simulate(
+                &self,
                 _: &Self::Input,
                 candidate: &Self::Candidate,
-                evidence: &Self::FinalEvidence,
-            ) -> Result<Self::FinalCandidate> {
-                Ok(TypedFinalCandidate::new(finalize_write(
+                prepared: &Self::Prepared,
+            ) -> Result<Self::Simulated> {
+                let evidence = self
+                    .simulate_aave_envelope(&candidate.inner, &prepared.inner)
+                    .await?;
+                Ok(TypedSimulated::new(finalize_write(
                     &candidate.inner,
-                    &evidence.inner,
+                    &evidence,
                 )?))
             }
             fn candidate_result(
-                candidate: &Self::FinalCandidate,
+                candidate: &Self::Simulated,
             ) -> Result<gofin_domain::operation_lifecycle::CandidateResult<()>> {
                 Ok(gofin_domain::operation_lifecycle::CandidateResult::Write(
                     Box::new(candidate.inner.clone()),
@@ -2021,99 +2193,20 @@ macro_rules! write_lifecycle {
             fn output_value(_: ()) -> Result<Value> {
                 Err(GoFinError::validation("A write has no direct read output."))
             }
-            async fn refresh(
-                &self,
-                input: &Self::Input,
-                prepared: &PreparedOperation,
-            ) -> Result<Self::FreshEvidence> {
-                require(
-                    prepared.operation == input.inner.operation
-                        && prepared.input == input.inner.input,
-                    "BINDING_CHANGED",
-                    "Approved operation differs from this lifecycle input.",
-                )?;
-                require(
-                    chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
-                        .is_ok_and(|expires| expires > self.clock.now()),
-                    "PREVIEW_EXPIRED",
-                    "Original preview has expired.",
-                )?;
-                let original: Binding =
-                    serde_json::from_value(prepared.binding.clone()).map_err(|_| {
-                        error(
-                            "BINDING_INVALID",
-                            "submission",
-                            "Original Ethereum binding is malformed.",
-                        )
-                    })?;
-                let mut refreshed = input.inner.clone();
-                refreshed.context = PreparationContext {
-                    logical_operation_id: None,
-                    positions: [original.supply_anchor.clone(), original.debt_anchor.clone()]
-                        .into_iter()
-                        .flatten()
-                        .collect(),
-                };
-                Ok(TypedFreshEvidence::new(
-                    self.collect_aave_write(&refreshed, Some(&original)).await?,
-                ))
-            }
-            fn revalidate(
-                input: &Self::Input,
-                _: &PreparedOperation,
-                evidence: &Self::FreshEvidence,
-            ) -> Result<Self::Validated> {
-                Ok(TypedValidated::new(evaluate_write(
-                    &input.inner,
-                    &evidence.inner,
-                )?))
-            }
-            async fn confirm(
-                &self,
-                _: &Self::Input,
-                _: &PreparedOperation,
-                validated: &Self::Validated,
-            ) -> Result<Self::Confirmation> {
-                Ok(TypedConfirmation::new(
-                    self.collect_aave_final(&validated.inner).await?,
-                ))
-            }
-            fn finalize_validation(
-                _: &Self::Input,
-                prepared: &PreparedOperation,
-                validated: &Self::Validated,
-                confirmation: &Self::Confirmation,
-            ) -> Result<Self::FinalValidated> {
-                let mut fresh = finalize_write(&validated.inner, &confirmation.inner)?;
-                fresh.action_deadline.clone_from(&prepared.action_deadline);
-                gofin_domain::product_names::preserve_approved_spelling(
-                    &prepared.binding,
-                    &mut fresh.binding,
-                )?;
-                let observed =
-                    chrono::DateTime::parse_from_rfc3339(&confirmation.inner.observed_at)
-                        .map_err(|_| GoFinError::validation("Observation time is invalid."))?
-                        .with_timezone(&chrono::Utc);
-                carry_attempt_valuation(prepared, &mut fresh, observed)?;
-                Ok(TypedFinalValidated::new(fresh))
-            }
-            fn validated_prepared(validated: &Self::FinalValidated) -> Result<PreparedOperation> {
-                Ok(validated.inner.clone())
-            }
             async fn execute(
                 &self,
-                validated: &Self::FinalValidated,
-                handoff: &RevalidatedOperation,
+                input: &Self::Input,
+                authorized: &gofin_domain::operation_lifecycle::AuthorizedOperation,
                 journal: Arc<dyn SubmissionJournal>,
             ) -> Result<Self::ExecutionRef> {
                 require(
-                    handoff.prepared() == &validated.inner,
+                    authorized.prepared().operation == input.inner.operation
+                        && authorized.prepared().input == input.inner.input,
                     "BINDING_CHANGED",
-                    "Execution handoff differs from validated operation.",
+                    "Execution handoff differs from the typed operation input.",
                 )?;
-                Ok(TypedExecutionRef::new(
-                    self.submit_revalidated(handoff, journal).await?,
-                ))
+                journal.assert_candidate(authorized.prepared())?;
+                Ok(TypedExecutionRef::new(self.aave_submit(authorized).await?))
             }
             fn submission(reference: Self::ExecutionRef) -> Result<Submission> {
                 Ok(reference.inner)

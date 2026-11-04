@@ -559,7 +559,7 @@ pub fn definitions() -> Vec<Definition> {
         let decimal=json!({"type":"string","pattern":"^(0|[1-9][0-9]*)(\\.[0-9]+)?$","maxLength":100});
         let contract=json!({"type":"string","pattern":"^0x[0-9a-fA-F]{40}$"});
         for (name,value) in [
-            ("block_number",json!({"type":"integer","minimum":1,"description":"Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes always use fresh state."})),("wallet",json!({"type":"string","minLength":1,"maxLength":80})),("chain_id",json!({"type":"integer","minimum":1})),
+            ("block_number",json!({"type":"integer","minimum":1,"description":"Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes collect current state before approval."})),("wallet",json!({"type":"string","minLength":1,"maxLength":80})),("chain_id",json!({"type":"integer","minimum":1})),
             ("request_id",json!({"type":"string","minLength":1,"maxLength":128})),("max_fee_eth",decimal.clone()),("max_amount",decimal.clone()),("min_output",decimal.clone()),("min_health_factor",decimal.clone()),
             ("amount",if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap"|"sushi.swap"|"pancakeswap.swap"){json!({"anyOf":[decimal.clone(),{"const":"all"}]})}else{decimal.clone()}),
             ("market",contract.clone()),("max_debt_usd",decimal.clone()),("max_debt_to_collateral_bps",json!({"type":"integer","minimum":1,"maximum":10000})),("recipient",contract.clone()),("spender",contract.clone()),("token_in",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token_out",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token",json!({"anyOf":[contract.clone(),{"const":"native"}]})),
@@ -571,9 +571,9 @@ pub fn definitions() -> Vec<Definition> {
             properties.get_mut("max_fee_eth").expect("write fee field")["description"] = json!("Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.");
         }
         for (name, description) in [
-            ("max_debt_usd", "Maximum total USD debt across every reserve of the selected Aave market after this action, including existing debt; not the size of this borrow."),
-            ("max_debt_to_collateral_bps", "Maximum total debt to total collateral of the selected Aave market position after this action, in basis points, including existing debt."),
-            ("min_health_factor", "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral."),
+            ("max_debt_usd", "Preapproval limit on projected total USD debt across every reserve of the selected Aave market, including existing debt; not the size of this borrow. Checked before approval only, not rechecked before submission or enforced by the Pool call."),
+            ("max_debt_to_collateral_bps", "Preapproval limit on projected total debt to total collateral of the selected Aave market, in basis points, including existing debt. Checked before approval only; later prices and position changes may exceed it."),
+            ("min_health_factor", "Preapproval minimum projected account-wide health factor of the selected Aave market, including existing debt and collateral. Checked before approval only; not a submission-time or onchain guarantee."),
         ] {
             if let Some(property) = properties.get_mut(name) {
                 property["description"] = json!(description);
@@ -657,7 +657,7 @@ pub fn definitions() -> Vec<Definition> {
         }
         let mut examples = vec![example(operation)];
         if operation.starts_with("aave.") {
-            semantics["metadata_sources"] = json!("Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are always fresh.");
+            semantics["metadata_sources"] = json!("Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.");
             if matches!(*operation,"aave.reserves"|"aave.positions") {
                 semantics["state_block"] = json!("block_number selects a historical read-only observation with canonical block/hash checks; it never supplies financial write authority or current-funds evidence.");
             }
@@ -666,11 +666,17 @@ pub fn definitions() -> Vec<Definition> {
                 semantics["source_commit"] = json!(super::aave::ADDRESS_BOOK_COMMIT);
             }
             if !read {
+                semantics["lifecycle"] = json!(["collect", "evaluate", "prepare", "simulate", "authorize", "execute", "observe"]);
+                schema["properties"]["max_fee_eth"]["description"] = json!("Maximum native ETH gas allowance. Preparation adds bounded gas-unit and fee headroom within this cap; execution checks affordability and fee viability without financial re-evaluation. Rollup data fees are estimated before submission and verified after execution.");
                 semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
                 semantics["plan_permission"] = json!({"supported":true,"bounds_schema":schemars::schema_for!(super::aave::permissions::AaveBounds),"variable_fields":["amount","max_fee_eth"],"fixed_fields":"All remaining fields, including market, asset, recipient, collateral setting and risk limits."});
                 semantics["transaction_builder"] = json!("The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans.");
-                semantics["calldata_validation"] = json!("GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.");
-                semantics["proxy_identity"] = json!("GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.");
+                semantics["calldata_validation"] = json!("GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.");
+                semantics["proxy_identity"] = json!("GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.");
+                if matches!(*operation, "aave.repay" | "aave.withdraw") {
+                    schema["properties"]["max_amount"]["description"] = json!("Finite cap for the preapproval assessment of amount=all. Aave calldata uses its full-position sentinel; max_amount is not encoded as an onchain ceiling. Execution-time interest or position changes can alter the amount; finite token allowance separately limits repayment.");
+                    semantics["bounded_all"] = json!("All requires a finite max_amount checked against collected state and exact simulation before approval. The Pool call uses the full-position sentinel, not this cap; the amount can change after approval. Settlement verifies actual effects and whether the selected debt or claim was cleared. Repayment additionally requires a finite allowance.");
+                }
                 if *operation == "aave.withdraw" {
                     semantics["recipient"] = json!("The official Aave MCP withdrawal action currently targets the signing wallet. Other recipients are rejected before requesting transaction data.");
                 }
@@ -679,7 +685,7 @@ pub fn definitions() -> Vec<Definition> {
                 }
             }
             semantics["market"] = json!("Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.");
-            semantics["risk"] = json!("Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.");
+            semantics["risk"] = json!("Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.");
         }
         if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap") {
             let mut all=example(operation);

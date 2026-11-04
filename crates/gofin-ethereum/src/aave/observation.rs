@@ -721,6 +721,33 @@ impl EthereumAdapter {
     }
 }
 
+/// Bound discrepancies do not erase a mathematically verified external result.
+/// Version-one records retain their original hard observation checks.
+fn observed_bound(
+    preapproval_only: bool,
+    details: &mut Value,
+    assessed: (&str, U256, U256, U256),
+    code: &str,
+    message: &str,
+) -> Result<()> {
+    let (bound, actual, minimum, maximum) = assessed;
+    if actual >= minimum && actual <= maximum {
+        return Ok(());
+    }
+    if !preapproval_only {
+        return Err(error(code, "reconciliation", message));
+    }
+    let entry = json!({"bound":bound,"observed":quantity(actual),"minimum":quantity(minimum),"maximum":quantity(maximum),"assessment_phase":"preapproval"});
+    if !details["preapproval_bounds_discrepancies"].is_array() {
+        details["preapproval_bounds_discrepancies"] = json!([]);
+    }
+    details["preapproval_bounds_discrepancies"]
+        .as_array_mut()
+        .expect("array")
+        .push(entry);
+    Ok(())
+}
+
 impl AaveObservation {
     fn horizon_math(&self) -> bool {
         self.context.as_ref().is_some_and(|ctx| ctx.horizon)
@@ -812,6 +839,17 @@ impl AaveObservation {
         b: &Binding,
         effects: &mut Vec<FinancialEffect>,
         details: &mut Value,
+    ) -> Result<()> {
+        self.evaluate_success_with_semantics(operation, b, effects, details, false)
+    }
+
+    pub(crate) fn evaluate_success_with_semantics(
+        &self,
+        operation: &str,
+        b: &Binding,
+        effects: &mut Vec<FinancialEffect>,
+        details: &mut Value,
+        preapproval_only: bool,
     ) -> Result<()> {
         use super::{
             debt_location, events, exact_one, origin, revision_five_backing, settle_debt_costs,
@@ -1055,15 +1093,17 @@ impl AaveObservation {
                 )?;
                 let rounding = added.saturating_sub(qty);
                 let rounding_gain = qty.saturating_sub(added);
-                require(
-                    rounding
-                        <= u256(
-                            b.debt_rounding_maximum
-                                .as_ref()
-                                .expect("borrow rounding bound"),
-                        )?,
+                let assessed_rounding = u256(
+                    b.debt_rounding_maximum
+                        .as_ref()
+                        .expect("borrow rounding bound"),
+                )?;
+                observed_bound(
+                    preapproval_only,
+                    details,
+                    ("debt_rounding", rounding, U256::ZERO, assessed_rounding),
                     "DEBT_ROUNDING_LIMIT",
-                    "Proved debt ceiling exceeds its finite approved exposure bound.",
+                    "Proved debt ceiling exceeds its finite assessed exposure bound.",
                 )?;
                 let previous = self.before_index.expect("collected previous index");
                 let prior_claim =
@@ -1122,15 +1162,17 @@ impl AaveObservation {
                 // Existing debt retains its prior principal/accrual split.
                 let opening = prior.principal.atoms.is_zero() && before.is_zero();
                 let (principal_change, accrued_change) = if opening && !self.horizon_math() {
-                    require(
-                        total_accrual
-                            <= u256(
-                                b.debt_rounding_maximum
-                                    .as_ref()
-                                    .expect("borrow rounding bound"),
-                            )?,
+                    observed_bound(
+                        preapproval_only,
+                        details,
+                        (
+                            "opening_debt_increment",
+                            total_accrual,
+                            U256::ZERO,
+                            assessed_rounding,
+                        ),
                         "DEBT_ROUNDING_LIMIT",
-                        "Opening debt's complete proved increment exceeds approved finite rounding exposure.",
+                        "Opening debt's proved increment exceeds the preapproval rounding assessment.",
                     )?;
                     (add(qty, total_accrual)?, U256::ZERO)
                 } else {
@@ -1167,10 +1209,16 @@ impl AaveObservation {
                         .collect(),
                 )?;
                 let actual = e.amount;
+                observed_bound(
+                    preapproval_only && b.repay_all,
+                    details,
+                    ("repayment_amount", actual, U256::ZERO, qty),
+                    "REPAY_PROOF_MISMATCH",
+                    "Repayment event exceeds the preapproval amount limit.",
+                )?;
                 require(
                     !e.useATokens
                         && actual > U256::ZERO
-                        && actual <= qty
                         && transfers(receipt, token_addr, owner, a_token)? == actual
                         && (!b.repay_all || post.variable_debt.is_zero()),
                     "REPAY_PROOF_MISMATCH",
@@ -1287,11 +1335,17 @@ impl AaveObservation {
                 )?;
                 let qty = if b.all_amount {
                     require(
-                        e.amount > U256::ZERO
-                            && e.amount <= qty
-                            && e.amount >= u256(b.minimum_output.as_ref().expect("minimum"))?,
+                        e.amount > U256::ZERO,
                         "WITHDRAW_MAXIMUM",
-                        "Full withdrawal credit lies outside the frozen finite return bound.",
+                        "Full withdrawal must credit a positive amount.",
+                    )?;
+                    let minimum = u256(b.minimum_output.as_ref().expect("minimum"))?;
+                    observed_bound(
+                        preapproval_only,
+                        details,
+                        ("withdrawal_amount", e.amount, minimum, qty),
+                        "WITHDRAW_MAXIMUM",
+                        "Full withdrawal credit lies outside the preapproval return assessment.",
                     )?;
                     e.amount
                 } else {

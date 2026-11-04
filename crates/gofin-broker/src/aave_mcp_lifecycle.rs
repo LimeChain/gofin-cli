@@ -73,12 +73,8 @@ impl OperationLifecycle<McpRead> for ReadService<'_> {
     type Input = ReadInput;
     type Evidence = ReadEvidence;
     type Candidate = ReadOutput;
-    type FinalEvidence = ();
-    type FinalCandidate = ReadOutput;
-    type FreshEvidence = ();
-    type Validated = ();
-    type Confirmation = ();
-    type FinalValidated = ();
+    type Prepared = ();
+    type Simulated = ReadOutput;
     type ExecutionRef = ();
     type Observation = ();
     type Output = ReadOutput;
@@ -125,10 +121,11 @@ impl OperationLifecycle<McpRead> for ReadService<'_> {
             )),
         }
     }
-    async fn collect_final(&self, _: &ReadInput, _: &ReadOutput) -> gofin_domain::Result<()> {
+    async fn prepare(&self, _: &ReadInput, _: &ReadOutput) -> gofin_domain::Result<()> {
         Ok(())
     }
-    fn finalize_candidate(
+    async fn simulate(
+        &self,
         _: &ReadInput,
         candidate: &ReadOutput,
         _: &(),
@@ -143,35 +140,10 @@ impl OperationLifecycle<McpRead> for ReadService<'_> {
     fn output_value(output: ReadOutput) -> gofin_domain::Result<Value> {
         serde_json::to_value(output).map_err(|_| internal_error())
     }
-    async fn refresh(&self, _: &ReadInput, _: &PreparedOperation) -> gofin_domain::Result<()> {
-        read_only()
-    }
-    fn revalidate(_: &ReadInput, _: &PreparedOperation, _: &()) -> gofin_domain::Result<()> {
-        read_only()
-    }
-    async fn confirm(
-        &self,
-        _: &ReadInput,
-        _: &PreparedOperation,
-        _: &(),
-    ) -> gofin_domain::Result<()> {
-        read_only()
-    }
-    fn finalize_validation(
-        _: &ReadInput,
-        _: &PreparedOperation,
-        _: &(),
-        _: &(),
-    ) -> gofin_domain::Result<()> {
-        read_only()
-    }
-    fn validated_prepared(_: &()) -> gofin_domain::Result<PreparedOperation> {
-        read_only()
-    }
     async fn execute(
         &self,
-        _: &(),
-        _: &gofin_domain::RevalidatedOperation,
+        _: &ReadInput,
+        _: &gofin_domain::operation_lifecycle::AuthorizedOperation,
         _: Arc<dyn SubmissionJournal>,
     ) -> gofin_domain::Result<()> {
         read_only()
@@ -201,8 +173,8 @@ pub(super) async fn read(
     let mut session = TypedSession::<_, McpRead>::new(&service, input);
     session.collect().await?;
     session.evaluate()?;
-    session.collect_final().await?;
-    let CandidateResult::Read(value) = session.finalize_candidate()? else {
+    session.prepare().await?;
+    let CandidateResult::Read(value) = session.simulate().await? else {
         return read_only();
     };
     let output: ReadOutput = serde_json::from_value(value).map_err(|_| internal_error())?;

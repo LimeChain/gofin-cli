@@ -1,5 +1,8 @@
 //! Presentation of lending and vault limits already validated by adapters.
-use super::{ApprovalAccount, ApprovalAction, ApprovalLeg, ApprovalReview, swap};
+use super::{
+    ApprovalAccount, ApprovalAction, ApprovalLeg, ApprovalReview, ApprovalTerm,
+    ApprovalTermEnforcement, swap,
+};
 use crate::{EffectConstraint, GoFinError, PreparedOperation, Quantity, Result};
 use serde_json::Value;
 
@@ -48,6 +51,8 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         return kamino_vault(prepared, review);
     }
     let input = &prepared.input;
+    let preapproval_only =
+        prepared.operation.starts_with("aave.") && prepared.operation_version == 2;
     review.market = scalar(binding, "pool")
         .or_else(|| scalar(binding, "vault"))
         .or_else(|| scalar(binding, "market"))
@@ -109,16 +114,50 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         ("accept_prevailing_value", "Accept prevailing value"),
     ] {
         if let Some(value) = scalar(input, key) {
-            details.push(format!("{label}: {value}"));
+            if preapproval_only
+                && matches!(
+                    key,
+                    "min_health_factor" | "max_debt_usd" | "max_debt_to_collateral_bps"
+                )
+            {
+                details.push(format!("Preapproval {label}: {value}"));
+                review.terms.push(ApprovalTerm {
+                    label: format!("Preapproval {label}"),
+                    value: format!("{value}; assessed before approval only, not rechecked at submission or enforced by the Pool call"),
+                    enforcement: ApprovalTermEnforcement::Estimate,
+                });
+            } else {
+                details.push(format!("{label}: {value}"));
+            }
         }
     }
     if prepared.operation.starts_with("aave.") {
         if binding["repay_all"].as_bool() == Some(true) {
-            details.push("Repay all debt up to bound".into());
+            details.push(if preapproval_only {
+                "Repay all debt; cap assessed before approval, actual amount may change".into()
+            } else {
+                "Repay all debt up to bound".into()
+            });
         }
         if binding["all_amount"].as_bool() == Some(true) && prepared.operation == "aave.withdraw" {
-            details.push("Withdraw all up to bound".into());
+            details.push(if preapproval_only {
+                "Withdraw all; cap assessed before approval, actual amount may change".into()
+            } else {
+                "Withdraw all up to bound".into()
+            });
         }
+    }
+    if preapproval_only
+        && (binding["repay_all"] == true || binding["all_amount"] == true)
+        && let Some(cap) = scalar(input, "max_amount")
+    {
+        review.terms.push(ApprovalTerm {
+            label: "Full-position preapproval cap".into(),
+            value: format!(
+                "{cap}; Pool uses its full-position sentinel, not an encoded amount ceiling"
+            ),
+            enforcement: ApprovalTermEnforcement::Estimate,
+        });
     }
     if prepared.operation == "morpho.rewards.claim" {
         if let Some(output) = review.output.as_mut() {

@@ -1741,7 +1741,8 @@ impl SubmissionAuthorityLease for NoopSubmissionAuthorityLease {}
 /// Broker-owned hook; implementations atomically journal before returning.
 pub trait SubmissionJournal: Send + Sync {
     fn assert_authorized(&self) -> Result<()>;
-    /// Called after a fresh adapter revalidation immediately before dispatch.
+    /// Check the concrete execution candidate against live broker authority.
+    /// This is a local scope check, not a financial evidence refresh.
     /// Existing exact-operation implementations retain their old check.
     fn assert_candidate(&self, _prepared: &PreparedOperation) -> Result<()> {
         self.assert_authorized()

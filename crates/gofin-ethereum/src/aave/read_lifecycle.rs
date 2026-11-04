@@ -471,12 +471,8 @@ macro_rules! native_read {
             type Input = $input;
             type Evidence = $evidence;
             type Candidate = ReadOutput<$data>;
-            type FinalEvidence = HeaderFact;
-            type FinalCandidate = ReadOutput<$data>;
-            type FreshEvidence = ();
-            type Validated = ();
-            type Confirmation = ();
-            type FinalValidated = ();
+            type Prepared = HeaderFact;
+            type Simulated = ReadOutput<$data>;
             type ExecutionRef = Submission;
             type Observation = ();
             type Output = ReadOutput<$data>;
@@ -489,7 +485,7 @@ macro_rules! native_read {
             ) -> Result<Self::Candidate> {
                 $evaluate(evidence)
             }
-            async fn collect_final(
+            async fn prepare(
                 &self,
                 _input: &Self::Input,
                 candidate: &Self::Candidate,
@@ -509,11 +505,12 @@ macro_rules! native_read {
                     hash,
                 })
             }
-            fn finalize_candidate(
+            async fn simulate(
+                &self,
                 _input: &Self::Input,
                 candidate: &Self::Candidate,
                 header: &HeaderFact,
-            ) -> Result<Self::FinalCandidate> {
+            ) -> Result<Self::Simulated> {
                 require(
                     header.block == candidate.block && header.hash == candidate.block_hash,
                     "AAVE_READ_CHANGED",
@@ -522,7 +519,7 @@ macro_rules! native_read {
                 Ok(candidate.clone())
             }
             fn candidate_result(
-                candidate: &Self::FinalCandidate,
+                candidate: &Self::Simulated,
             ) -> Result<CandidateResult<Self::Output>> {
                 Ok(CandidateResult::Read(candidate.clone()))
             }
@@ -530,30 +527,10 @@ macro_rules! native_read {
                 serde_json::to_value(output)
                     .map_err(|_| GoFinError::validation("Native read presentation failed."))
             }
-            async fn refresh(&self, _: &Self::Input, _: &PreparedOperation) -> Result<()> {
-                read_only()
-            }
-            fn revalidate(_: &Self::Input, _: &PreparedOperation, _: &()) -> Result<()> {
-                read_only()
-            }
-            async fn confirm(&self, _: &Self::Input, _: &PreparedOperation, _: &()) -> Result<()> {
-                read_only()
-            }
-            fn finalize_validation(
-                _: &Self::Input,
-                _: &PreparedOperation,
-                _: &(),
-                _: &(),
-            ) -> Result<()> {
-                read_only()
-            }
-            fn validated_prepared(_: &()) -> Result<PreparedOperation> {
-                read_only()
-            }
             async fn execute(
                 &self,
-                _: &(),
-                _: &RevalidatedOperation,
+                _: &Self::Input,
+                _: &gofin_domain::operation_lifecycle::AuthorizedOperation,
                 _: Arc<dyn SubmissionJournal>,
             ) -> Result<Submission> {
                 read_only()
