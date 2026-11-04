@@ -41,6 +41,9 @@ struct Counted {
 }
 #[async_trait]
 impl EvmRpc for Counted {
+    fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+        self.inner.enforces_chain_identity(expected_chain_id)
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         self.logical.fetch_add(1, Ordering::SeqCst);
         self.inner.request(method, params).await
@@ -894,17 +897,12 @@ async fn after_action_and_read_http_counts() {
                         Err(GoFinError::validation(
                             "Financial reads and simulation are unavailable after approval.",
                         ))
-                    } else if method == "eth_getCode"
-                        && params[0] == json!(lower_address(multicall))
+                    } else if method == "eth_call"
+                        && params[0]["to"] == json!(lower_address(multicall))
+                        && worker_fault.load(Ordering::SeqCst) == 3
                     {
-                        if worker_fault.load(Ordering::SeqCst) == 3 {
-                            Ok(json!("0x6000"))
-                        } else {
-                            Ok(json!(format!(
-                                "0x{}",
-                                include_str!("multicall/multicall3-runtime.hex").trim()
-                            )))
-                        }
+                        worker_aggregates.fetch_add(1, Ordering::SeqCst);
+                        Ok(json!("0x"))
                     } else if method == "eth_call"
                         && params[0]["to"] == json!(lower_address(multicall))
                     {
@@ -1003,6 +1001,14 @@ async fn after_action_and_read_http_counts() {
             let measure = || {
                 let phase = phase_index.fetch_add(1, Ordering::SeqCst);
                 let observed_methods = std::mem::take(&mut *methods.lock().unwrap());
+                assert!(
+                    !observed_methods.contains_key("eth_getCode")
+                        && !observed_methods.contains_key("eth_getStorageAt"),
+                    "Aave must use trusted deployments without runtime code/slot reads: {} phase{} {:?}",
+                    case.label,
+                    phase,
+                    observed_methods
+                );
                 let write = !matches!(case.op, "aave.markets" | "aave.reserves" | "aave.positions");
                 if write && matches!(phase, 9 | 11) {
                     assert_eq!(
@@ -1011,12 +1017,10 @@ async fn after_action_and_read_http_counts() {
                             ("eth_chainId".into(), 1),
                             ("eth_getBalance".into(), 1),
                             ("eth_getBlockByNumber".into(), 1),
-                            ("eth_getCode".into(), 2),
-                            ("eth_getStorageAt".into(), 1),
                             ("eth_getTransactionCount".into(), 1),
                             ("eth_sendRawTransaction".into(), 1),
                         ]),
-                        "execution must only check deployment identity and envelope requirements"
+                        "execution must only check envelope requirements"
                     );
                 }
                 if write && phase == 14 {
@@ -1025,8 +1029,6 @@ async fn after_action_and_read_http_counts() {
                         BTreeMap::from([
                             ("eth_getBalance".into(), 1),
                             ("eth_getBlockByNumber".into(), 1),
-                            ("eth_getCode".into(), 2),
-                            ("eth_getStorageAt".into(), 1),
                             ("eth_sendRawTransaction".into(), 1),
                         ]),
                         "broker-observed chain and nonce must not be read twice"
@@ -1142,7 +1144,7 @@ async fn after_action_and_read_http_counts() {
             );
             assert!(
                 cold[0].2 > 0 && warm[0].2 > 0,
-                "verified aggregation not exercised"
+                "trusted aggregation not exercised"
             );
             for phase in [&cold, &warm] {
                 assert_eq!(phase[1], (0, 0, 0, 0, 0));
@@ -1216,7 +1218,7 @@ async fn after_action_and_read_http_counts() {
                     case.label,
                     broker_result.err()
                 );
-                assert_eq!(broker_counts[1], (6, 6, 0, 0, 0));
+                assert_eq!(broker_counts[1], (3, 3, 0, 0, 0));
                 eprintln!(
                     "BROKER_EXECUTION N={} {} nonce_scope={:?} authorization={:?} execute={:?}",
                     market_size, case.label, nonce_scope_counts, broker_counts[0], broker_counts[1]
@@ -1349,7 +1351,10 @@ async fn after_action_and_read_http_counts() {
                             case.label,
                             result.err()
                         );
-                        assert_eq!(counts.2, 0);
+                        assert!(
+                            counts.2 > 0,
+                            "unavailable registered aggregate was attempted"
+                        );
                         assert!(counts.4 > 0);
                     } else {
                         assert_eq!(

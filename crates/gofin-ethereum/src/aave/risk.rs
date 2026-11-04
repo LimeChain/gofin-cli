@@ -359,7 +359,7 @@ impl EthereumAdapter {
         block: u64,
         selected_users: Option<&[RiskUser]>,
     ) -> Result<()> {
-        let mut collector = ReadCollector::new(self, block).await;
+        let mut collector = ReadCollector::for_aave(self, block);
         let evidence = self
             .collect_borrow_restrictions(owner, token, block, selected_users, &mut collector)
             .await?;
@@ -702,7 +702,7 @@ impl EthereumAdapter {
         added_debt: U256,
     ) -> Result<(U256, U256, U256)> {
         let (reader, block, before) = self.aave_risk_reader().await?;
-        let mut collector = ReadCollector::new(&reader, block).await;
+        let mut collector = ReadCollector::for_aave(&reader, block);
         let result = reader
             .aave_health_projection_at(
                 owner,
@@ -928,9 +928,9 @@ impl EthereumAdapter {
         &self,
         reference: &str,
     ) -> Result<(reads::Token, U256, u64)> {
-        self.runtime.assert_chain().await?;
+        self.runtime.assert_chain_from_transport_or_rpc().await?;
         let (reader, block, before) = self.aave_risk_reader().await?;
-        let token = reader.token(reference, Some(block)).await?;
+        let token = reader.aave_token(reference, Some(block)).await?;
         let reserve = reader.reserve(&token.reference, Some(block)).await?;
         reader
             .verify_receipt_identity(&token, &reserve, Some(block))
@@ -1003,7 +1003,7 @@ impl EthereumAdapter {
         let r = request::parse("aave.borrow", input)?;
         let owner = address(&self.resolve(&r, true)?.address)?;
         let token = self
-            .token(r.token.as_deref().expect("schema"), None)
+            .aave_token(r.token.as_deref().expect("schema"), None)
             .await?;
         let qty = exact(r.amount.as_deref().expect("schema"), token.decimals)?;
         let (collateral, debt, projected) = self

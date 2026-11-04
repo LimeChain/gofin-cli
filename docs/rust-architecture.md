@@ -77,9 +77,10 @@ same root ownership, hardened signature and ACL validation as other runtime code
 The broker supplies bundled, versioned EVM candidate catalogs through the
 `TokenDiscovery` interface. This boundary can support a future backend with local
 fallback; no remote catalog service is currently used. Candidates and catalog
-labels are not balance evidence. The EVM adapter verifies Multicall3 bytecode at
-the selected block, batches balance and needed metadata reads, and retains direct
-RPC fallback. Solana discovers holdings from both token programs and batches
+labels are not balance evidence. EVM holdings discovery verifies Multicall3 bytecode at
+the selected block; Aave uses a compiled trusted chain/address registry without
+runtime bytecode checks. Both batch needed reads and retain direct RPC fallback.
+Solana discovers holdings from both token programs and batches
 uncached mint reads.
 
 Both adapters share `gofin-token-cache`. The protected broker stores disposable
@@ -452,15 +453,21 @@ allowances, debt/claim backing and typed settlement remain adapter-owned.
 Execution checks the approved bytes locally without another MCP request or financial simulation. Unknown
 methods, bundles, permits and mismatched fields fail closed. ABI decoding is
 not proof of implementation semantics: configured deployments retain their
-existing provider/revision checks, with the Pool implementation identity bound
-through preparation and the execution identity check. Historical reconciliation retains the
+existing provider/revision checks. Aave trusts the configured deployments without
+fetching bytecode or binding the Pool implementation address/code hashes. It does
+not detect implementation changes during approval or before dispatch.
+Historical reconciliation retains the
 original submission and evidence.
 
 Each Aave preapproval assessment creates a canonical block snapshot for financial observations. Exact identical reads at
 that block share a capture-local cache; required older anchor evidence remains
-at its original block. An uncached header check rejects a changed block before
-live transaction simulation. Borrow also binds the Pool proxy implementation and
-code identity at the capture block and checks it against the live identity.
+at its original block. An uncached header check rejects a changed block after
+live transaction simulation, before approval. No bytecode fingerprint or implementation-slot
+observation is part of this snapshot.
+Collection reuses the HTTP transport's endpoint-chain guarantee instead of issuing
+another chain-ID read. Each newly used endpoint, including failover endpoints,
+still verifies its chain. RPC implementations without that guarantee retain an
+explicit chain-ID check; snapshot-selection and closing canonicality headers remain.
 Simulation, pending nonce and gas preparation retain their live reads. No financial state is recollected after approval. The prepared candidate retains its assessed terms and observation anchors; execution does not treat those observations as current state. Only token metadata hints can be reused across new preparations, after matching their identity and precision against fresh reserve evidence.
 
 Borrow establishes exposure completeness from the verified Pool's on-chain user
@@ -536,15 +543,16 @@ semantics; their historical records and submitted identities remain intact.
 
 Collection has dependency rounds. Aave first obtains verified provider and
 reserve identities, then collects dependent receipt, balance, index and risk
-facts. Reviewed sender-independent calls use verified Multicall3 at the pinned
+facts. Reviewed sender-independent calls use registry-trusted Multicall3 at the pinned
 block. One block-bound collector is reused across rounds and anchors in that
 capture; historical blocks use their own collectors. Exact target/calldata facts
 are memoized within a pass, including repeated entries in one batch and facts
 requested again by risk or anchor rounds. Results and mandatory failures retain
 their original ordering and meaning; no owner, sender or block identities are
 merged. Checked and unchecked reads share evidence only after the transport has
-enforced the stronger canonical block pin. The exact runtime bytecode
-must match the reviewed artifact. Missing or incompatible Multicall falls back
+enforced the stronger canonical block pin. Aave selects Multicall from a compiled
+chain/address registry, without querying its bytecode. Unregistered chains use
+direct reads; failed or malformed aggregate responses fall back
 to bounded direct reads; mandatory subcall failure or an incomplete result is an
 error, never an observed zero or a reason to hide a target revert. Snapshot
 wrappers preserve the transport's block/hash and freshness requirements, and a
@@ -570,7 +578,7 @@ metadata session per row;
 only an exact chain/Pool/token response with bounded fields is a candidate hint.
 A missing, invalid or stale-precision hint falls back to batched ERC-20 metadata.
 Fresh packed reserve precision must match any hint before amount conversion;
-MCP never supplies financial risk, proxy identity or exposure completeness.
+MCP never supplies financial risk or exposure completeness.
 Verified current metadata is reusable under existing token-cache expiry rules;
 explicit historical reads fetch their own token labels and never overwrite the
 current cache. Financial state is freshly collected for each new preapproval assessment.
@@ -585,8 +593,8 @@ financial snapshot during those phases.
 Aave does not acquire optional display USD valuations for approval or admission.
 Protocol-intrinsic oracle facts for health and explicit debt bounds remain
 mandatory during preapproval collection. Submission checks only execution
-requirements, such as pending nonce, native gas affordability, fee viability and
-bound deployment identity. It does not re-run oracle, reserve, collateral, debt
+requirements, such as pending nonce, native gas affordability and fee viability.
+The approved destination and calldata remain bound locally. It does not re-run oracle, reserve, collateral, debt
 or position reads. The broker retains local scope, expiry and authority checks.
 
 MCP remains preferred for informational discovery and planning, and supplies

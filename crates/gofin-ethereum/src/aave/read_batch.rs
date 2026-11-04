@@ -6,7 +6,6 @@ use crate::{
     reads::Token,
 };
 use gofin_evm::alloy::sol_types::SolCall;
-use tokio::task::JoinSet;
 
 type Config = DataProvider::getReserveConfigurationDataReturn;
 type Receipts = DataProvider::getReserveTokensAddressesReturn;
@@ -169,41 +168,13 @@ fn symbol(value: Option<Result<Vec<u8>>>) -> Result<String> {
             )
         })
 }
-async fn code_checks(
-    adapter: &EthereumAdapter,
-    block: u64,
-    targets: BTreeSet<Address>,
-) -> Result<()> {
-    let mut jobs = JoinSet::new();
-    let mut remaining = targets.into_iter();
-    loop {
-        while jobs.len() < snapshot::SNAPSHOT_CONCURRENCY {
-            let Some(target) = remaining.next() else {
-                break;
-            };
-            let adapter = adapter.clone();
-            jobs.spawn(async move { adapter.runtime.code_at(target, Some(block)).await });
-        }
-        match jobs.join_next().await {
-            None => return Ok(()),
-            Some(Ok(result)) => result?,
-            Some(Err(_)) => {
-                return Err(error(
-                    "AAVE_READ_TASK_FAILED",
-                    "read",
-                    "A required code observation did not finish.",
-                ));
-            }
-        }
-    }
-}
 pub(super) async fn collect(
     adapter: &EthereumAdapter,
     capture: &Capture,
     explicit: Option<&Vec<String>>,
     positions: bool,
 ) -> Result<RowsFacts> {
-    let mut collector = ReadCollector::new(adapter, capture.block).await;
+    let mut collector = ReadCollector::for_aave(adapter, capture.block);
     collect_with_collector(adapter, capture, explicit, positions, &mut collector).await
 }
 pub(super) async fn collect_with_collector(
@@ -245,7 +216,6 @@ pub(super) async fn collect_with_collector(
             "Token identity must be a deployed nonzero address.",
         )?;
     }
-    code_checks(adapter, block, assets.iter().copied().collect()).await?;
     // Scoped onchain aggregators: Pool owns configuration/identities and the
     // protocol data provider owns current totals. Neither scans other reserves.
     let mut calls = Vec::new();
@@ -299,7 +269,6 @@ pub(super) async fn collect_with_collector(
     }
     let mut values = collector.collect(calls).await.into_iter();
     let mut first = Vec::new();
-    let mut receipt_code = BTreeSet::new();
     for (asset, hint) in assets.into_iter().zip(hints) {
         let deployed = next::<Pool::getReserveDataCall>(&mut values)?;
         let raw = values.next().ok_or_else(|| {
@@ -343,10 +312,6 @@ pub(super) async fn collect_with_collector(
             "RESERVE_UNAVAILABLE",
             "Aave reserve has no supplied/debt representation.",
         )?;
-        receipt_code.extend([receipts.aTokenAddress, receipts.variableDebtTokenAddress]);
-        if receipts.stableDebtTokenAddress != Address::ZERO {
-            receipt_code.insert(receipts.stableDebtTokenAddress);
-        }
         let reference = lower_address(asset);
         let mut metadata = hint
             .as_ref()
@@ -404,7 +369,6 @@ pub(super) async fn collect_with_collector(
     } else {
         (None, None)
     };
-    code_checks(adapter, block, receipt_code).await?;
     let mut calls = Vec::new();
     for row in &first {
         if row.metadata.is_none() {

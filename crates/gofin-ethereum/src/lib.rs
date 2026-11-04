@@ -901,6 +901,13 @@ impl EthereumAdapter {
         }
     }
     async fn resolved_weth(&self, block: Option<u64>) -> Result<String> {
+        self.resolved_weth_with_code_check(block, true).await
+    }
+    async fn resolved_weth_with_code_check(
+        &self,
+        block: Option<u64>,
+        verify_code: bool,
+    ) -> Result<String> {
         if let Some(weth) = &self.config.weth {
             return Ok(weth.clone());
         }
@@ -909,7 +916,9 @@ impl EthereumAdapter {
         } else {
             address(self.any_v3_profile()?.router)?
         };
-        self.runtime.code_at(router, block).await?;
+        if verify_code {
+            self.runtime.code_at(router, block).await?;
+        }
         let weth = self
             .runtime
             .call(router, &abi::V3RouterInfo::WETH9Call {}, block)
@@ -919,7 +928,9 @@ impl EthereumAdapter {
             "WETH_DEPLOYMENT_INVALID",
             "Configured v3 router returned a zero WETH9 address.",
         )?;
-        self.runtime.code_at(weth, block).await?;
+        if verify_code {
+            self.runtime.code_at(weth, block).await?;
+        }
         Ok(lower_address(weth))
     }
     fn wallet(&self, name: &str) -> Result<&WalletConnection> {
@@ -1018,8 +1029,8 @@ struct Binding {
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
-    /// New previews bind the selected Aave Pool proxy and implementation
-    /// observation. Missing values identify legacy persisted records.
+    /// Retained only to deserialize historical bindings. New Aave candidates
+    /// trust configured deployments and do not observe implementation fingerprints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aave_proxy_identity: Option<String>,
     /// Native pre-action anchors explicitly bound by this protected preview.

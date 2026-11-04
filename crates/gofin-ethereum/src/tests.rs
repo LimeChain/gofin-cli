@@ -341,76 +341,39 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn aave_execution_binds_and_requires_present_proxy_implementation_code() {
-        for case in [
-            "implementation_changed",
-            "implementation_missing",
-            "proxy_code_changed",
-            "proxy_code_missing",
-            "implementation_code_missing",
-        ] {
-            let rpc = Arc::new(Fixture::new());
-            let signer = Arc::new(CountingSigner::default());
-            let adapter = counted_adapter(rpc.clone(), signer.clone());
-            let prepared = adapter
-                .prepare("aave.supply", &aave_input("aave.supply"))
-                .await
-                .unwrap();
-            match case {
-                "implementation_changed" => {
-                    rpc.aave_implementation.store(302, Ordering::SeqCst);
-                }
-                "implementation_missing" => {
-                    rpc.aave_implementation.store(0, Ordering::SeqCst);
-                }
-                "proxy_code_changed" => {
-                    *rpc.aave_proxy_code.lock().unwrap() = "0x6001".into();
-                }
-                "proxy_code_missing" => {
-                    *rpc.aave_proxy_code.lock().unwrap() = "0x".into();
-                }
-                "implementation_code_missing" => {
-                    *rpc.aave_implementation_code.lock().unwrap() = "0x".into();
-                }
-                _ => unreachable!(),
-            }
-            let estimates_before = rpc
-                .calls
+    async fn aave_execution_trusts_deployments_without_code_or_implementation_reads() {
+        let rpc = Arc::new(Fixture::new());
+        rpc.aave_implementation.store(0, Ordering::SeqCst);
+        *rpc.aave_proxy_code.lock().unwrap() = "0x".into();
+        *rpc.aave_implementation_code.lock().unwrap() = "0x".into();
+        let signer = Arc::new(CountingSigner::default());
+        let adapter = counted_adapter(rpc.clone(), signer.clone());
+        let mut prepared = adapter
+            .prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap();
+        assert!(prepared.binding.get("aave_proxy_identity").is_none());
+        // Historical optional fingerprint data remains readable but is no longer
+        // a runtime policy. Exact transaction authority still applies unchanged.
+        prepared.binding["aave_proxy_identity"] = json!("historical-fingerprint");
+        rpc.aave_implementation.store(302, Ordering::SeqCst);
+        let journal = Arc::new(CountingJournal::default());
+        let error = adapter
+            .submit(&prepared, journal.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SYNTHETIC_SIGNER_REACHED");
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert!(journal.authorized.load(Ordering::SeqCst) > 0);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert!(
+            !rpc.calls
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|method| *method == "eth_estimateGas")
-                .count();
-            let journal = Arc::new(CountingJournal::default());
-            let error = adapter
-                .submit(&prepared, journal.clone())
-                .await
-                .unwrap_err();
-
-            assert_eq!(
-                error.code,
-                if case.ends_with("missing") {
-                    "AAVE_IMPLEMENTATION_UNKNOWN"
-                } else {
-                    "AAVE_IMPLEMENTATION_CHANGED"
-                },
-                "{case}"
-            );
-            assert_eq!(
-                rpc.calls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|method| *method == "eth_estimateGas")
-                    .count(),
-                estimates_before,
-                "{case} must fail before a fresh simulation"
-            );
-            assert!(journal.authorized.load(Ordering::SeqCst) > 0, "{case}");
-            assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
-            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
-            assert_no_dispatch(&rpc);
-        }
+                .any(|method| matches!(method.as_str(), "eth_getCode" | "eth_getStorageAt"))
+        );
+        assert_no_dispatch(&rpc);
     }
 
     struct MovingClock(Mutex<chrono::DateTime<chrono::Utc>>);
@@ -4276,12 +4239,9 @@ async fn supply_proves_exact_mint_loss_and_rejects_forged_mint_then_recovers_sam
         .await
         .unwrap();
     let mut legacy_binding: Binding = serde_json::from_value(p.binding.clone()).unwrap();
-    legacy_binding.aave_proxy_identity = None;
+    legacy_binding.aave_proxy_identity = Some("historical-proxy-fingerprint".into());
     p.binding = serde_json::to_value(legacy_binding).unwrap();
-    assert_eq!(
-        a.revalidate(&p).await.unwrap_err().code,
-        "AAVE_PREVIEW_REFRESH_REQUIRED"
-    );
+    assert_eq!(a.revalidate(&p).await.unwrap(), p);
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     let q = U256::from(1_000_000);
     let scaled = q - U256::from(1);

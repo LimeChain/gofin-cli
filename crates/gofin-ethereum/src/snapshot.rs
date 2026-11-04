@@ -65,6 +65,9 @@ impl SnapshotRpc {
 }
 #[async_trait]
 impl EvmRpc for SnapshotRpc {
+    fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+        self.inner.enforces_chain_identity(expected_chain_id)
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         self.request_checked(method, params, Default::default())
             .await
@@ -665,6 +668,18 @@ mod tests {
 
     #[derive(Default)]
     struct ReadProbe(AtomicUsize);
+
+    #[test]
+    fn snapshot_forwards_only_its_inner_transport_chain_guarantee() {
+        let guarded = Arc::new(
+            gofin_evm::HttpRpc::isolated_localhost("http://127.0.0.1:1234".into(), 1).unwrap(),
+        );
+        let snapshot = SnapshotRpc::preparation(guarded, 20);
+        assert!(snapshot.enforces_chain_identity(1));
+        assert!(!snapshot.enforces_chain_identity(2));
+        let alternate = SnapshotRpc::preparation(Arc::new(ReadProbe::default()), 20);
+        assert!(!alternate.enforces_chain_identity(1));
+    }
 
     #[derive(Default)]
     struct CheckedProbe(Mutex<Vec<gofin_evm::RpcReadRequirements>>);

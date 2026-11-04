@@ -456,7 +456,11 @@ impl EthereumAdapter {
         } else {
             r.token.as_deref().expect("schema").to_owned()
         };
-        let token = self.token(&reference, None).await?;
+        let token = if operation.starts_with("aave.") {
+            self.aave_token(&reference, None).await?
+        } else {
+            self.token(&reference, None).await?
+        };
         let principal = if operation == "wallet.wrap" {
             self.native_asset()
         } else {
@@ -1288,7 +1292,7 @@ impl EthereumAdapter {
                         let mut liquidation_value = U256::ZERO;
                         let mut debt_value = u256(
                             &self
-                                .quote_protocol_usd(&token.reference, quantity(added))
+                                .quote_aave_protocol_usd(&token.reference, quantity(added))
                                 .await?
                                 .0,
                         )?;
@@ -1313,7 +1317,7 @@ impl EthereumAdapter {
                                 let info = self.reserve(&position.asset.reference, None).await?;
                                 let usd = u256(
                                     &self
-                                        .quote_protocol_usd(
+                                        .quote_aave_protocol_usd(
                                             &position.asset.reference,
                                             position.amount.minimum.clone(),
                                         )
@@ -1334,7 +1338,7 @@ impl EthereumAdapter {
                                     debt_value,
                                     u256(
                                         &self
-                                            .quote_protocol_usd(
+                                            .quote_aave_protocol_usd(
                                                 &position.asset.reference,
                                                 position.amount.maximum.clone(),
                                             )

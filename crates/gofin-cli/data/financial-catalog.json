@@ -2113,6 +2113,7 @@
       ],
       "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "lifecycle": [
         "collect",
         "evaluate",
@@ -2125,7 +2126,6 @@
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
@@ -4229,6 +4229,7 @@
       ],
       "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "lifecycle": [
         "collect",
         "evaluate",
@@ -4241,7 +4242,6 @@
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
@@ -4369,6 +4369,7 @@
       "authorization": "read-only",
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
@@ -4659,6 +4660,7 @@
       "authorization": "read-only",
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
@@ -6810,6 +6812,7 @@
       ],
       "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "lifecycle": [
         "collect",
         "evaluate",
@@ -6822,7 +6825,6 @@
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
@@ -6964,6 +6966,7 @@
       "authorization": "read-only",
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
@@ -9066,6 +9069,7 @@
       ],
       "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "lifecycle": [
         "collect",
         "evaluate",
@@ -9078,7 +9082,6 @@
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",
       "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
@@ -11240,6 +11243,7 @@
       ],
       "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Execution reuses and re-decodes the approved payload without another financial collection or simulation; nonce allocation remains broker-controlled.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "deployment_trust": "Aave trusts configured market and reserve deployments without runtime bytecode checks or Pool proxy implementation fingerprints. Provider relationships, reviewed protocol revisions, strict calldata validation, simulation and financial-effect proof remain independently checked.",
       "lifecycle": [
         "collect",
         "evaluate",
@@ -11252,7 +11256,6 @@
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "metadata_sources": "Exact chain/address token cache and bundled catalog first, then scoped official MCP metadata on a miss, then batched token reads. Current reserve precision independently validates every hint; historical labels remain block-specific. Financial state and risk evidence are collected for each preapproval assessment; they are not recollected after approval.",
       "network": "explicit immutable chain/deployment identity",
-      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preparation and requires them unchanged at the execution identity check. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "recipient": "The official Aave MCP withdrawal action currently targets the signing wallet. Other recipients are rejected before requesting transaction data.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
       "risk": "Health factor, debt, liquidity and position limits are best-effort preapproval assessments. No financial evidence is recollected, re-evaluated or simulated after approval. Prices, interest and positions may change during approval or submission, and the Pool call does not enforce user health/debt thresholds. Exact transaction identities, authorized scope and native gas ceilings remain enforced.",

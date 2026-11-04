@@ -14,6 +14,13 @@ pub(crate) const BATCH_SIZE: usize = 32;
 pub(crate) const CONCURRENCY: usize = 4;
 pub(crate) const DIRECT_CONCURRENCY: usize = 8;
 
+/// Compiled deployment trust for the reviewed Aave networks. This registry is
+/// not configurable from operation input or provider responses. Unknown chains
+/// retain direct reads; an unavailable aggregate falls back through the normal
+/// direct-call path. Other consumers still verify runtime bytecode in `new`.
+const AAVE_MULTICALL_DEPLOYMENTS: &[(u64, &str)] =
+    &[(1, MULTICALL), (8453, MULTICALL), (42161, MULTICALL)];
+
 #[derive(Clone)]
 pub(crate) struct ReadCall {
     pub(crate) target: Address,
@@ -37,8 +44,8 @@ pub(crate) struct CollectionStats {
     pub(crate) fallback_chunks: usize,
 }
 
-/// One capture's verified batch endpoint and ordered read phases.
-/// Invalid/unavailable Multicall code and failed or malformed aggregate envelopes
+/// One capture's trusted batch endpoint and ordered read phases.
+/// Invalid/unavailable Multicall code (for runtime-verified consumers) and failed or malformed aggregate envelopes
 /// fall back to direct calls. A decoded envelope with a wrong result count fails
 /// explicitly. A target revert is returned as an individual error;
 /// it is never replaced by a zero or retried as if the aggregate were unavailable.
@@ -52,6 +59,21 @@ pub(crate) struct ReadCollector {
 impl ReadCollector {
     pub(crate) async fn new(adapter: &EthereumAdapter, block: u64) -> Self {
         let multicall = Self::verified_multicall(adapter, block).await;
+        Self::with_multicall(adapter, block, multicall)
+    }
+
+    /// Aave uses explicit local deployment trust, without a runtime code probe.
+    pub(crate) fn for_aave(adapter: &EthereumAdapter, block: u64) -> Self {
+        let multicall = AAVE_MULTICALL_DEPLOYMENTS
+            .iter()
+            .find(|(chain, _)| {
+                *chain == adapter.config.chain_id && *chain == adapter.runtime.chain_id
+            })
+            .and_then(|(_, deployment)| address(deployment).ok());
+        Self::with_multicall(adapter, block, multicall)
+    }
+
+    fn with_multicall(adapter: &EthereumAdapter, block: u64, multicall: Option<Address>) -> Self {
         Self {
             adapter: adapter.clone(),
             block,
@@ -335,5 +357,165 @@ mod memo_tests {
         assert!(first.iter().all(Result::is_err));
         assert!(reader.collect(vec![call]).await[0].is_err());
         assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod trusted_deployment_tests {
+    use super::*;
+    use gofin_evm::{EvmRpc, alloy::sol_types::SolValue};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy)]
+    enum AggregateReply {
+        Valid,
+        Unavailable,
+        Incomplete,
+        RevertedMember,
+    }
+    struct RegistryProbe {
+        requests: Mutex<Vec<(String, Value)>>,
+        reply: AggregateReply,
+    }
+    #[async_trait]
+    impl EvmRpc for RegistryProbe {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((method.into(), params.clone()));
+            if method == "eth_getCode" {
+                // Legacy consumers still reject unverified runtime code.
+                return Ok(json!("0x"));
+            }
+            if method != "eth_call" {
+                return Err(GoFinError::validation("Unexpected registry fixture RPC."));
+            }
+            if params[0]["to"] == MULTICALL {
+                if matches!(self.reply, AggregateReply::Unavailable) {
+                    // A registered address may not exist at an old block. The
+                    // malformed/empty aggregate response triggers direct reads.
+                    return Ok(json!("0x"));
+                }
+                let request = Multicall3::aggregate3Call::abi_decode_validate(&rpc_bytes(
+                    &params[0]["data"],
+                )?)
+                .unwrap();
+                let mut rows: Vec<_> = request
+                    .calls
+                    .into_iter()
+                    .map(|_| Multicall3::Result3 {
+                        success: !matches!(self.reply, AggregateReply::RevertedMember),
+                        returnData: U256::from(7).abi_encode().into(),
+                    })
+                    .collect();
+                if matches!(self.reply, AggregateReply::Incomplete) {
+                    rows.pop();
+                }
+                return Ok(json!(gofin_evm::hex_bytes(&rows.abi_encode())));
+            }
+            Ok(json!(gofin_evm::hex_bytes(&U256::from(7).abi_encode())))
+        }
+    }
+    fn fixture(
+        chain: u64,
+        runtime_chain: u64,
+        reply: AggregateReply,
+    ) -> (EthereumAdapter, Arc<RegistryProbe>) {
+        let probe = Arc::new(RegistryProbe {
+            requests: Mutex::new(vec![]),
+            reply,
+        });
+        let mut adapter = crate::tests::adapter(Arc::new(crate::tests::Fixture::new()));
+        adapter.config.chain_id = chain;
+        adapter.runtime = Arc::new(EvmRuntime::new(probe.clone(), runtime_chain, None));
+        (adapter, probe)
+    }
+    fn call() -> ReadCall {
+        ReadCall::new(crate::tests::addr(101), &abi::Erc20::totalSupplyCall {})
+    }
+    #[tokio::test]
+    async fn aave_registry_is_exact_chain_scoped_and_never_probes_runtime_code() {
+        for (chain, runtime_chain, registered) in [
+            (1, 1, true),
+            (8453, 8453, true),
+            (42161, 42161, true),
+            (4663, 4663, false),
+            (999, 999, false),
+            (1, 8453, false),
+        ] {
+            let (adapter, probe) = fixture(chain, runtime_chain, AggregateReply::Valid);
+            let mut collector = ReadCollector::for_aave(&adapter, 20);
+            assert!(
+                probe.requests.lock().unwrap().is_empty(),
+                "construction must be local"
+            );
+            assert_eq!(
+                collector.multicall,
+                registered.then(|| address(MULTICALL).unwrap())
+            );
+            let values = collector.collect(vec![call()]).await;
+            assert_eq!(values[0].as_ref().unwrap(), &U256::from(7).abi_encode());
+            let requests = probe.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].0, "eth_call");
+            assert_eq!(requests[0].1[1], "0x14");
+            assert_eq!(requests[0].1[0]["to"] == MULTICALL, registered);
+        }
+    }
+    #[tokio::test]
+    async fn unavailable_registered_aggregate_falls_back_but_target_and_shape_failures_do_not() {
+        for reply in [
+            AggregateReply::Unavailable,
+            AggregateReply::Incomplete,
+            AggregateReply::RevertedMember,
+        ] {
+            let (adapter, probe) = fixture(1, 1, reply);
+            let mut collector = ReadCollector::for_aave(&adapter, 20);
+            let values = collector.collect(vec![call()]).await;
+            match reply {
+                AggregateReply::Unavailable => {
+                    assert!(values[0].is_ok());
+                    assert_eq!(collector.stats.fallback_chunks, 1);
+                    assert_eq!(collector.stats.direct_requests, 1);
+                    assert_eq!(probe.requests.lock().unwrap().len(), 2);
+                }
+                AggregateReply::Incomplete | AggregateReply::RevertedMember => {
+                    assert_eq!(
+                        values[0].as_ref().unwrap_err().code,
+                        if matches!(reply, AggregateReply::Incomplete) {
+                            "MULTICALL_INCOMPLETE"
+                        } else {
+                            "TOKEN_CALL_FAILED"
+                        }
+                    );
+                    assert_eq!(collector.stats.fallback_chunks, 0);
+                    assert_eq!(collector.stats.direct_requests, 0);
+                    assert_eq!(probe.requests.lock().unwrap().len(), 1);
+                }
+                AggregateReply::Valid => unreachable!(),
+            }
+            assert!(
+                probe
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(method, _)| method == "eth_call")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn non_aave_collector_keeps_its_runtime_verification_policy() {
+        let (adapter, probe) = fixture(1, 1, AggregateReply::Valid);
+        let mut collector = ReadCollector::new(&adapter, 20).await;
+        assert!(collector.multicall.is_none());
+        assert!(collector.collect(vec![call()]).await[0].is_ok());
+        let requests = probe.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "eth_getCode");
+        assert_eq!(requests[0].1[0], MULTICALL);
+        assert_eq!(requests[1].0, "eth_call");
+        assert_ne!(requests[1].1[0]["to"], MULTICALL);
     }
 }

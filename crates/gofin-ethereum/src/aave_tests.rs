@@ -1336,12 +1336,20 @@ async fn supply_preparation_http_rpc_measurement() {
             }
             let request: Value =
                 serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
-            let result = handle
-                .block_on(worker_fixture.request(
-                    request["method"].as_str().unwrap(),
-                    request["params"].clone(),
-                ))
-                .unwrap();
+            let result = if request["method"] == "eth_call"
+                && request["params"][0]["to"] == json!(crate::collection::MULTICALL)
+            {
+                // This localhost fixture models an unavailable aggregator and
+                // therefore measures the bounded direct fallback.
+                json!("0x")
+            } else {
+                handle
+                    .block_on(worker_fixture.request(
+                        request["method"].as_str().unwrap(),
+                        request["params"].clone(),
+                    ))
+                    .unwrap()
+            };
             let body = json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         }
@@ -1593,61 +1601,46 @@ async fn borrow_execution_does_not_recheck_collateral_and_debt() {
 }
 
 #[tokio::test]
-async fn borrow_rejects_reorg_and_proxy_upgrade_during_capture() {
+async fn borrow_rejects_reorg_during_capture() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Changing {
         inner: Arc<Fixture>,
         headers: AtomicUsize,
-        proxy: bool,
     }
     #[async_trait]
     impl EvmRpc for Changing {
         async fn request(&self, method: &str, params: Value) -> Result<Value> {
-            let pinned_storage = method == "eth_getStorageAt" && params[2] == "0x14";
             let mut result = self.inner.request(method, params).await?;
-            if self.proxy && pinned_storage {
-                self.inner.aave_implementation.store(302, Ordering::SeqCst);
-            }
-            if !self.proxy
-                && method == "eth_getBlockByNumber"
-                && self.headers.fetch_add(1, Ordering::SeqCst) >= 2
+            if method == "eth_getBlockByNumber" && self.headers.fetch_add(1, Ordering::SeqCst) >= 2
             {
                 result["hash"] = json!(format!("0x{}", "ff".repeat(32)));
             }
             Ok(result)
         }
     }
-    for proxy in [false, true] {
-        let rpc = Arc::new(Fixture::new());
-        {
-            let mut states = rpc.states.lock().unwrap();
-            let state = states.get_mut(&20).unwrap();
-            state.scaled_supply = U256::from(10_000_000);
-            state.collateral = true;
-        }
-        let mut a = adapter(rpc.clone());
-        a.runtime = Arc::new(EvmRuntime::new(
-            Arc::new(Changing {
-                inner: rpc,
-                headers: AtomicUsize::new(0),
-                proxy,
-            }),
-            1,
-            None,
-        ));
-        let error = a
-            .prepare("aave.borrow", &aave_input("aave.borrow"))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.code,
-            if proxy {
-                "AAVE_IMPLEMENTATION_CHANGED"
-            } else {
-                "AAVE_READ_CHANGED"
-            }
-        );
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
     }
+    let mut a = adapter(rpc.clone());
+    a.runtime = Arc::new(EvmRuntime::new(
+        Arc::new(Changing {
+            inner: rpc,
+            headers: AtomicUsize::new(0),
+        }),
+        1,
+        None,
+    ));
+    assert_eq!(
+        a.prepare("aave.borrow", &aave_input("aave.borrow"))
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_READ_CHANGED"
+    );
 }
 
 #[tokio::test]

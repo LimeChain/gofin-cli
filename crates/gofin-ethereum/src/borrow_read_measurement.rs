@@ -12,6 +12,9 @@ async fn borrow_http_rpc_measurement() {
     }
     #[async_trait]
     impl EvmRpc for Counted {
+        fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+            self.inner.enforces_chain_identity(expected_chain_id)
+        }
         async fn request(&self, method: &str, params: Value) -> Result<Value> {
             self.logical.fetch_add(1, Ordering::SeqCst);
             self.requests
@@ -131,8 +134,13 @@ async fn borrow_http_rpc_measurement() {
                                 .unwrap()
                                 .asset
                                 == addr(102));
-                    let result = if is_call && data[..4] == Pool::getUserConfigurationCall::SELECTOR
+                    let result = if request["method"] == "eth_call"
+                        && request["params"][0]["to"] == crate::collection::MULTICALL
                     {
+                        // This fixture deliberately exercises direct fallback:
+                        // the registered aggregate is unavailable at its block.
+                        json!("0x")
+                    } else if is_call && data[..4] == Pool::getUserConfigurationCall::SELECTOR {
                         abi_value(match active_count {
                             0 => U256::ZERO,
                             1 => U256::from(2),

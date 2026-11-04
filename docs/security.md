@@ -203,6 +203,14 @@ ceilings and authority remain independently bound. After the submission resource
 lock, the adapter checks execution requirements once without repeating financial
 reads or simulation. Other adapters retain their existing revalidation contracts.
 
+Aave trusts its configured contract deployments and a compiled chain/address
+registry for Multicall. Its collection, preparation, execution and observation
+paths do not fetch contract bytecode or the Pool implementation slot. Pool
+implementation changes between approval and dispatch are therefore not detected.
+Provider relationships, supported revisions, exact calldata, chain/block evidence
+and settlement accounting retain their independent checks; other adapters keep
+their existing deployment verification.
+
 The journal atomically records concrete attempt identity, candidate binding, authority consumption and signer allocation before dispatch. Repeating execute observes the existing logical action. Continuation uses a broker-issued token with durable idempotency, including concurrent calls and lost responses. Explicit reauthorization binds a broker token and revised native input to a fresh review of unfinished work, retaining completed stages and spent fees. Repeating the token is idempotent. Financial invocation termination closes further admission; already admitted immutable submissions may finish. Status is bounded observation only and needs no approval. There is no background runner. If approval persistence succeeds but admission setup is interrupted, startup restores only the missing passive recovery metadata from the retained approved binding. It preserves the original expiry; an expired approval requires explicit reauthorization of the original action before any submission.
 
 When an action never obtained approval or dispatched a submission, its broker-issued preapproval token can also request explicit revised-input review on the original operation ID. An expired compound deadline requires that revised review; continuation cannot extend it. The store preserves the original request identity and record, binds the token to the revised input, and rejects different-input token reuse or any previously authorized or admitted action. Restart and lost responses cannot create another approval or submission from a consumed token. A prepared transfer alone is not evidence that funds are in transit.

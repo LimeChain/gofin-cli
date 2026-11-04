@@ -404,7 +404,7 @@ impl EthereumAdapter {
         block: u64,
         zero: bool,
     ) -> Result<AnchorFacts> {
-        let mut collector = ReadCollector::new(self, block).await;
+        let mut collector = ReadCollector::for_aave(self, block);
         self.observe_anchor_facts_with_collector(ctx, block, zero, &mut collector)
             .await
     }
@@ -570,7 +570,7 @@ impl EthereumAdapter {
                 observed_at: now(),
             });
         }
-        let mut inclusion_collector = ReadCollector::new(self, receipt.block_number).await;
+        let mut inclusion_collector = ReadCollector::for_aave(self, receipt.block_number);
         require(
             receipt.block_number > 0,
             "ANCHOR_BLOCK_INVALID",
@@ -631,7 +631,7 @@ impl EthereumAdapter {
         })?;
         let zero = prior.evidence["method"] == json!("aave-zero-observed-backing");
         let before_block = receipt.block_number - 1;
-        let mut before_collector = ReadCollector::new(self, before_block).await;
+        let mut before_collector = ReadCollector::for_aave(self, before_block);
         let historical = if historical_block == before_block {
             self.observe_anchor_facts_with_collector(
                 &ctx,

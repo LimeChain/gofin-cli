@@ -418,6 +418,14 @@ pub trait EvmRpc: Send + Sync {
     /// Internal runtime boundary, never an agent-visible raw-method endpoint.
     async fn request(&self, method: &str, params: Value) -> Result<Value>;
 
+    /// True only when this transport independently verifies every endpoint's
+    /// chain before accepting data, including newly selected fallback endpoints.
+    /// This is a transport guarantee, not a claim that a cold endpoint has
+    /// already been contacted. Custom transports retain explicit checks by default.
+    fn enforces_chain_identity(&self, _expected_chain_id: u64) -> bool {
+        false
+    }
+
     /// Caller-owned evidence constraints, without weakening custom transports.
     async fn request_checked(
         &self,
@@ -1213,6 +1221,9 @@ impl HttpRpc {
 
 #[async_trait]
 impl EvmRpc for HttpRpc {
+    fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+        self.expected_chain_id == expected_chain_id
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         self.request_internal(method, params, RpcReadRequirements::default())
             .await
@@ -1891,6 +1902,16 @@ impl EvmRuntime {
             ));
         }
         Ok(())
+    }
+    /// A collection caller may reuse transport-owned endpoint verification.
+    /// Its subsequent data requests still verify cold/new fallback endpoints;
+    /// transports without that guarantee perform the normal explicit check.
+    pub async fn assert_chain_from_transport_or_rpc(&self) -> Result<()> {
+        if self.rpc.enforces_chain_identity(self.chain_id) {
+            Ok(())
+        } else {
+            self.assert_chain().await
+        }
     }
     pub async fn code(&self, contract: Address) -> Result<()> {
         self.code_at(contract, None).await
@@ -3519,6 +3540,154 @@ mod http_rpc_tests {
 
     fn fresh_fixture_header() -> Value {
         json!({"number":"0x11","hash":format!("0x{}","33".repeat(32)),"timestamp":format!("0x{:x}",SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_reuses_identity_but_preserves_both_headers() {
+        let header = fresh_fixture_header();
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(header.clone()),
+            FixtureResponse::Json(header.clone()),
+        ]);
+        assert!(rpc.enforces_chain_identity(1));
+        assert!(!rpc.enforces_chain_identity(2));
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        for _ in 0..2 {
+            runtime.assert_chain_from_transport_or_rpc().await.unwrap();
+            assert_eq!(
+                runtime
+                    .rpc
+                    .request("eth_getBlockByNumber", json!(["latest", false]))
+                    .await
+                    .unwrap(),
+                header
+            );
+        }
+        assert_eq!(
+            worker.join().unwrap(),
+            [
+                "eth_chainId",
+                "eth_getBlockByNumber",
+                "eth_getBlockByNumber"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_verifies_new_fallback_before_accepting_its_header() {
+        for fallback_chain in [1, 2] {
+            let header = fresh_fixture_header();
+            let (mut rpc, primary) = fixture_rpc(vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Json(header.clone()),
+                FixtureResponse::Http(429),
+            ]);
+            // Warm the primary alone, then add an unvisited fallback. This
+            // makes the cache/fallback transition deterministic without a race
+            // against a speculative hedge from the first successful read.
+            assert_eq!(
+                rpc.request("eth_getBlockByNumber", json!(["latest", false]))
+                    .await
+                    .unwrap(),
+                header
+            );
+            let mut responses = vec![FixtureResponse::Json(json!(format!(
+                "0x{fallback_chain:x}"
+            )))];
+            if fallback_chain == 1 {
+                responses.push(FixtureResponse::Json(header.clone()));
+            }
+            let (backup, secondary) = fixture_rpc(responses);
+            rpc.urls.push(backup.urls[0].clone());
+            let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+            runtime.assert_chain_from_transport_or_rpc().await.unwrap();
+            let result = runtime
+                .rpc
+                .request("eth_getBlockByNumber", json!(["latest", false]))
+                .await;
+            if fallback_chain == 1 {
+                assert_eq!(result.unwrap(), header);
+                assert_eq!(
+                    secondary.join().unwrap(),
+                    ["eth_chainId", "eth_getBlockByNumber"]
+                );
+            } else {
+                assert_eq!(result.unwrap_err().code, "WRONG_CHAIN");
+                assert_eq!(secondary.join().unwrap(), ["eth_chainId"]);
+            }
+            assert_eq!(
+                primary.join().unwrap(),
+                [
+                    "eth_chainId",
+                    "eth_getBlockByNumber",
+                    "eth_getBlockByNumber"
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_defaults_to_explicit_verification_for_alternate_rpcs() {
+        struct Alternate {
+            chain: u64,
+            calls: Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl EvmRpc for Alternate {
+            async fn request(&self, method: &str, _: Value) -> Result<Value> {
+                self.calls.lock().unwrap().push(method.into());
+                assert_eq!(method, "eth_chainId");
+                Ok(json!(format!("0x{:x}", self.chain)))
+            }
+        }
+        for chain in [1, 2] {
+            let rpc = Arc::new(Alternate {
+                chain,
+                calls: Mutex::new(vec![]),
+            });
+            assert!(!rpc.enforces_chain_identity(1));
+            let runtime = EvmRuntime::new(rpc.clone(), 1, None);
+            let result = runtime.assert_chain_from_transport_or_rpc().await;
+            if chain == 1 {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code, "WRONG_CHAIN");
+            }
+            assert_eq!(&*rpc.calls.lock().unwrap(), &["eth_chainId"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_chain_assertion_keeps_its_explicit_request() {
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        runtime.assert_chain().await.unwrap();
+        assert_eq!(worker.join().unwrap(), ["eth_chainId", "eth_chainId"]);
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_never_covers_a_different_runtime_network() {
+        let (mut rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x2105")),
+            FixtureResponse::Json(json!("0x2105")),
+        ]);
+        rpc.expected_chain_id = 8453;
+        assert!(rpc.enforces_chain_identity(8453));
+        assert!(!rpc.enforces_chain_identity(1));
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        assert_eq!(
+            runtime
+                .assert_chain_from_transport_or_rpc()
+                .await
+                .unwrap_err()
+                .code,
+            "WRONG_CHAIN"
+        );
+        assert_eq!(worker.join().unwrap(), ["eth_chainId", "eth_chainId"]);
     }
 
     #[tokio::test]

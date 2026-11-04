@@ -151,7 +151,10 @@ impl EthereumAdapter {
         selected.require_operation(operation)?;
         let wallet = selected.resolve(&input.request, false)?;
         let owner = address(&wallet.address)?;
-        selected.runtime.assert_chain().await?;
+        selected
+            .runtime
+            .assert_chain_from_transport_or_rpc()
+            .await?;
         let block = if let Some(block) = input.request.block_number {
             block
         } else {
@@ -207,7 +210,7 @@ impl EthereumAdapter {
             collection::{ReadCall, ReadCollector},
         };
         let configs = adapter.market_configs();
-        let mut collector = ReadCollector::new(&adapter, capture.block).await;
+        let mut collector = ReadCollector::for_aave(&adapter, capture.block);
         let mut calls = Vec::new();
         for config in &configs {
             let pool = address(&config.pool)?;
@@ -227,24 +230,14 @@ impl EthereumAdapter {
                 .find(|p| p.pool == config.pool);
             let mut provider = batch::next::<Pool::ADDRESSES_PROVIDERCall>(&mut values);
             let revision = batch::next::<Pool::POOL_REVISIONCall>(&mut values);
-            let pool = address(&config.pool)?;
-            let oracle = address(&config.oracle)?;
-            if let Err(e) = selected.runtime.code_at(pool, Some(capture.block)).await {
-                provider = Err(e);
-            } else if let Err(e) = selected.runtime.code_at(oracle, Some(capture.block)).await {
-                provider = Err(e);
-            } else if let Ok(value) = &provider {
-                if let Err(e) = selected.runtime.code_at(*value, Some(capture.block)).await {
-                    provider = Err(e);
-                } else if let Some(reviewed) = &profile
-                    && *value != address(&reviewed.addresses_provider)?
-                {
-                    provider = Err(error(
-                        "DEPLOYMENT_IDENTITY_MISMATCH",
-                        "read",
-                        "Pool provider differs from the reviewed market identity.",
-                    ));
-                }
+            if let (Ok(value), Some(reviewed)) = (&provider, &profile)
+                && *value != address(&reviewed.addresses_provider)?
+            {
+                provider = Err(error(
+                    "DEPLOYMENT_IDENTITY_MISMATCH",
+                    "read",
+                    "Pool provider differs from the reviewed market identity.",
+                ));
             }
             markets.push(MarketObservation {
                 config,
@@ -277,14 +270,7 @@ impl EthereumAdapter {
                     if pool == address(&market.config.pool)?
                         && oracle == address(&market.config.oracle)? =>
                 {
-                    match data {
-                        Ok(data) => adapter
-                            .runtime
-                            .code_at(data, Some(capture.block))
-                            .await
-                            .map(|_| data),
-                        Err(e) => Err(e),
-                    }
+                    data
                 }
                 (Err(e), _, _) | (_, Err(e), _) => Err(e),
                 _ => Err(error(
@@ -596,18 +582,15 @@ mod tests {
     impl EvmRpc for BatchRpc {
         async fn request(&self, method: &str, params: Value) -> Result<Value> {
             let multicall = address(crate::collection::MULTICALL)?;
-            if method == "eth_getCode" && params[0] == json!(lower_address(multicall)) {
-                return Ok(json!(if self.canonical.load(Ordering::SeqCst) {
-                    format!(
-                        "0x{}",
-                        include_str!("../multicall/multicall3-runtime.hex").trim()
-                    )
-                } else {
-                    "0x6000".into()
-                }));
-            }
+            assert!(
+                !matches!(method, "eth_getCode" | "eth_getStorageAt"),
+                "Aave native reads must not probe code or proxy storage"
+            );
             if method == "eth_call" && params[0]["to"] == json!(lower_address(multicall)) {
                 self.aggregates.fetch_add(1, Ordering::SeqCst);
+                if !self.canonical.load(Ordering::SeqCst) {
+                    return Err(GoFinError::validation("aggregate unavailable"));
+                }
                 let data = gofin_evm::rpc_bytes(&params[0]["data"])?;
                 let calls = Multicall3::aggregate3Call::abi_decode_validate(&data)
                     .map_err(|_| GoFinError::validation("invalid aggregate fixture"))?

@@ -519,7 +519,6 @@ pub(crate) struct WriteEvidence {
     pub pool: String,
     pub block: u64,
     pub block_hash: String,
-    pub proxy_identity: String,
     pub token: reads::Token,
     pub reserve: super::read_lifecycle::WriteReserveFacts,
     pub pool_revision: U256,
@@ -573,7 +572,7 @@ impl EthereumAdapter {
         let adapter = selected.as_ref().unwrap_or(self);
         let wallet = adapter.resolve(&input.request, true)?.clone();
         let owner = address(&wallet.address)?;
-        adapter.runtime.assert_chain().await?;
+        adapter.runtime.assert_chain_from_transport_or_rpc().await?;
         // One latest header supplies both the capture height and its identity.
         // Numeric state reads and the independent final canonical check remain pinned.
         let header = adapter
@@ -601,11 +600,10 @@ impl EthereumAdapter {
         ));
         let pool = reader.aave()?.pool.clone();
         let pool_address = address(&pool)?;
-        let mut collector = ReadCollector::new(&reader, block).await;
+        let mut collector = ReadCollector::for_aave(&reader, block);
         let provider = reader
             .data_provider_with_collector(block, &mut collector)
             .await?;
-        let proxy_identity = reader.aave_proxy_identity_at(Some(block)).await?;
         let reserve = super::read_lifecycle::collect_write_reserve(
             &reader,
             block,
@@ -897,7 +895,6 @@ impl EthereumAdapter {
             pool,
             block,
             block_hash: hash,
-            proxy_identity,
             token,
             reserve,
             pool_revision,
@@ -1134,7 +1131,7 @@ async fn collect_context_anchor(
         if let std::collections::btree_map::Entry::Vacant(entry) =
             historical_collectors.entry(facts_block)
         {
-            entry.insert(ReadCollector::new(reader, facts_block).await);
+            entry.insert(ReadCollector::for_aave(reader, facts_block));
         }
         reader
             .observe_anchor_facts_with_collector_and_header(
@@ -1271,7 +1268,6 @@ pub(crate) struct WriteCandidate {
     pub owner: Address,
     pub block: u64,
     pub block_hash: String,
-    pub proxy_identity: String,
     pub amount: U256,
     pub maximum_fee: U256,
     pub binding: Binding,
@@ -1656,7 +1652,6 @@ pub(crate) fn evaluate_write(input: &WriteInput, e: &WriteEvidence) -> Result<Wr
         owner,
         block: e.block,
         block_hash: e.block_hash.clone(),
-        proxy_identity: e.proxy_identity.clone(),
         amount: qty,
         maximum_fee,
         binding,
@@ -1673,13 +1668,11 @@ pub(crate) enum WriteRiskEvidence {
 }
 pub(crate) struct WritePreparedEvidence {
     pub transaction: FrozenTransaction,
-    pub live_proxy: String,
 }
 
 pub(crate) struct WriteFinalEvidence {
     pub transaction: FrozenTransaction,
     pub simulation: gofin_evm::alloy::primitives::Bytes,
-    pub live_proxy: String,
     pub observed_at: String,
     pub expires_at: String,
     pub native_asset: AssetId,
@@ -1750,20 +1743,6 @@ impl EthereumAdapter {
             &calldata,
         )
         .map_err(|e| error("AAVE_CALLDATA_INVALID", "preview", &e.to_string()))?;
-        let live_proxy = adapter.aave_proxy_identity().await?;
-        require(
-            live_proxy == candidate.proxy_identity,
-            "AAVE_IMPLEMENTATION_CHANGED",
-            "Pool implementation changed during preparation.",
-        )?;
-        if let Some(old) = &candidate.original {
-            let identity = old.aave_proxy_identity.as_ref().ok_or_else(|| error("AAVE_PREVIEW_REFRESH_REQUIRED", "revalidation", "This legacy Aave preview did not bind the selected Pool proxy and implementation. Create a fresh preview before execution."))?;
-            require(
-                identity == &live_proxy,
-                "AAVE_IMPLEMENTATION_CHANGED",
-                "The selected Pool proxy or implementation changed after preview; create a fresh preview.",
-            )?;
-        }
         let transaction = if let Some(old) = &candidate.original {
             let tx = &old.transaction;
             require(
@@ -1787,10 +1766,7 @@ impl EthereumAdapter {
                 )
                 .await?
         };
-        Ok(WritePreparedEvidence {
-            transaction,
-            live_proxy,
-        })
+        Ok(WritePreparedEvidence { transaction })
     }
 
     /// Simulate the prepared envelope before approval, then collect the final
@@ -1826,7 +1802,6 @@ impl EthereumAdapter {
         Ok(WriteFinalEvidence {
             transaction: prepared.transaction.clone(),
             simulation,
-            live_proxy: prepared.live_proxy.clone(),
             observed_at,
             expires_at,
             native_asset,
@@ -1838,17 +1813,8 @@ pub(crate) fn finalize_write(
     candidate: &WriteCandidate,
     evidence: &WriteFinalEvidence,
 ) -> Result<PreparedOperation> {
-    if let Some(old) = &candidate.original {
-        let identity = old.aave_proxy_identity.as_ref().ok_or_else(|| error("AAVE_PREVIEW_REFRESH_REQUIRED", "revalidation", "This legacy Aave preview did not bind the selected Pool proxy and implementation. Create a fresh preview before execution."))?;
-        require(
-            identity == &evidence.live_proxy,
-            "AAVE_IMPLEMENTATION_CHANGED",
-            "The selected Pool proxy or implementation changed after preview; create a fresh preview.",
-        )?;
-    }
     let mut binding = candidate.binding.clone();
     binding.transaction = evidence.transaction.clone();
-    binding.aave_proxy_identity = Some(evidence.live_proxy.clone());
     let mut warnings = candidate.warnings.clone();
     warnings.push("The official Aave MCP supplies candidate unsigned transaction data; GoFin validates the selected Pool call locally before approval and signing.".into());
     super::finalization::finalize_aave(super::finalization::AaveFinalFacts {
@@ -1897,14 +1863,6 @@ impl EthereumAdapter {
                 "Original Aave binding is malformed.",
             )
         })?;
-        require(
-            binding
-                .aave_proxy_identity
-                .as_ref()
-                .is_some_and(|identity| !identity.is_empty()),
-            "AAVE_PREVIEW_REFRESH_REQUIRED",
-            "The prepared Aave candidate has no bound deployment identity; prepare and approve it again.",
-        )?;
         let request = request::parse(&prepared.operation, &prepared.input)?;
         let owner = address(&adapter.resolve(&request, true)?.address)?;
         require(
@@ -2005,18 +1963,6 @@ impl EthereumAdapter {
         let binding = self.aave_validate_prepared(prepared)?;
         let selected = self.selected_market(&prepared.input)?;
         let adapter = selected.as_ref().unwrap_or(self);
-        let expected_proxy = binding.aave_proxy_identity.as_deref().ok_or_else(|| {
-            error(
-                "AAVE_APPROVAL_OBSOLETE",
-                "submission",
-                "Prepared Aave deployment identity is missing.",
-            )
-        })?;
-        require(
-            adapter.aave_proxy_identity().await? == expected_proxy,
-            "AAVE_IMPLEMENTATION_CHANGED",
-            "The approved Pool implementation changed before submission.",
-        )?;
         authorized.assert_authorized()?;
         let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
         adapter
