@@ -114,9 +114,9 @@ impl EthereumAdapter {
         )?;
         let request = request::parse(operation, input)?;
         let wallet = self.resolve(&request, true)?;
-        self.runtime.assert_chain().await?;
+        self.runtime.assert_chain_from_transport_or_rpc().await?;
         let token = self
-            .token(request.token.as_deref().expect("schema"), None)
+            .aave_token(request.token.as_deref().expect("schema"), None)
             .await?;
         let reserve = self.reserve(&token.reference, None).await?;
         self.verify_receipt_identity(&token, &reserve, None).await?;

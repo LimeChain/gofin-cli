@@ -1,26 +1,13 @@
 //! Balance-only metadata caching. Financial preparation continues to use fresh
 //! `token()` reads and never trusts this display cache for transaction authority.
 use super::*;
-use abi::{Erc20, Multicall3};
-use gofin_evm::{
-    RpcReadRequirements,
-    alloy::{
-        primitives::keccak256,
-        sol_types::{SolCall, SolValue},
-    },
-    rpc_bytes,
-};
-use tokio::task::JoinSet;
-
-const MULTICALL: &str = "0xca11bde05977b3631167028862be2a173976ca11";
-const BATCH_SIZE: usize = 32;
-const CONCURRENCY: usize = 4;
-const DIRECT_CONCURRENCY: usize = 8;
-#[derive(Clone)]
-struct Call {
-    target: Address,
-    data: Vec<u8>,
-}
+#[cfg(test)]
+use crate::collection::{BATCH_SIZE, CONCURRENCY, DIRECT_CONCURRENCY, MULTICALL};
+use crate::collection::{ReadCall as Call, ReadCollector};
+use abi::Erc20;
+#[cfg(test)]
+use abi::Multicall3;
+use gofin_evm::alloy::sol_types::{SolCall, SolValue};
 #[derive(Clone, Serialize, Deserialize)]
 struct Metadata {
     token: reads::Token,
@@ -65,6 +52,111 @@ impl EthereumAdapter {
     fn metadata_key(&self, reference: &str) -> String {
         format!("evm-metadata-v1:{}:{reference}", self.config.chain_id)
     }
+    /// Look up display metadata locally; this is never financial evidence until
+    /// its decimals agree with the selected reserve's fresh onchain configuration.
+    pub(crate) fn aave_metadata_hint(&self, reference: &str) -> Option<TokenMetadataHint> {
+        let contract = address(reference).ok()?;
+        if contract == Address::ZERO {
+            return None;
+        }
+        let reference = lower_address(contract);
+        let key = self.metadata_key(&reference);
+        let cached = self
+            .metadata_cache
+            .get::<Metadata>(
+                &key,
+                self.metadata_ttl(&reference),
+                self.clock.now().timestamp(),
+            )
+            .filter(|metadata| {
+                metadata.token.reference == reference
+                    && pow10(metadata.token.decimals).is_ok()
+                    && label_valid(&metadata.token.symbol)
+                    && metadata.name.as_ref().is_none_or(|name| label_valid(name))
+            })
+            .map(|metadata| TokenMetadataHint {
+                chain_id: self.config.chain_id,
+                address: reference.clone(),
+                decimals: metadata.token.decimals,
+                symbol: metadata.token.symbol,
+            });
+        cached.or_else(|| {
+            self.token_discovery
+                .as_ref()?
+                .token_metadata(self.config.chain_id, &reference)
+                .filter(|hint| {
+                    hint.chain_id == self.config.chain_id
+                        && hint.address == reference
+                        && pow10(hint.decimals).is_ok()
+                        && label_valid(&hint.symbol)
+                })
+        })
+    }
+    /// The live selected reserve decides precision. A mismatch invalidates any
+    /// mutable cached metadata and forces the caller to fetch token metadata.
+    pub(crate) fn aave_metadata_for_decimals(
+        &self,
+        reference: &str,
+        hint: &TokenMetadataHint,
+        canonical_decimals: U256,
+    ) -> Option<reads::Token> {
+        let contract = address(reference).ok()?;
+        if contract == Address::ZERO {
+            return None;
+        }
+        let reference = lower_address(contract);
+        if hint.chain_id != self.config.chain_id || hint.address != reference {
+            return None;
+        }
+        if canonical_decimals > U256::from(u8::MAX)
+            || canonical_decimals != U256::from(hint.decimals)
+            || pow10(hint.decimals).is_err()
+            || !label_valid(&hint.symbol)
+        {
+            self.metadata_cache.remove(&self.metadata_key(&reference));
+            return None;
+        }
+        Some(reads::Token {
+            reference,
+            decimals: hint.decimals,
+            symbol: hint.symbol.clone(),
+        })
+    }
+    /// Store only metadata the caller has just checked against reserve precision.
+    pub(crate) fn aave_store_verified_metadata(&self, token: &reads::Token) {
+        let Ok(contract) = address(&token.reference) else {
+            return;
+        };
+        let reference = lower_address(contract);
+        if contract == Address::ZERO
+            || token.reference != reference
+            || pow10(token.decimals).is_err()
+            || !label_valid(&token.symbol)
+        {
+            return;
+        }
+        let key = self.metadata_key(&reference);
+        let ttl = self.metadata_ttl(&reference);
+        let now = self.clock.now().timestamp();
+        let name = self
+            .metadata_cache
+            .get::<Metadata>(&key, ttl, now)
+            .filter(|old| {
+                old.token.reference == reference
+                    && old.token.decimals == token.decimals
+                    && old.name.as_ref().is_none_or(|name| label_valid(name))
+            })
+            .and_then(|old| old.name);
+        self.metadata_cache.put(
+            &key,
+            &Metadata {
+                token: token.clone(),
+                name,
+            },
+            ttl,
+            now,
+        );
+    }
     pub(crate) fn learned_key(&self, owner: &str) -> String {
         format!(
             "evm-holdings-v1:{}:{}",
@@ -90,155 +182,6 @@ impl EthereumAdapter {
         });
         if ttl == -1 || ttl > 0 { ttl } else { 86400 }
     }
-    async fn verified_multicall(&self, block: u64) -> Option<Address> {
-        if !matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663) {
-            return None;
-        }
-        let contract = address(MULTICALL).ok()?;
-        let raw = self
-            .runtime
-            .rpc
-            .request_checked(
-                "eth_getCode",
-                json!([MULTICALL, gofin_evm::block_tag(Some(block))]),
-                RpcReadRequirements {
-                    pin_block: Some(block),
-                    ..Default::default()
-                },
-            )
-            .await
-            .ok()?;
-        let code = rpc_bytes(&raw).ok()?;
-        let canonical =
-            hex::decode(include_str!("multicall/multicall3-runtime.hex").trim()).ok()?;
-        (keccak256(&code) == keccak256(&canonical)).then_some(contract)
-    }
-    async fn direct_call(&self, call: Call, block: u64) -> Result<Vec<u8>> {
-        let raw = self
-            .runtime
-            .rpc
-            .request_checked(
-                "eth_call",
-                json!([{
-                "to": lower_address(call.target),
-                "data": gofin_evm::hex_bytes(&call.data)
-            }, gofin_evm::block_tag(Some(block))]),
-                RpcReadRequirements {
-                    pin_block: Some(block),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        rpc_bytes(&raw).map(|bytes| bytes.to_vec())
-    }
-    async fn direct_calls(&self, calls: Vec<Call>, block: u64) -> Vec<Result<Vec<u8>>> {
-        let mut output = Vec::with_capacity(calls.len());
-        // At most eight direct calls per reader, including when aggregation fails.
-        for chunk in calls.chunks(DIRECT_CONCURRENCY) {
-            let mut jobs = JoinSet::new();
-            for (i, call) in chunk.iter().cloned().enumerate() {
-                let adapter = self.clone();
-                jobs.spawn(async move { (i, adapter.direct_call(call, block).await) });
-            }
-            let mut part: Vec<_> = (0..chunk.len())
-                .map(|_| {
-                    Err(error(
-                        "HOLDINGS_READ_FAILED",
-                        "read",
-                        "A holdings read did not complete.",
-                    ))
-                })
-                .collect();
-            while let Some(result) = jobs.join_next().await {
-                if let Ok((i, value)) = result {
-                    part[i] = value;
-                }
-            }
-            output.extend(part);
-        }
-        output
-    }
-    async fn aggregate_chunk(
-        &self,
-        calls: Vec<Call>,
-        block: u64,
-        multicall: Address,
-    ) -> Option<Vec<Result<Vec<u8>>>> {
-        let request = Multicall3::aggregate3Call {
-            calls: calls
-                .iter()
-                .map(|call| Multicall3::Call3 {
-                    target: call.target,
-                    allowFailure: true,
-                    callData: call.data.clone().into(),
-                })
-                .collect(),
-        };
-        let result = self
-            .runtime
-            .call(multicall, &request, Some(block))
-            .await
-            .ok()?;
-        if result.len() != calls.len() {
-            return None;
-        }
-        Some(
-            result
-                .into_iter()
-                .map(|value| {
-                    if value.success {
-                        Ok(value.returnData.to_vec())
-                    } else {
-                        Err(error(
-                            "TOKEN_CALL_FAILED",
-                            "read",
-                            "Token read reverted in Multicall.",
-                        ))
-                    }
-                })
-                .collect(),
-        )
-    }
-    async fn batch_calls(
-        &self,
-        calls: Vec<Call>,
-        block: u64,
-        multicall: Option<Address>,
-    ) -> Vec<Result<Vec<u8>>> {
-        let Some(multicall) = multicall else {
-            return self.direct_calls(calls, block).await;
-        };
-        let chunks: Vec<_> = calls
-            .chunks(BATCH_SIZE)
-            .map(|chunk| chunk.to_vec())
-            .collect();
-        let mut output = Vec::with_capacity(calls.len());
-        for group in chunks.chunks(CONCURRENCY) {
-            let mut jobs = JoinSet::new();
-            for (i, chunk) in group.iter().cloned().enumerate() {
-                let adapter = self.clone();
-                jobs.spawn(
-                    async move { (i, adapter.aggregate_chunk(chunk, block, multicall).await) },
-                );
-            }
-            let mut parts: Vec<Option<Vec<Result<Vec<u8>>>>> =
-                (0..group.len()).map(|_| None).collect();
-            while let Some(result) = jobs.join_next().await {
-                if let Ok((i, value)) = result {
-                    parts[i] = value;
-                }
-            }
-            // Fallback is outside concurrent aggregation tasks so the eight-call
-            // direct limit remains global to this balance read.
-            for (chunk, part) in group.iter().zip(parts) {
-                match part {
-                    Some(part) => output.extend(part),
-                    None => output.extend(self.direct_calls(chunk.clone(), block).await),
-                }
-            }
-        }
-        output
-    }
     pub(crate) async fn read_holdings(
         &self,
         owner_string: &str,
@@ -249,9 +192,9 @@ impl EthereumAdapter {
     ) -> Result<(Vec<ResourceAmount>, TokenDiscoveryResult)> {
         let mut scope = self.wallet_tokens(owner_string, explicit).await?;
         let candidates = scope.candidates.clone();
-        let (native, multicall) = tokio::join!(
+        let (native, mut collector) = tokio::join!(
             self.runtime.balance(owner, Some(block)),
-            self.verified_multicall(block)
+            ReadCollector::new(self, block)
         );
         let mut holdings = vec![ResourceAmount {
             resource: resource(self.config.chain_id, owner),
@@ -260,13 +203,13 @@ impl EthereumAdapter {
         let calls = candidates
             .iter()
             .map(|reference| {
-                Ok(Call {
-                    target: address(reference)?,
-                    data: Erc20::balanceOfCall { owner }.abi_encode(),
-                })
+                Ok(Call::new(
+                    address(reference)?,
+                    &Erc20::balanceOfCall { owner },
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let balances = self.batch_calls(calls, block, multicall).await;
+        let balances = collector.collect(calls).await;
         let now = self.clock.now().timestamp();
         let mut pending = Vec::new();
         let mut learned: BTreeSet<_> = self.remembered_tokens(owner_string).into_iter().collect();
@@ -310,22 +253,13 @@ impl EthereumAdapter {
             if metadata.is_none() {
                 let target = address(reference)?;
                 calls.extend([
-                    Call {
-                        target,
-                        data: Erc20::decimalsCall {}.abi_encode(),
-                    },
-                    Call {
-                        target,
-                        data: Erc20::symbolCall {}.abi_encode(),
-                    },
-                    Call {
-                        target,
-                        data: Erc20::nameCall {}.abi_encode(),
-                    },
+                    Call::new(target, &Erc20::decimalsCall {}),
+                    Call::new(target, &Erc20::symbolCall {}),
+                    Call::new(target, &Erc20::nameCall {}),
                 ]);
             }
         }
-        let mut fresh = self.batch_calls(calls, block, multicall).await.into_iter();
+        let mut fresh = collector.collect(calls).await.into_iter();
         for (reference, balance, cached) in pending {
             let was_cached = cached.is_some();
             let metadata = if let Some(cached) = cached {
@@ -439,6 +373,7 @@ mod tests {
         canonical: AtomicBool,
         aggregation_fails: AtomicBool,
         corrupt_aggregate: AtomicBool,
+        incomplete_aggregate: AtomicBool,
         bad_token: AtomicBool,
         balance: AtomicU64,
         metadata_reads: AtomicUsize,
@@ -454,6 +389,7 @@ mod tests {
                 canonical: AtomicBool::new(canonical),
                 aggregation_fails: AtomicBool::new(false),
                 corrupt_aggregate: AtomicBool::new(false),
+                incomplete_aggregate: AtomicBool::new(false),
                 bad_token: AtomicBool::new(false),
                 balance: AtomicU64::new(123),
                 metadata_reads: AtomicUsize::new(0),
@@ -528,7 +464,7 @@ mod tests {
                         }
                         let calls = Multicall3::aggregate3Call::abi_decode(&data).unwrap().calls;
                         assert!(calls.len() <= BATCH_SIZE);
-                        let results: Vec<_> = calls
+                        let mut results: Vec<_> = calls
                             .into_iter()
                             .map(|call| match self.call(call.target, &call.callData) {
                                 Ok(data) => Multicall3::Result3 {
@@ -541,6 +477,9 @@ mod tests {
                                 },
                             })
                             .collect();
+                        if self.incomplete_aggregate.load(Ordering::SeqCst) {
+                            results.pop();
+                        }
                         Ok(json!(gofin_evm::hex_bytes(&results.abi_encode())))
                     } else {
                         self.direct.fetch_add(1, Ordering::SeqCst);
@@ -608,6 +547,51 @@ mod tests {
                 assert_eq!(params[1], json!("0x4d2"));
             }
         }
+    }
+    #[tokio::test]
+    async fn collector_reports_per_target_failure_and_incomplete_results_without_fallback() {
+        let rpc = Arc::new(Rpc::new(true));
+        rpc.bad_token.store(true, Ordering::SeqCst);
+        let a = adapter(rpc.clone(), 0, 86400);
+        let mut collector = ReadCollector::new(&a, 1234).await;
+        let calls = vec![
+            Call::new(
+                super::super::tests::addr(101),
+                &Erc20::balanceOfCall {
+                    owner: super::super::tests::addr(1),
+                },
+            ),
+            Call::new(
+                super::super::tests::addr(102),
+                &Erc20::balanceOfCall {
+                    owner: super::super::tests::addr(1),
+                },
+            ),
+        ];
+        let results = collector.collect(calls.clone()).await;
+        assert!(results[0].is_ok());
+        assert_eq!(results[1].as_ref().unwrap_err().code, "TOKEN_CALL_FAILED");
+        assert_eq!(collector.stats.logical_calls, 2);
+        assert_eq!(collector.stats.aggregate_requests, 1);
+        assert_eq!(collector.stats.direct_requests, 0);
+        rpc.incomplete_aggregate.store(true, Ordering::SeqCst);
+        let repeated = collector.collect(calls.clone()).await;
+        assert!(repeated[0].is_ok());
+        assert_eq!(repeated[1].as_ref().unwrap_err().code, "TOKEN_CALL_FAILED");
+        assert_eq!(
+            collector.stats.aggregate_requests, 1,
+            "one pass retains exact observed facts and failures"
+        );
+        let mut collector = ReadCollector::new(&a, 1234).await;
+        let results = collector.collect(calls).await;
+        assert!(
+            results
+                .iter()
+                .all(|r| r.as_ref().unwrap_err().code == "MULTICALL_INCOMPLETE")
+        );
+        assert_eq!(collector.stats.aggregate_requests, 1);
+        assert_eq!(collector.stats.fallback_chunks, 0);
+        assert_eq!(rpc.direct.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn metadata_expiration_does_not_slide_and_refresh_is_explicit() {
@@ -738,6 +722,147 @@ mod tests {
         other.config.chain_id = 42161;
         read(&other, None, false).await.unwrap();
         assert_eq!(rpc.metadata_reads.load(Ordering::SeqCst), 14);
+    }
+    struct MetadataCatalog;
+    #[async_trait]
+    impl TokenDiscovery for MetadataCatalog {
+        async fn tokens(&self, _: u64, _: &str) -> Result<TokenDiscoveryResult> {
+            Ok(TokenDiscoveryResult {
+                candidates: Vec::new(),
+                complete: false,
+                source: "metadata-fixture".into(),
+                warnings: Vec::new(),
+            })
+        }
+        fn token_metadata(&self, chain: u64, reference: &str) -> Option<TokenMetadataHint> {
+            (chain == 1 && reference == token(100)).then(|| TokenMetadataHint {
+                chain_id: 1,
+                address: token(100),
+                decimals: 6,
+                symbol: "USDC".into(),
+            })
+        }
+        fn metadata_expiry_seconds(&self, _: u64, _: &str) -> i64 {
+            60
+        }
+    }
+    #[test]
+    fn aave_catalog_hint_requires_exact_identity_and_fresh_reserve_precision() {
+        let rpc = Arc::new(Rpc::new(false));
+        let mut a = adapter(rpc.clone(), 0, 60).with_token_discovery(Arc::new(MetadataCatalog));
+        let contract = token(100);
+        let hint = a.aave_metadata_hint(&contract).unwrap();
+        assert_eq!(
+            hint,
+            TokenMetadataHint {
+                chain_id: 1,
+                address: token(100),
+                decimals: 6,
+                symbol: "USDC".into()
+            }
+        );
+        let confirmed = a
+            .aave_metadata_for_decimals(&contract, &hint, U256::from(6))
+            .unwrap();
+        assert_eq!(confirmed.reference, contract);
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(18))
+                .is_none()
+        );
+        let refreshed = reads::Token {
+            reference: contract.clone(),
+            decimals: 18,
+            symbol: "REFRESHED".into(),
+        };
+        a.aave_store_verified_metadata(&refreshed);
+        let cached = a.aave_metadata_hint(&contract).unwrap();
+        assert_eq!(
+            cached.decimals, 18,
+            "verified cache supersedes a stale catalog hint"
+        );
+        assert_eq!(
+            a.aave_metadata_for_decimals(&contract, &cached, U256::from(18))
+                .unwrap()
+                .symbol,
+            "REFRESHED"
+        );
+        assert!(a.aave_metadata_hint(&token(101)).is_none());
+        assert!(
+            a.aave_metadata_for_decimals(&token(101), &hint, U256::from(6))
+                .is_none(),
+            "a hint cannot cross contract identity"
+        );
+        a.config.chain_id = 8453;
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(6))
+                .is_none(),
+            "a hint cannot cross chain identity"
+        );
+        assert!(a.aave_metadata_hint(&contract).is_none());
+        assert!(
+            rpc.requests.lock().unwrap().is_empty(),
+            "catalog and validation must be local"
+        );
+    }
+    #[test]
+    fn aave_cached_metadata_expires_and_mismatch_evicts_it() {
+        let rpc = Arc::new(Rpc::new(false));
+        let clock = Arc::new(Clock(AtomicI64::new(1000)));
+        let a = adapter(rpc, 0, 60).with_clock(clock.clone());
+        let contract = token(100);
+        let token = reads::Token {
+            reference: contract.clone(),
+            decimals: 6,
+            symbol: "SYN".into(),
+        };
+        a.aave_store_verified_metadata(&token);
+        let hint = a.aave_metadata_hint(&contract).unwrap();
+        assert!(
+            a.aave_metadata_for_decimals(&contract, &hint, U256::from(18))
+                .is_none()
+        );
+        assert!(
+            a.aave_metadata_hint(&contract).is_none(),
+            "mismatch must evict mutable metadata"
+        );
+        a.aave_store_verified_metadata(&token);
+        clock
+            .0
+            .store(1000 + a.metadata_ttl(&contract), Ordering::SeqCst);
+        assert!(
+            a.aave_metadata_hint(&contract).is_none(),
+            "expired metadata must not supply an Aave hint"
+        );
+    }
+    #[test]
+    fn aave_metadata_rejects_invalid_identity_labels_and_unrepresentable_decimals() {
+        let rpc = Arc::new(Rpc::new(false));
+        let a = adapter(rpc, 0, 60);
+        let contract = token(100);
+        for bad in [
+            TokenMetadataHint {
+                chain_id: 1,
+                address: contract.clone(),
+                decimals: 6,
+                symbol: "bad\nlabel".into(),
+            },
+            TokenMetadataHint {
+                chain_id: 1,
+                address: contract.clone(),
+                decimals: 255,
+                symbol: "BAD".into(),
+            },
+        ] {
+            assert!(
+                a.aave_metadata_for_decimals(&contract, &bad, U256::from(bad.decimals))
+                    .is_none()
+            );
+        }
+        assert!(a.aave_metadata_hint("not-an-address").is_none());
+        assert!(
+            a.aave_metadata_hint("0x0000000000000000000000000000000000000000")
+                .is_none()
+        );
     }
     #[tokio::test]
     async fn remembered_arc_native_alias_cannot_reenter_erc20_scope() {

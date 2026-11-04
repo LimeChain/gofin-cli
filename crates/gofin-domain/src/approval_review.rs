@@ -725,7 +725,12 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         review.terms.push(ApprovalTerm {
             label: "Input amount".into(),
             value: amount.clone(),
-            enforcement: if prepared.operation == "jupiter.swap"
+            enforcement: if prepared.operation_version == 2
+                && matches!(prepared.operation.as_str(), "aave.repay" | "aave.withdraw")
+                && (prepared.binding["repay_all"] == true || prepared.binding["all_amount"] == true)
+            {
+                ApprovalTermEnforcement::Estimate
+            } else if prepared.operation == "jupiter.swap"
                 || prepared.binding["provider"] == "uniswap_api_v1"
             {
                 ApprovalTermEnforcement::AfterExecution
@@ -1021,8 +1026,76 @@ mod tests {
         assert_eq!(output.account.unwrap().domain.as_deref(), Some("Ethereum"));
         assert_eq!(p.binding["pool"], "0xmarket");
         assert!(review.other_details.unwrap().contains("Health ≥: 1.5"));
+        p.operation_version = 2;
+        let current = approval_review(&p).unwrap();
+        let details = current.other_details.unwrap();
+        assert!(details.contains("Health ≥: 1.5"));
+        assert!(!details.contains("Preapproval"));
+        let risk = current
+            .terms
+            .iter()
+            .find(|term| term.label == "Preapproval Health ≥")
+            .unwrap();
+        assert_eq!(risk.enforcement, ApprovalTermEnforcement::Estimate);
+        assert!(risk.value.contains("not rechecked at submission"));
         p.binding = json!({});
         assert!(approval_review(&p).is_err());
+    }
+    #[test]
+    fn aave_all_review_distinguishes_preapproval_cap_from_encoded_ceiling() {
+        let mut p = prepared();
+        p.operation = "aave.repay".into();
+        p.operation_version = 2;
+        p.binding = json!({"pool":"0xmarket", "repay_all":true});
+        p.input = json!({"wallet":"alice", "network":"evm", "amount":"all", "max_amount":"5"});
+        let review = approval_review(&p).unwrap();
+        assert!(
+            review
+                .other_details
+                .unwrap()
+                .contains("actual amount may change")
+        );
+        assert_eq!(
+            review
+                .terms
+                .iter()
+                .find(|t| t.label == "Input amount")
+                .unwrap()
+                .enforcement,
+            ApprovalTermEnforcement::Estimate
+        );
+        assert_eq!(
+            review
+                .terms
+                .iter()
+                .find(|t| t.label == "Full-position preapproval cap")
+                .unwrap()
+                .enforcement,
+            ApprovalTermEnforcement::Estimate
+        );
+        p.operation_version = 1;
+        let legacy = approval_review(&p).unwrap();
+        assert!(
+            legacy
+                .other_details
+                .unwrap()
+                .contains("Repay all debt up to bound")
+        );
+        assert!(
+            !legacy
+                .terms
+                .iter()
+                .any(|t| t.label == "Full-position preapproval cap")
+        );
+        assert_eq!(
+            legacy
+                .terms
+                .iter()
+                .find(|t| t.label == "Input amount")
+                .unwrap()
+                .enforcement,
+            ApprovalTermEnforcement::Enforced
+        );
     }
     #[test]
     fn vault_withdrawal_review_uses_origin_movement_floor() {

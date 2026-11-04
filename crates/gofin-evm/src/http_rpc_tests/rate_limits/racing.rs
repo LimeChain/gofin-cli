@@ -655,3 +655,210 @@ async fn concurrent_pin_is_immutable_even_when_global_cache_is_evicted() {
         "rejected racing fork must not poison the cache"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn fast_read_uses_one_endpoint_and_two_physical_requests() {
+    let primary = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
+    let backup = Server::new(vec![]);
+    let rpc =
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap();
+    // Keep the runtime runnable so its paused clock cannot auto-advance to
+    // the hedge timer while the loopback fixture responds.
+    let read = rpc.request("eth_getBalance", balance_params());
+    tokio::pin!(read);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        assert!(Instant::now() < deadline, "loopback read did not finish");
+        tokio::select! {
+            biased;
+            result = &mut read => break result.unwrap(),
+            _ = tokio::task::yield_now() => {}
+        }
+    };
+    assert_eq!(result, json!("0x2a"));
+    assert_eq!(primary.requests().len(), 2, "one identity and one read");
+    assert!(
+        backup.requests().is_empty(),
+        "fast primary must avoid duplicate requests"
+    );
+}
+
+#[tokio::test]
+async fn queued_read_rechecks_cooldown_and_cancellation_releases_capacity() {
+    let primary = Server::new(vec![]);
+    let rpc = HttpRpc::isolated_localhost_pool(vec![primary.url.clone()], 1).unwrap();
+    let semaphore = rpc.read_permits.lock().unwrap()[&primary.url].clone();
+    let permits = semaphore
+        .acquire_many(MAX_READS_PER_ENDPOINT as u32)
+        .await
+        .unwrap();
+    let mut queued = Box::pin(rpc.at_once(&primary.url, "eth_chainId", json!([]), false));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut queued)
+            .await
+            .is_err()
+    );
+    rpc.record_read_rate_limit(&primary.url, Duration::from_secs(30))
+        .unwrap();
+    drop(permits);
+    let failure = queued
+        .await
+        .expect_err("queued request must honor new cooldown");
+    assert_eq!(failure.error.code, "RPC_RATE_LIMITED");
+    assert!(primary.requests().is_empty());
+    assert_eq!(semaphore.available_permits(), MAX_READS_PER_ENDPOINT);
+
+    rpc.read_cooldowns.lock().unwrap().clear();
+    let permits = semaphore
+        .acquire_many(MAX_READS_PER_ENDPOINT as u32)
+        .await
+        .unwrap();
+    let mut cancelled = Box::pin(rpc.at_once(&primary.url, "eth_chainId", json!([]), false));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut cancelled)
+            .await
+            .is_err()
+    );
+    drop(cancelled);
+    drop(permits);
+    assert_eq!(semaphore.available_permits(), MAX_READS_PER_ENDPOINT);
+    assert!(primary.requests().is_empty());
+}
+
+#[test]
+fn unknown_4444_and_revert_remain_semantic() {
+    for details in [
+        json!({"code":4444,"message":"unknown provider error"}),
+        json!({"code":4444,"message":"execution reverted"}),
+    ] {
+        let failure = rpc_rejection(&details, false);
+        assert!(!rpc_race::can_try_another("eth_call", &failure));
+        assert_eq!(
+            failure.error.details.as_deref().unwrap()["json_rpc_code"],
+            4444
+        );
+    }
+}
+
+#[tokio::test]
+async fn physical_read_capacity_bounds_dispatch_and_inflight_cancellation() {
+    use std::sync::atomic::AtomicUsize;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let high_water = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker = std::thread::spawn({
+        let (accepted, active, high_water, release, stopped) = (
+            accepted.clone(),
+            active.clone(),
+            high_water.clone(),
+            release.clone(),
+            stopped.clone(),
+        );
+        move || {
+            let mut workers = Vec::new();
+            while !stopped.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let (accepted, active, high_water, release, stopped) = (
+                            accepted.clone(),
+                            active.clone(),
+                            high_water.clone(),
+                            release.clone(),
+                            stopped.clone(),
+                        );
+                        workers.push(std::thread::spawn(move || {
+                            if read_fixture_request(&mut stream, &stopped).is_none() { return; }
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            high_water.fetch_max(count, Ordering::SeqCst);
+                            accepted.fetch_add(1, Ordering::SeqCst);
+                            while !release.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                            let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                            active.fetch_sub(1, Ordering::SeqCst);
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                }
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        }
+    });
+    let rpc = Arc::new(HttpRpc::isolated_localhost(url.clone(), 1).unwrap());
+    let mut tasks = Vec::new();
+    for _ in 0..MAX_READS_PER_ENDPOINT {
+        let rpc = rpc.clone();
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            rpc.at_once(&url, "eth_chainId", json!([]), false).await
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::SeqCst) < MAX_READS_PER_ENDPOINT {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("eight physical requests should dispatch");
+    for _ in 0..4 {
+        let rpc = rpc.clone();
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            rpc.at_once(&url, "eth_chainId", json!([]), false).await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        MAX_READS_PER_ENDPOINT,
+        "queued requests must not dispatch"
+    );
+    assert_eq!(high_water.load(Ordering::SeqCst), MAX_READS_PER_ENDPOINT);
+    // Aborting an active client releases its permit, even though the server
+    // may continue processing that already received request until released.
+    tasks.remove(0).abort();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::SeqCst) < MAX_READS_PER_ENDPOINT + 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancellation should free a slot for queued work");
+    release.store(true, Ordering::SeqCst);
+    for task in tasks {
+        assert!(task.await.unwrap().is_ok());
+    }
+    stopped.store(true, Ordering::SeqCst);
+    worker.join().unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), MAX_READS_PER_ENDPOINT + 4);
+}
+
+#[tokio::test]
+async fn write_identity_wait_for_read_capacity_remains_bounded() {
+    let server = Server::new(vec![]);
+    let mut rpc = server.rpc();
+    rpc.write_identity_timeout = Duration::from_millis(25);
+    let semaphore = rpc.read_permits.lock().unwrap()[&server.url].clone();
+    let _held = semaphore
+        .acquire_many(MAX_READS_PER_ENDPOINT as u32)
+        .await
+        .unwrap();
+    let failure = rpc
+        .request("eth_sendRawTransaction", json!(["0x00"]))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "RPC_READ_TIMEOUT");
+    assert!(
+        server.requests().is_empty(),
+        "no identity probe or broadcast may dispatch"
+    );
+}

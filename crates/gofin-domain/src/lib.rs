@@ -13,6 +13,7 @@ pub mod execution_state;
 pub mod financial_plans;
 pub mod grouped_amendments;
 pub mod money;
+pub mod operation_lifecycle;
 pub mod operation_recovery;
 pub mod outcome;
 pub mod plan_timing;
@@ -1740,7 +1741,8 @@ impl SubmissionAuthorityLease for NoopSubmissionAuthorityLease {}
 /// Broker-owned hook; implementations atomically journal before returning.
 pub trait SubmissionJournal: Send + Sync {
     fn assert_authorized(&self) -> Result<()>;
-    /// Called after a fresh adapter revalidation immediately before dispatch.
+    /// Check the concrete execution candidate against live broker authority.
+    /// This is a local scope check, not a financial evidence refresh.
     /// Existing exact-operation implementations retain their old check.
     fn assert_candidate(&self, _prepared: &PreparedOperation) -> Result<()> {
         self.assert_authorized()
@@ -1762,6 +1764,16 @@ pub trait SubmissionJournal: Send + Sync {
 
 #[async_trait]
 pub trait Adapter: Send + Sync {
+    /// Opt into typed lifecycle orchestration for this exact operation.
+    fn operation_lifecycle<'a>(
+        &'a self,
+        _operation: &str,
+        _input: &Value,
+        _context: Option<&PreparationContext>,
+    ) -> Result<Option<Box<dyn operation_lifecycle::LifecycleSession + 'a>>> {
+        Ok(None)
+    }
+
     fn attach_execution_state(
         &self,
         _state: Arc<dyn execution_state::ExecutionState>,

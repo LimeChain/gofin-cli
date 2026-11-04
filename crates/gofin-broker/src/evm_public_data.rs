@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use gofin_domain::{GoFinError, Result};
-use gofin_ethereum::{TokenDiscovery, TokenDiscoveryResult};
+use gofin_ethereum::{TokenDiscovery, TokenDiscoveryResult, TokenMetadataHint};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -72,8 +72,7 @@ impl BundledTokenDiscovery {
             {
                 return Err(invalid());
             }
-            // The catalog's declared decimals are never used for financial amounts.
-            let _ = token.decimals;
+            // The declared decimals are hints; live reserve state must confirm them.
         }
         Ok(catalog)
     }
@@ -92,6 +91,25 @@ impl TokenDiscovery for BundledTokenDiscovery {
                 None => "This network has no bundled token catalog; only configured, remembered or explicitly requested tokens are included.",
             }.into()],
         })
+    }
+
+    fn token_metadata(&self, chain_id: u64, address: &str) -> Option<TokenMetadataHint> {
+        let parsed = gofin_evm::address(address).ok()?;
+        if parsed == gofin_evm::alloy::primitives::Address::ZERO {
+            return None;
+        }
+        let reference = gofin_evm::lower_address(parsed);
+        self.catalogs
+            .get(&chain_id)?
+            .tokens
+            .iter()
+            .find(|token| token.address == reference)
+            .map(|token| TokenMetadataHint {
+                chain_id,
+                address: reference.clone(),
+                decimals: token.decimals,
+                symbol: token.symbol.clone(),
+            })
     }
 
     fn metadata_expiry_seconds(&self, chain_id: u64, address: &str) -> i64 {
@@ -129,6 +147,25 @@ mod tests {
         assert_eq!(provider.metadata_expiry_seconds(999, "unknown"), 86400);
     }
 
+    #[test]
+    fn catalog_metadata_is_scoped_to_exact_chain_and_contract() {
+        let provider = BundledTokenDiscovery::new().unwrap();
+        let entry = &provider.catalogs[&1].tokens[0];
+        let hint = provider.token_metadata(1, &entry.address).unwrap();
+        assert_eq!(hint.decimals, entry.decimals);
+        assert_eq!(hint.symbol, entry.symbol);
+        assert_eq!(
+            provider.token_metadata(1, &entry.address.to_uppercase().replacen("0X", "0x", 1)),
+            Some(hint)
+        );
+        assert!(provider.token_metadata(999999, &entry.address).is_none());
+        assert!(
+            provider
+                .token_metadata(1, "0x0000000000000000000000000000000000000000")
+                .is_none()
+        );
+        assert!(provider.token_metadata(1, "not-an-address").is_none());
+    }
     #[test]
     fn policy_accepts_forever_and_rejects_invalid_scope_or_expiry() {
         let original: serde_json::Value =

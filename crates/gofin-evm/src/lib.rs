@@ -8,6 +8,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use async_trait::async_trait;
+use gofin_domain::operation_lifecycle::{AuthorizedOperation, NonceReservation};
 use gofin_domain::{
     GoFinError, Quantity, Result, RevalidatedOperation, Submission, SubmissionJournal,
 };
@@ -30,6 +31,23 @@ mod uniswap_provider;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
 use rpc_selection::{ReadTrace, SelectionState};
 pub use uniswap_provider::{ProviderTransactionRequest, TrustedUniswapTypedData};
+
+enum DispatchAuthority<'a> {
+    Revalidated(&'a RevalidatedOperation),
+    Authorized {
+        operation: &'a AuthorizedOperation,
+        observed_block: Option<u64>,
+    },
+}
+
+impl DispatchAuthority<'_> {
+    fn assert_current(&self) -> Result<()> {
+        match self {
+            Self::Revalidated(operation) => operation.assert_fresh(),
+            Self::Authorized { operation, .. } => operation.assert_authorized(),
+        }
+    }
+}
 
 fn error(code: &str, stage: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -400,6 +418,14 @@ pub trait EvmRpc: Send + Sync {
     /// Internal runtime boundary, never an agent-visible raw-method endpoint.
     async fn request(&self, method: &str, params: Value) -> Result<Value>;
 
+    /// True only when this transport independently verifies every endpoint's
+    /// chain before accepting data, including newly selected fallback endpoints.
+    /// This is a transport guarantee, not a claim that a cold endpoint has
+    /// already been contacted. Custom transports retain explicit checks by default.
+    fn enforces_chain_identity(&self, _expected_chain_id: u64) -> bool {
+        false
+    }
+
     /// Caller-owned evidence constraints, without weakening custom transports.
     async fn request_checked(
         &self,
@@ -485,6 +511,7 @@ pub struct HttpRpc {
     write_client: reqwest::Client,
     verified: Mutex<BTreeSet<String>>,
     read_cooldowns: Mutex<BTreeMap<String, Instant>>,
+    read_permits: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
     write_identity_timeout: Duration,
     selection: Mutex<SelectionState>,
 }
@@ -510,6 +537,7 @@ const RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 // HTTP Retry-After header, so use the same conservative fallback as HTTP 429.
 const RPC_JSON_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_READS_PER_ENDPOINT: usize = 8;
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 const MAX_REVERT_DIAGNOSTIC_BYTES: usize = 4096;
@@ -770,6 +798,15 @@ impl HttpRpc {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(transport_error)?;
+        let read_permits = urls
+            .iter()
+            .map(|url| {
+                (
+                    url.clone(),
+                    Arc::new(tokio::sync::Semaphore::new(MAX_READS_PER_ENDPOINT)),
+                )
+            })
+            .collect();
         Ok(Self {
             urls,
             expected_chain_id,
@@ -777,6 +814,7 @@ impl HttpRpc {
             write_client,
             verified: Mutex::new(BTreeSet::new()),
             read_cooldowns: Mutex::new(BTreeMap::new()),
+            read_permits: Mutex::new(read_permits),
             write_identity_timeout: RPC_WRITE_IDENTITY_TIMEOUT,
             selection: Mutex::new(SelectionState::default()),
         })
@@ -826,6 +864,55 @@ impl HttpRpc {
         params: Value,
         historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
+        // Limit physical reads, including identity checks and retry attempts. A
+        // queued read must recheck cooldown after it acquires its permit.
+        let _permit = if method != "eth_sendRawTransaction" {
+            let semaphore = self
+                .read_permits
+                .lock()
+                .map_err(|_| RpcAttemptFailure {
+                    error: error(
+                        "RPC_UNAVAILABLE",
+                        "rpc",
+                        "RPC read capacity is unavailable.",
+                    ),
+                    retryable: false,
+                })?
+                .entry(url.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(MAX_READS_PER_ENDPOINT)))
+                .clone();
+            let permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| RpcAttemptFailure {
+                    error: error(
+                        "RPC_UNAVAILABLE",
+                        "rpc",
+                        "RPC read capacity is unavailable.",
+                    ),
+                    retryable: false,
+                })?;
+            if let Some(remaining) =
+                self.read_cooldown_remaining(url)
+                    .map_err(|error| RpcAttemptFailure {
+                        error,
+                        retryable: false,
+                    })?
+            {
+                return Err(RpcAttemptFailure {
+                    error: error(
+                        "RPC_RATE_LIMITED",
+                        "rpc",
+                        "RPC endpoint is temporarily cooling down.",
+                    )
+                    .with_details(json!({"retry_after_ms": remaining.as_millis()})),
+                    retryable: true,
+                });
+            }
+            Some(permit)
+        } else {
+            None
+        };
         let client = if method == "eth_sendRawTransaction" {
             &self.write_client
         } else {
@@ -854,9 +941,8 @@ impl HttpRpc {
                         error,
                         retryable: false,
                     })?;
-                if let Some(delay) = retry_after {
-                    details["retry_after_ms"] = json!(delay.as_nanos().div_ceil(1_000_000));
-                }
+                let delay = retry_after.unwrap_or(RPC_RATE_LIMIT_COOLDOWN);
+                details["retry_after_ms"] = json!(delay.as_nanos().div_ceil(1_000_000));
             }
             return Err(RpcAttemptFailure {
                 retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
@@ -1135,6 +1221,9 @@ impl HttpRpc {
 
 #[async_trait]
 impl EvmRpc for HttpRpc {
+    fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+        self.expected_chain_id == expected_chain_id
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         self.request_internal(method, params, RpcReadRequirements::default())
             .await
@@ -1707,6 +1796,63 @@ pub struct CanonicalReceipt {
     pub receipt: Value,
 }
 
+/// Independently verified finalized nonce-consumer evidence for one immutable
+/// original submission. It carries no outcome or financial effects.
+#[derive(Clone, Debug)]
+pub struct FinalizedNonceReplacement {
+    submission: Submission,
+    transaction: FrozenTransaction,
+    original: B256,
+    replacement: B256,
+    sender: Address,
+    block_number: u64,
+    block_hash: B256,
+    finalized_block_number: u64,
+    finalized_block_hash: B256,
+}
+
+impl FinalizedNonceReplacement {
+    /// Decide the replacement outcome without RPC or signer access. Evidence
+    /// can only be applied to the exact original submission and envelope.
+    pub fn reconcile(
+        &self,
+        submission: &Submission,
+        transaction: &FrozenTransaction,
+        observed_at: String,
+    ) -> Result<gofin_domain::Reconciliation> {
+        if submission != &self.submission
+            || transaction != &self.transaction
+            || submission.kind != "ethereum"
+            || submission.data["transaction"]
+                != serde_json::to_value(transaction)
+                    .map_err(|_| GoFinError::validation("Invalid transaction envelope."))?
+            || hash(&submission.reference)? != self.original
+            || address(&transaction.sender)? != self.sender
+            || self.original == self.replacement
+            || self.block_number > self.finalized_block_number
+        {
+            return Err(GoFinError::validation(
+                "Replacement evidence does not match the original submission and finalized transaction.",
+            ));
+        }
+        let evidence = json!({"state":"finalized_nonce_replaced","outcome_replay_safe":true,"original_hash":submission.reference,"replacement_hash":format!("{:#x}",self.replacement),"sender":transaction.sender,"nonce":transaction.nonce,"block_number":self.block_number,"block_hash":format!("{:#x}",self.block_hash),"finalized_block_number":self.finalized_block_number,"finalized_block_hash":format!("{:#x}",self.finalized_block_hash),"financial_effects":[]});
+        let mut verified = gofin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: vec![],
+            evidence: evidence.clone(),
+            observed_at,
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
+        Ok(gofin_domain::Reconciliation {
+            status: gofin_domain::Status::Failed,
+            evidence,
+            verified: Some(verified),
+        })
+    }
+}
+
 fn receipt_inclusion_pending(receipt: &Value, transaction: &Value) -> Result<bool> {
     let mut pending = false;
     for response in [receipt, transaction] {
@@ -1756,6 +1902,16 @@ impl EvmRuntime {
             ));
         }
         Ok(())
+    }
+    /// A collection caller may reuse transport-owned endpoint verification.
+    /// Its subsequent data requests still verify cold/new fallback endpoints;
+    /// transports without that guarantee perform the normal explicit check.
+    pub async fn assert_chain_from_transport_or_rpc(&self) -> Result<()> {
+        if self.rpc.enforces_chain_identity(self.chain_id) {
+            Ok(())
+        } else {
+            self.assert_chain().await
+        }
     }
     pub async fn code(&self, contract: Address) -> Result<()> {
         self.code_at(contract, None).await
@@ -1893,17 +2049,75 @@ impl EvmRuntime {
         calldata: Bytes,
         maximum_total_fee: U256,
     ) -> Result<PreparedCall> {
+        self.prepare_inner(sender, to, value, calldata, maximum_total_fee, true)
+            .await
+    }
+
+    /// Build an unsigned envelope without running its explicit simulation.
+    /// Gas estimation remains part of envelope construction; the caller must
+    /// simulate the resulting exact envelope before asking for authorization.
+    pub async fn prepare_envelope(
+        &self,
+        sender: Address,
+        to: Address,
+        value: U256,
+        calldata: Bytes,
+        maximum_total_fee: U256,
+    ) -> Result<FrozenTransaction> {
+        Ok(self
+            .prepare_inner(sender, to, value, calldata, maximum_total_fee, false)
+            .await?
+            .transaction)
+    }
+
+    /// Simulate the exact prepared envelope. This is a pre-approval phase;
+    /// execution-only submission deliberately does not repeat it.
+    pub async fn simulate(&self, transaction: &FrozenTransaction) -> Result<Bytes> {
+        use gofin_domain::evidence_phase::{Phase, during};
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id {
+            return Err(error(
+                "WRONG_CHAIN",
+                "simulation",
+                "Prepared envelope belongs to another chain.",
+            ));
+        }
+        let value = during(
+            Phase::EvmSimulation,
+            self.rpc
+                .request("eth_call", json!([transaction.rpc_call(), "latest"])),
+        )
+        .await?;
+        rpc_bytes(&value)
+    }
+
+    async fn prepare_inner(
+        &self,
+        sender: Address,
+        to: Address,
+        value: U256,
+        calldata: Bytes,
+        maximum_total_fee: U256,
+        simulate: bool,
+    ) -> Result<PreparedCall> {
         use gofin_domain::evidence_phase::{Phase, during};
         during(Phase::EvmChainIdentity, self.assert_chain()).await?;
         let request = json!({"from":lower_address(sender),"to":lower_address(to),"value":hex_quantity(value),"data":hex_bytes(&calldata)});
         let ((simulation, estimate), (required, priority), nonce) = tokio::try_join!(
             async {
                 let (simulation, estimate) = tokio::try_join!(
-                    during(
-                        Phase::EvmSimulation,
-                        self.rpc
-                            .request("eth_call", json!([request.clone(), "latest"]))
-                    ),
+                    async {
+                        if simulate {
+                            during(
+                                Phase::EvmSimulation,
+                                self.rpc
+                                    .request("eth_call", json!([request.clone(), "latest"])),
+                            )
+                            .await
+                        } else {
+                            Ok(json!("0x"))
+                        }
+                    },
                     during(
                         Phase::EvmGasEstimate,
                         self.rpc
@@ -2348,6 +2562,126 @@ impl EvmRuntime {
         self.dispatch(transaction, metadata, journal, None).await
     }
 
+    /// Submit an authorized single-action envelope after execution prerequisites
+    /// only. Financial evidence and simulation belong to the pre-approval phases;
+    /// this path deliberately does not recollect or re-evaluate them.
+    pub async fn submit_authorized(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        authorized: &AuthorizedOperation,
+    ) -> Result<Submission> {
+        authorized.assert_authorized()?;
+        let binding = &authorized.prepared().binding;
+        if binding.get("permit_template").is_some_and(|v| !v.is_null()) {
+            return Err(error(
+                "PERMIT_MATERIALIZATION_REQUIRED",
+                "submission",
+                "A permit template requires its dedicated signature and simulation path.",
+            ));
+        }
+        if binding.get("transaction")
+            != Some(
+                &serde_json::to_value(transaction)
+                    .map_err(|_| GoFinError::validation("Authorized transaction is malformed."))?,
+            )
+        {
+            return Err(error(
+                "BINDING_CHANGED",
+                "submission",
+                "Transaction differs from the authorized candidate.",
+            ));
+        }
+        let observed_block = self
+            .check_execution_requirements(transaction, authorized.nonce_reservation())
+            .await?;
+        authorized.assert_authorized()?;
+        self.dispatch(
+            transaction,
+            metadata,
+            authorized.journal(),
+            Some(DispatchAuthority::Authorized {
+                operation: authorized,
+                observed_block,
+            }),
+        )
+        .await
+    }
+
+    /// Checks that concern submitting the frozen envelope, without simulation,
+    /// gas re-estimation, protocol account reads or financial bound evaluation.
+    async fn check_execution_requirements(
+        &self,
+        transaction: &FrozenTransaction,
+        reservation: Option<&NonceReservation>,
+    ) -> Result<Option<u64>> {
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id {
+            return Err(error(
+                "WRONG_CHAIN",
+                "submission",
+                "Authorized envelope belongs to another chain.",
+            ));
+        }
+        let sender = address(&transaction.sender)?;
+        if let Some(reservation) = reservation {
+            let scope = format!("ethereum:{}:{}", self.chain_id, lower_address(sender));
+            if reservation.scope() != scope || reservation.allocated() != transaction.nonce {
+                return Err(error(
+                    "BINDING_CHANGED",
+                    "submission",
+                    "Broker nonce reservation differs from this chain, sender or envelope nonce.",
+                ));
+            }
+            if reservation.observed() != transaction.nonce {
+                return Err(error(
+                    "NONCE_CHANGED",
+                    "submission",
+                    "Reserved envelope nonce differs from the broker's pending nonce observation.",
+                ));
+            }
+        } else {
+            self.assert_chain().await?;
+        }
+        let (latest, nonce, (), balance) = tokio::try_join!(
+            self.rpc
+                .request("eth_getBlockByNumber", json!(["latest", false])),
+            async {
+                match reservation {
+                    Some(reservation) => Ok(reservation.observed()),
+                    None => self.pending_nonce(sender).await,
+                }
+            },
+            self.revalidate_rollup_fee(transaction),
+            self.balance(sender, None),
+        )?;
+        validate_frozen_fee_bid(transaction, rpc_u256(&latest["baseFeePerGas"])?)?;
+        if nonce != transaction.nonce {
+            return Err(error(
+                "NONCE_CHANGED",
+                "submission",
+                "Pending nonce differs from the authorized envelope.",
+            ));
+        }
+        let debit = u256(&transaction.value)?
+            .checked_add(transaction.maximum_cost()?)
+            .ok_or_else(|| {
+                error(
+                    "U256_OVERFLOW",
+                    "submission",
+                    "Gross debit overflows uint256.",
+                )
+            })?;
+        if balance < debit {
+            return Err(error(
+                "INSUFFICIENT_GAS_BALANCE",
+                "submission",
+                "Sender cannot fund the authorized value and maximum gas cost.",
+            ));
+        }
+        Ok(rpc_u64(&latest["number"]).ok())
+    }
+
     /// Submit the exact envelope already checked by the adapter's final
     /// revalidation. Only permit signature slots may differ, after their exact
     /// materialized transaction has passed simulation.
@@ -2495,8 +2829,13 @@ impl EvmRuntime {
                 "Pending nonce differs from the revalidated envelope.",
             ));
         }
-        self.dispatch(transaction, metadata, journal, Some(validated))
-            .await
+        self.dispatch(
+            transaction,
+            metadata,
+            journal,
+            Some(DispatchAuthority::Revalidated(validated)),
+        )
+        .await
     }
 
     async fn dispatch(
@@ -2504,7 +2843,7 @@ impl EvmRuntime {
         transaction: &FrozenTransaction,
         metadata: Value,
         journal: Arc<dyn SubmissionJournal>,
-        validated: Option<&RevalidatedOperation>,
+        authority: Option<DispatchAuthority<'_>>,
     ) -> Result<Submission> {
         let signer = self.signer.as_ref().ok_or_else(|| {
             error(
@@ -2513,20 +2852,25 @@ impl EvmRuntime {
                 "No protected signing provider is configured.",
             )
         })?;
-        if let Some(validated) = validated {
-            validated.assert_fresh()?;
+        if let Some(authority) = &authority {
+            authority.assert_current()?;
         }
         journal.assert_authorized()?;
         // A best-effort chain height narrows any later finalized replacement
         // search. Failure to obtain it never prevents admission or dispatch.
-        let dispatch_block = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            self.rpc.request("eth_blockNumber", json!([])),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .and_then(|v| rpc_u64(&v).ok());
+        let dispatch_block =
+            if let Some(DispatchAuthority::Authorized { observed_block, .. }) = &authority {
+                *observed_block
+            } else {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(250),
+                    self.rpc.request("eth_blockNumber", json!([])),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|v| rpc_u64(&v).ok())
+            };
         let raw = signer.sign_prepared(transaction).await?;
         let tx_hash = verify_signed_envelope(transaction, &raw)?;
         let submission = Submission {
@@ -2534,8 +2878,8 @@ impl EvmRuntime {
             reference: format!("{tx_hash:#x}"),
             data: json!({"transaction":transaction,"metadata":metadata,"dispatch_block":dispatch_block}),
         };
-        if let Some(validated) = validated {
-            validated.assert_fresh()?;
+        if let Some(authority) = &authority {
+            authority.assert_current()?;
         }
         journal.assert_authorized()?;
         journal.persist_submission(&submission)?;
@@ -2604,6 +2948,19 @@ impl EvmRuntime {
         submission: &Submission,
         transaction: &FrozenTransaction,
     ) -> Result<Option<gofin_domain::Reconciliation>> {
+        self.observe_finalized_nonce_replacement(submission, transaction)
+            .await?
+            .map(|facts| facts.reconcile(submission, transaction, gofin_domain::now()))
+            .transpose()
+    }
+
+    /// Collect a verified finalized replacement identity; callers decide the
+    /// resulting outcome separately using `FinalizedNonceReplacement::reconcile`.
+    pub async fn observe_finalized_nonce_replacement(
+        &self,
+        submission: &Submission,
+        transaction: &FrozenTransaction,
+    ) -> Result<Option<FinalizedNonceReplacement>> {
         if submission.kind != "ethereum"
             || submission.data["transaction"]
                 != serde_json::to_value(transaction)
@@ -2710,20 +3067,16 @@ impl EvmRuntime {
         {
             return Ok(None);
         }
-        let evidence = json!({"state":"finalized_nonce_replaced","outcome_replay_safe":true,"original_hash":submission.reference,"replacement_hash":format!("{replacement:#x}"),"sender":transaction.sender,"nonce":transaction.nonce,"block_number":low,"block_hash":format!("{block_hash:#x}"),"finalized_block_number":height,"finalized_block_hash":format!("{finalized_hash:#x}"),"financial_effects":[]});
-        let mut verified = gofin_domain::VerifiedEffects {
-            evidence_version: 1,
+        Ok(Some(FinalizedNonceReplacement {
             submission: submission.clone(),
-            effects: vec![],
-            evidence: evidence.clone(),
-            observed_at: gofin_domain::now(),
-            proof_digest: String::new(),
-        };
-        verified.proof_digest = gofin_domain::verified_effect_digest(&verified)?;
-        Ok(Some(gofin_domain::Reconciliation {
-            status: gofin_domain::Status::Failed,
-            evidence,
-            verified: Some(verified),
+            transaction: transaction.clone(),
+            original,
+            replacement,
+            sender,
+            block_number: low,
+            block_hash,
+            finalized_block_number: height,
+            finalized_block_hash: finalized_hash,
         }))
     }
 
@@ -3190,6 +3543,154 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
+    async fn transport_chain_guarantee_reuses_identity_but_preserves_both_headers() {
+        let header = fresh_fixture_header();
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(header.clone()),
+            FixtureResponse::Json(header.clone()),
+        ]);
+        assert!(rpc.enforces_chain_identity(1));
+        assert!(!rpc.enforces_chain_identity(2));
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        for _ in 0..2 {
+            runtime.assert_chain_from_transport_or_rpc().await.unwrap();
+            assert_eq!(
+                runtime
+                    .rpc
+                    .request("eth_getBlockByNumber", json!(["latest", false]))
+                    .await
+                    .unwrap(),
+                header
+            );
+        }
+        assert_eq!(
+            worker.join().unwrap(),
+            [
+                "eth_chainId",
+                "eth_getBlockByNumber",
+                "eth_getBlockByNumber"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_verifies_new_fallback_before_accepting_its_header() {
+        for fallback_chain in [1, 2] {
+            let header = fresh_fixture_header();
+            let (mut rpc, primary) = fixture_rpc(vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Json(header.clone()),
+                FixtureResponse::Http(429),
+            ]);
+            // Warm the primary alone, then add an unvisited fallback. This
+            // makes the cache/fallback transition deterministic without a race
+            // against a speculative hedge from the first successful read.
+            assert_eq!(
+                rpc.request("eth_getBlockByNumber", json!(["latest", false]))
+                    .await
+                    .unwrap(),
+                header
+            );
+            let mut responses = vec![FixtureResponse::Json(json!(format!(
+                "0x{fallback_chain:x}"
+            )))];
+            if fallback_chain == 1 {
+                responses.push(FixtureResponse::Json(header.clone()));
+            }
+            let (backup, secondary) = fixture_rpc(responses);
+            rpc.urls.push(backup.urls[0].clone());
+            let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+            runtime.assert_chain_from_transport_or_rpc().await.unwrap();
+            let result = runtime
+                .rpc
+                .request("eth_getBlockByNumber", json!(["latest", false]))
+                .await;
+            if fallback_chain == 1 {
+                assert_eq!(result.unwrap(), header);
+                assert_eq!(
+                    secondary.join().unwrap(),
+                    ["eth_chainId", "eth_getBlockByNumber"]
+                );
+            } else {
+                assert_eq!(result.unwrap_err().code, "WRONG_CHAIN");
+                assert_eq!(secondary.join().unwrap(), ["eth_chainId"]);
+            }
+            assert_eq!(
+                primary.join().unwrap(),
+                [
+                    "eth_chainId",
+                    "eth_getBlockByNumber",
+                    "eth_getBlockByNumber"
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_defaults_to_explicit_verification_for_alternate_rpcs() {
+        struct Alternate {
+            chain: u64,
+            calls: Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl EvmRpc for Alternate {
+            async fn request(&self, method: &str, _: Value) -> Result<Value> {
+                self.calls.lock().unwrap().push(method.into());
+                assert_eq!(method, "eth_chainId");
+                Ok(json!(format!("0x{:x}", self.chain)))
+            }
+        }
+        for chain in [1, 2] {
+            let rpc = Arc::new(Alternate {
+                chain,
+                calls: Mutex::new(vec![]),
+            });
+            assert!(!rpc.enforces_chain_identity(1));
+            let runtime = EvmRuntime::new(rpc.clone(), 1, None);
+            let result = runtime.assert_chain_from_transport_or_rpc().await;
+            if chain == 1 {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code, "WRONG_CHAIN");
+            }
+            assert_eq!(&*rpc.calls.lock().unwrap(), &["eth_chainId"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_chain_assertion_keeps_its_explicit_request() {
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        runtime.assert_chain().await.unwrap();
+        assert_eq!(worker.join().unwrap(), ["eth_chainId", "eth_chainId"]);
+    }
+
+    #[tokio::test]
+    async fn transport_chain_guarantee_never_covers_a_different_runtime_network() {
+        let (mut rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x2105")),
+            FixtureResponse::Json(json!("0x2105")),
+        ]);
+        rpc.expected_chain_id = 8453;
+        assert!(rpc.enforces_chain_identity(8453));
+        assert!(!rpc.enforces_chain_identity(1));
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        assert_eq!(
+            runtime
+                .assert_chain_from_transport_or_rpc()
+                .await
+                .unwrap_err()
+                .code,
+            "WRONG_CHAIN"
+        );
+        assert_eq!(worker.join().unwrap(), ["eth_chainId", "eth_chainId"]);
+    }
+
+    #[tokio::test]
     async fn call_tracer_reads_are_scoped_to_exact_transactions_and_fixed_tracer() {
         let tx_hash = format!("0x{}", "ab".repeat(32));
         let trace = json!({"type":"CALL","from":"0x0000000000000000000000000000000000000001","to":"0x0000000000000000000000000000000000000002","input":"0xdeadbeef","value":"0x0"});
@@ -3642,6 +4143,89 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
+    async fn replacement_facts_are_repeatable_and_bound_to_full_original_identity() {
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: "0x4444444444444444444444444444444444444444".into(),
+            to: "0x5555555555555555555555555555555555555555".into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: format!("0x{}", "11".repeat(32)),
+            data: json!({"transaction":transaction, "dispatch_block":1}),
+        };
+        let runtime = EvmRuntime::new(
+            Arc::new(ReplacementRpc {
+                consumed: true,
+                replacement_is_original: false,
+                minimum_history: 1,
+            }),
+            1,
+            None,
+        );
+        let facts = runtime
+            .observe_finalized_nonce_replacement(&submission, &transaction)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(runtime); // Pure decisions have no access to RPC or a signer.
+        let observed = "2026-11-03T09:00:00Z".to_owned();
+        let first = facts
+            .reconcile(&submission, &transaction, observed.clone())
+            .unwrap();
+        let second = facts
+            .reconcile(&submission, &transaction, observed)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+        assert_eq!(first.status, gofin_domain::Status::Failed);
+        let verified = first.verified.unwrap();
+        assert_eq!(verified.submission, submission);
+        assert!(verified.effects.is_empty());
+        assert_eq!(
+            verified.proof_digest,
+            gofin_domain::verified_effect_digest(&verified).unwrap()
+        );
+        let mut changed_submission = submission.clone();
+        changed_submission.data["dispatch_block"] = json!(2);
+        assert!(
+            facts
+                .reconcile(&changed_submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut changed_transaction = transaction.clone();
+        changed_transaction.nonce += 1;
+        assert!(
+            facts
+                .reconcile(&submission, &changed_transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut same_hash = facts.clone();
+        same_hash.replacement = same_hash.original;
+        assert!(
+            same_hash
+                .reconcile(&submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
+        let mut beyond_finality = facts.clone();
+        beyond_finality.block_number = beyond_finality.finalized_block_number + 1;
+        assert!(
+            beyond_finality
+                .reconcile(&submission, &transaction, gofin_domain::now())
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn receipt_with_verified_transaction_but_null_inclusion_is_pending() {
         let tx_hash = format!("0x{}", "11".repeat(32));
         let sender = "0x4444444444444444444444444444444444444444";
@@ -3936,6 +4520,7 @@ mod http_rpc_tests {
             write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
+            read_permits: rpc.read_permits,
             write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
@@ -4003,6 +4588,7 @@ mod http_rpc_tests {
             write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
+            read_permits: rpc.read_permits,
             write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
@@ -4043,14 +4629,12 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
-    async fn rate_limited_read_retries_then_fails_over_to_backup() {
-        // Keep retry coverage deterministic: B waits until A finishes its script.
+    async fn rate_limited_read_fails_over_without_retrying_during_cooldown() {
+        // B waits until A has observed the rate limit.
         let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mut rpc, primary) = fixture_rpc_with_gate(
             vec![
                 FixtureResponse::Json(json!("0x1")),
-                FixtureResponse::Http(429),
-                FixtureResponse::Http(429),
                 FixtureResponse::Http(429),
             ],
             None,
@@ -4086,12 +4670,7 @@ mod http_rpc_tests {
         .expect("both RPC fixtures must finish their expected requests");
         assert_eq!(
             primary.join().unwrap(),
-            vec![
-                "eth_chainId",
-                "eth_getBalance",
-                "eth_getBalance",
-                "eth_getBalance"
-            ]
+            vec!["eth_chainId", "eth_getBalance"]
         );
         assert_eq!(
             backup.join().unwrap(),

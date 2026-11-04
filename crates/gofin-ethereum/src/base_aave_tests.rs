@@ -464,8 +464,16 @@ async fn opening_borrow_accounts_complete_new_debt_and_preserves_existing_accrua
         );
         let record = record(preview);
         if rejected {
+            let result = adapter.reconcile(&record).await.unwrap();
+            assert_eq!(result.status, Status::Completed);
             assert_eq!(
-                adapter.reconcile(&record).await.unwrap_err().code,
+                result.evidence["preapproval_bounds_discrepancies"][0]["bound"],
+                json!("opening_debt_increment")
+            );
+            let mut legacy = record;
+            legacy.preview.as_mut().unwrap().operation_version = 1;
+            assert_eq!(
+                adapter.reconcile(&legacy).await.unwrap_err().code,
                 "DEBT_ROUNDING_LIMIT",
                 "{name}"
             );

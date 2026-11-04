@@ -375,7 +375,11 @@ impl Engine {
                 "reauthorization preparation",
                 PREFLIGHT_TIMEOUT,
                 async {
-                    if let Some(linked_compound) = &compound_context {
+                    if let Some(mut session) =
+                        adapter.operation_lifecycle(&action.operation, &input, Some(&context))?
+                    {
+                        operation_lifecycle::prepare(session.as_mut()).await
+                    } else if let Some(linked_compound) = &compound_context {
                         adapter
                             .prepare_with_compound_context(
                                 &action.operation,
@@ -1203,6 +1207,7 @@ impl Engine {
         }
         let guards = acquire_submission_resources(&candidate).await;
         let mut nonce_claimed = false;
+        let mut nonce_reservation = None;
         let mut nonce_candidate = candidate.clone();
         if let Some((scope, pending)) = bounded_evidence(
             &candidate.operation,
@@ -1220,6 +1225,9 @@ impl Engine {
                 .claim_evm_nonce(&scope, &child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
+            nonce_reservation = Some(gofin_domain::operation_lifecycle::NonceReservation::new(
+                scope, pending, nonce,
+            )?);
             nonce_candidate =
                 adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
             validate_parent_stage(
@@ -1229,11 +1237,25 @@ impl Engine {
                 &nonce_candidate,
             )?;
         }
+        let stage_context = self.preparation_context(action.run_id.as_deref())?;
+        let mut stage_lifecycle = adapter.operation_lifecycle(
+            &nonce_candidate.operation,
+            &nonce_candidate.input,
+            Some(&stage_context),
+        )?;
+        let typed_lifecycle = stage_lifecycle.is_some();
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&strip_plan_metadata(&nonce_candidate)),
+            async {
+                let candidate = strip_plan_metadata(&nonce_candidate);
+                if typed_lifecycle {
+                    Ok(candidate)
+                } else {
+                    adapter.revalidate(&candidate).await
+                }
+            },
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage_id, &current)?;
@@ -1329,13 +1351,24 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
-            strip_plan_metadata(&candidate),
-            self.clock.clone(),
-        )?;
-        let result = adapter
-            .submit_revalidated(&validated, journal.clone())
-            .await;
+        let result = if let Some(session) = stage_lifecycle.as_mut() {
+            session.authorize(
+                gofin_domain::operation_lifecycle::AuthorizedOperation::with_nonce_reservation(
+                    strip_plan_metadata(&candidate),
+                    journal.clone(),
+                    nonce_reservation,
+                )?,
+            )?;
+            session.execute().await
+        } else {
+            let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+                strip_plan_metadata(&candidate),
+                self.clock.clone(),
+            )?;
+            adapter
+                .submit_revalidated(&validated, journal.clone())
+                .await
+        };
         child = journal
             .record
             .lock()
@@ -1439,6 +1472,7 @@ impl Engine {
         }
         let guards = acquire_submission_resources(&candidate).await;
         let mut nonce_claimed = false;
+        let mut nonce_reservation = None;
         if let Some((scope, pending)) = bounded_evidence(
             &candidate.operation,
             "stage nonce observation",
@@ -1455,13 +1489,30 @@ impl Engine {
                 .claim_evm_nonce(&scope, child_id, pending)
                 .map_err(map_store)?;
             nonce_claimed = true;
+            nonce_reservation = Some(gofin_domain::operation_lifecycle::NonceReservation::new(
+                scope, pending, nonce,
+            )?);
             candidate = adapter.apply_claimed_evm_nonce(&strip_plan_metadata(&candidate), nonce)?;
         }
+        let stage_context = self.preparation_context(action.run_id.as_deref())?;
+        let mut stage_lifecycle = adapter.operation_lifecycle(
+            &candidate.operation,
+            &candidate.input,
+            Some(&stage_context),
+        )?;
+        let typed_lifecycle = stage_lifecycle.is_some();
         let current = bounded_evidence(
             &candidate.operation,
             "stage revalidation",
             PREFLIGHT_TIMEOUT,
-            adapter.revalidate(&strip_plan_metadata(&candidate)),
+            async {
+                let candidate = strip_plan_metadata(&candidate);
+                if typed_lifecycle {
+                    Ok(candidate)
+                } else {
+                    adapter.revalidate(&candidate).await
+                }
+            },
         )
         .await?;
         validate_parent_stage(parent_adapter.as_ref(), &parent, &stage.stage_id, &current)?;
@@ -1522,13 +1573,24 @@ impl Engine {
             store: self.store.clone(),
             record: Mutex::new(child.clone()),
         });
-        let validated = gofin_domain::RevalidatedOperation::after_revalidation(
-            strip_plan_metadata(&finalized),
-            self.clock.clone(),
-        )?;
-        let result = adapter
-            .submit_revalidated(&validated, journal.clone())
-            .await;
+        let result = if let Some(session) = stage_lifecycle.as_mut() {
+            session.authorize(
+                gofin_domain::operation_lifecycle::AuthorizedOperation::with_nonce_reservation(
+                    strip_plan_metadata(&finalized),
+                    journal.clone(),
+                    nonce_reservation,
+                )?,
+            )?;
+            session.execute().await
+        } else {
+            let validated = gofin_domain::RevalidatedOperation::after_revalidation(
+                strip_plan_metadata(&finalized),
+                self.clock.clone(),
+            )?;
+            adapter
+                .submit_revalidated(&validated, journal.clone())
+                .await
+        };
         child = journal
             .record
             .lock()
@@ -2016,14 +2078,27 @@ impl Engine {
                 PREFLIGHT_TIMEOUT,
                 async {
                     if adapter.supports_approved_reprepare(parent) {
-                        adapter
-                            .prepare_with_context(&action.operation, &action.input, &context)
-                            .await
+                        if let Some(mut session) = adapter.operation_lifecycle(
+                            &action.operation,
+                            &action.input,
+                            Some(&context),
+                        )? {
+                            operation_lifecycle::prepare(session.as_mut()).await
+                        } else {
+                            adapter
+                                .prepare_with_context(&action.operation, &action.input, &context)
+                                .await
+                        }
                     } else {
                         // Exact adapters own refresh of their approved durable
                         // identities. A new preparation may allocate a different
                         // venue idempotency key even for identical input.
-                        adapter.revalidate(&strip_plan_metadata(parent)).await
+                        lifecycle_revalidate(
+                            adapter.as_ref(),
+                            &strip_plan_metadata(parent),
+                            Some(&context),
+                        )
+                        .await
                     }
                 },
             )

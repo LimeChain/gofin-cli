@@ -39,18 +39,7 @@ impl EthereumAdapter {
         price: U256,
         decimals: u8,
     ) -> Result<U256> {
-        require(
-            !price.is_zero(),
-            "ORACLE_INVALID",
-            "Debt risk price must be positive.",
-        )?;
-        let product = mul(amount, price)?;
-        let unit = pow10(decimals)?;
-        if self.horizon_math() {
-            Ok(product / unit)
-        } else {
-            Ok(add(product, unit - U256::from(1))? / unit)
-        }
+        added_debt_base(self.horizon_math(), amount, price, decimals)
     }
 
     pub(crate) fn horizon_math(&self) -> bool {
@@ -80,12 +69,9 @@ impl EthereumAdapter {
         index: U256,
         kind: &PositionKind,
     ) -> Result<U256> {
-        if self.horizon_math() {
-            Ok(add(mul(scaled, index)?, pow10(27)? / U256::from(2))? / pow10(27)?)
-        } else {
-            anchors::backing(scaled, index, kind)
-        }
+        position_backing(self.horizon_math(), scaled, index, kind)
     }
+    #[cfg(test)]
     pub(crate) fn scaled_change(
         &self,
         amount: U256,
@@ -93,20 +79,60 @@ impl EthereumAdapter {
         kind: &PositionKind,
         mint: bool,
     ) -> Result<U256> {
-        require(
-            index >= pow10(27)?,
-            "AAVE_INDEX_INVALID",
-            "Normalized index must be at least one ray.",
-        )?;
-        let rounding = if self.horizon_math() {
-            index / U256::from(2)
-        } else if (*kind == PositionKind::VariableDebt) == mint {
-            index - U256::from(1)
-        } else {
-            U256::ZERO
-        };
-        Ok(add(mul(amount, pow10(27)?)?, rounding)? / index)
+        scaled_change(self.horizon_math(), amount, index, kind, mint)
     }
+}
+pub(crate) fn added_debt_base(
+    horizon: bool,
+    amount: U256,
+    price: U256,
+    decimals: u8,
+) -> Result<U256> {
+    require(
+        !price.is_zero(),
+        "ORACLE_INVALID",
+        "Debt risk price must be positive.",
+    )?;
+    let product = mul(amount, price)?;
+    let unit = pow10(decimals)?;
+    if horizon {
+        Ok(product / unit)
+    } else {
+        Ok(add(product, unit - U256::from(1))? / unit)
+    }
+}
+pub(crate) fn position_backing(
+    horizon: bool,
+    scaled: U256,
+    index: U256,
+    kind: &PositionKind,
+) -> Result<U256> {
+    if horizon {
+        Ok(add(mul(scaled, index)?, pow10(27)? / U256::from(2))? / pow10(27)?)
+    } else {
+        anchors::backing(scaled, index, kind)
+    }
+}
+pub(crate) fn scaled_change(
+    horizon: bool,
+    amount: U256,
+    index: U256,
+    kind: &PositionKind,
+    mint: bool,
+) -> Result<U256> {
+    require(
+        index >= pow10(27)?,
+        "AAVE_INDEX_INVALID",
+        "Normalized index must be at least one ray.",
+    )?;
+    let rounding = if horizon {
+        index / U256::from(2)
+    } else if (*kind == PositionKind::VariableDebt) == mint {
+        index - U256::from(1)
+    } else {
+        U256::ZERO
+    };
+    Ok(add(mul(amount, pow10(27)?)?, rounding)? / index)
 }
 pub(crate) fn signed_difference(positive: U256, negative: U256) -> SignedQuantity {
     if positive >= negative {

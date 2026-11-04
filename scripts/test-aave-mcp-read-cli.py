@@ -235,7 +235,7 @@ def run_fixture(env: dict[str, str], name: str, fixture: str) -> None:
         plan_result = cli(
             env, name, "plans", "preview", "--input", json.dumps(plan), "--json", expected=1,
         )
-        require(plan_result.get("error", {}).get("code") == "UNSUPPORTED_OPERATION",
+        require(plan_result.get("error", {}).get("code") == "EXECUTION_INTERFACE_RETIRED",
                 f"dynamic read was invoked or accepted as a financial plan: {plan_result}")
         operations_after = cli(env, name, "operations", "--json")
         require(operations_after == operations_before,

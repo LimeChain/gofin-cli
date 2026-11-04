@@ -17,6 +17,8 @@ pub(crate) struct SnapshotRpc {
     tag: String,
     permits: Semaphore,
     reads: Mutex<BTreeMap<String, ReadCell>>,
+    pin_latest: bool,
+    block: u64,
 }
 impl SnapshotRpc {
     pub(crate) fn new(inner: Arc<dyn EvmRpc>, block: u64, limit: usize) -> Self {
@@ -25,17 +27,30 @@ impl SnapshotRpc {
             tag: block_tag(Some(block)),
             permits: Semaphore::new(limit),
             reads: Mutex::new(BTreeMap::new()),
+            pin_latest: false,
+            block,
         }
+    }
+    pub(crate) fn preparation(inner: Arc<dyn EvmRpc>, block: u64) -> Self {
+        let mut rpc = Self::new(inner, block, SNAPSHOT_CONCURRENCY);
+        rpc.pin_latest = true;
+        rpc
     }
     fn pinned(&self, method: &str, params: &Value) -> bool {
         let index = match method {
             "eth_call" | "eth_getCode" | "eth_getBalance" | "eth_getTransactionCount" => 1,
             "eth_getBlockByNumber" => 0,
+            "eth_getStorageAt" => 2,
             _ => return false,
         };
         params[index].as_str() == Some(self.tag.as_str())
     }
-    async fn fetch(&self, method: &str, params: Value) -> Result<Value> {
+    async fn fetch(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: gofin_evm::RpcReadRequirements,
+    ) -> Result<Value> {
         let _permit = self.permits.acquire().await.map_err(|_| {
             error(
                 "SNAPSHOT_UNAVAILABLE",
@@ -43,17 +58,32 @@ impl SnapshotRpc {
                 "Snapshot read capacity closed.",
             )
         })?;
-        self.inner.request(method, params).await
+        self.inner
+            .request_checked(method, params, requirements)
+            .await
     }
 }
 #[async_trait]
 impl EvmRpc for SnapshotRpc {
+    fn enforces_chain_identity(&self, expected_chain_id: u64) -> bool {
+        self.inner.enforces_chain_identity(expected_chain_id)
+    }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_checked(method, params, Default::default())
+            .await
+    }
+    async fn request_checked(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: gofin_evm::RpcReadRequirements,
+    ) -> Result<Value> {
         require(
             matches!(
                 method,
                 "eth_call"
                     | "eth_getCode"
+                    | "eth_getStorageAt"
                     | "eth_getBalance"
                     | "eth_getTransactionCount"
                     | "eth_getBlockByNumber"
@@ -63,14 +93,60 @@ impl EvmRpc for SnapshotRpc {
             "SNAPSHOT_READ_ONLY",
             "A snapshot can only call reviewed read methods.",
         )?;
-        if !self.pinned(method, &params) {
-            return self.fetch(method, params).await;
+        let mut params = params;
+        if self.pin_latest {
+            if method == "eth_blockNumber" {
+                require(
+                    requirements
+                        .minimum_block
+                        .is_none_or(|minimum| self.block >= minimum)
+                        && requirements.pin_block.is_none(),
+                    "RPC_DATA_INVALID",
+                    "Captured head does not satisfy the requested read requirements.",
+                )?;
+                return Ok(json!(format!("{:#x}", self.block)));
+            }
+            if matches!(method, "eth_call" | "eth_getCode" | "eth_getBalance")
+                && params[1] == "latest"
+            {
+                params[1] = json!(self.tag);
+            }
         }
+        if !self.pinned(method, &params) {
+            return self.fetch(method, params, requirements).await;
+        }
+        // Every cacheable state fact is fetched with canonical pin requirements.
+        // Thus a later checked caller never reuses weaker, unchecked evidence.
+        // Conflicting requirements remain distinct and are validated by transport.
+        let requirements = if matches!(
+            method,
+            "eth_call"
+                | "eth_getCode"
+                | "eth_getBalance"
+                | "eth_getTransactionCount"
+                | "eth_getStorageAt"
+        ) && requirements.minimum_block.is_none()
+            && requirements
+                .pin_block
+                .is_none_or(|height| height == self.block)
+        {
+            gofin_evm::RpcReadRequirements {
+                pin_block: Some(self.block),
+                ..requirements
+            }
+        } else {
+            requirements
+        };
         // Exact request identity includes calldata, sender (if present), target,
         // and numeric block tag. Never share this cache with another capture.
-        let key = format!("{method}:{}", params);
+        // A weaker read cannot satisfy a caller's stronger endpoint/hash or
+        // freshness constraints. Preserve them through the real transport.
+        let key = format!(
+            "{method}:{params}:{:?}:{:?}",
+            requirements.minimum_block, requirements.pin_block
+        );
         let cell = self.reads.lock().await.entry(key).or_default().clone();
-        cell.get_or_init(|| self.fetch(method, params))
+        cell.get_or_init(|| self.fetch(method, params, requirements))
             .await
             .clone()
     }
@@ -592,6 +668,103 @@ mod tests {
 
     #[derive(Default)]
     struct ReadProbe(AtomicUsize);
+
+    #[test]
+    fn snapshot_forwards_only_its_inner_transport_chain_guarantee() {
+        let guarded = Arc::new(
+            gofin_evm::HttpRpc::isolated_localhost("http://127.0.0.1:1234".into(), 1).unwrap(),
+        );
+        let snapshot = SnapshotRpc::preparation(guarded, 20);
+        assert!(snapshot.enforces_chain_identity(1));
+        assert!(!snapshot.enforces_chain_identity(2));
+        let alternate = SnapshotRpc::preparation(Arc::new(ReadProbe::default()), 20);
+        assert!(!alternate.enforces_chain_identity(1));
+    }
+
+    #[derive(Default)]
+    struct CheckedProbe(Mutex<Vec<gofin_evm::RpcReadRequirements>>);
+    #[async_trait]
+    impl EvmRpc for CheckedProbe {
+        async fn request(&self, _: &str, _: Value) -> Result<Value> {
+            panic!("snapshot must preserve checked transport requirements")
+        }
+        async fn request_checked(
+            &self,
+            _: &str,
+            _: Value,
+            requirements: gofin_evm::RpcReadRequirements,
+        ) -> Result<Value> {
+            self.0.lock().await.push(requirements);
+            Ok(json!(if requirements.pin_block.is_some() {
+                "0x2"
+            } else {
+                "0x1"
+            }))
+        }
+    }
+    #[tokio::test]
+    async fn checked_snapshot_upgrades_pinned_facts_before_coalescing() {
+        let probe = Arc::new(CheckedProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        let params = json!(["0x0000000000000000000000000000000000000001", "0x14"]);
+        assert_eq!(
+            rpc.request("eth_getBalance", params.clone()).await.unwrap(),
+            json!("0x2")
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                rpc.request_checked(
+                    "eth_getBalance",
+                    params.clone(),
+                    gofin_evm::RpcReadRequirements {
+                        pin_block: Some(20),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap(),
+                json!("0x2")
+            );
+        }
+        let calls = probe.0.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pin_block, Some(20));
+        drop(calls);
+        for _ in 0..2 {
+            rpc.request_checked(
+                "eth_getBalance",
+                json!(["0x0000000000000000000000000000000000000001", "0x13"]),
+                gofin_evm::RpcReadRequirements {
+                    pin_block: Some(19),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probe.0.lock().await.len(),
+            3,
+            "historical constraints must reach transport each time"
+        );
+        assert!(
+            rpc.request_checked(
+                "eth_blockNumber",
+                json!([]),
+                gofin_evm::RpcReadRequirements {
+                    minimum_block: Some(21),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            probe.0.lock().await.len(),
+            3,
+            "inadequate captured head must fail before transport"
+        );
+    }
     #[async_trait]
     impl EvmRpc for ReadProbe {
         async fn request(&self, _: &str, _: Value) -> Result<Value> {
@@ -599,6 +772,91 @@ mod tests {
             tokio::task::yield_now().await;
             Ok(json!("0x0"))
         }
+    }
+    #[tokio::test]
+    async fn storage_cache_only_shares_exact_pinned_block_requests() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        for tag in [
+            "0x14", "0x14", "latest", "latest", "pending", "pending", "0x13", "0x13",
+        ] {
+            rpc.request(
+                "eth_getStorageAt",
+                json!(["0x0000000000000000000000000000000000000001", "0x00", tag]),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(probe.0.load(Ordering::SeqCst), 7);
+    }
+    #[tokio::test]
+    async fn preparation_cache_pins_latest_but_never_aliases_historical_or_pending_reads() {
+        let probe = Arc::new(ReadProbe::default());
+        let first = SnapshotRpc::preparation(probe.clone(), 20);
+        for tag in ["latest", "0x14", "0x13", "0x13", "pending", "pending"] {
+            first
+                .request(
+                    "eth_getBalance",
+                    json!(["0x0000000000000000000000000000000000000001", tag]),
+                )
+                .await
+                .unwrap();
+        }
+        // One current-block request, two historical requests, two pending requests.
+        assert_eq!(probe.0.load(Ordering::SeqCst), 5);
+        let next = SnapshotRpc::preparation(probe.clone(), 20);
+        next.request(
+            "eth_getBalance",
+            json!(["0x0000000000000000000000000000000000000001", "latest"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe.0.load(Ordering::SeqCst), 6);
+    }
+    #[tokio::test]
+    async fn conflicting_requirements_never_reuse_a_cached_pinned_fact() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        let params = json!(["0x0000000000000000000000000000000000000001", "0x14"]);
+        rpc.request("eth_getBalance", params.clone()).await.unwrap();
+        assert!(
+            rpc.request_checked(
+                "eth_getBalance",
+                params.clone(),
+                gofin_evm::RpcReadRequirements {
+                    pin_block: Some(19),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            rpc.request_checked(
+                "eth_getBalance",
+                params,
+                gofin_evm::RpcReadRequirements {
+                    minimum_block: Some(20),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(probe.0.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn pinned_calls_never_share_results_across_senders() {
+        let probe = Arc::new(ReadProbe::default());
+        let rpc = SnapshotRpc::preparation(probe.clone(), 20);
+        for sender in [
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000001",
+        ] {
+            rpc.request("eth_call", json!([{"to":"0x0000000000000000000000000000000000000003", "data":"0x12345678", "from":sender}, "0x14"])).await.unwrap();
+        }
+        assert_eq!(probe.0.load(Ordering::SeqCst), 2);
     }
     #[tokio::test]
     async fn snapshot_cache_coalesces_only_exact_pinned_reads_and_rejects_writes_before_transport()

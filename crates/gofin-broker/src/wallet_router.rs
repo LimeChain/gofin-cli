@@ -387,8 +387,96 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
     }
 }
 
+struct RoutedLifecycle<'a> {
+    router: &'a WalletFamilyRouter,
+    adapter: &'a dyn Adapter,
+    inner: Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>,
+}
+impl RoutedLifecycle<'_> {
+    fn check(&self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
+        if !std::ptr::eq(self.router.prepared(prepared)?, self.adapter) {
+            return Err(GoFinError::validation(
+                "Lifecycle candidate changed wallet family or identity.",
+            ));
+        }
+        Ok(())
+    }
+}
+#[async_trait]
+impl gofin_domain::operation_lifecycle::LifecycleSession for RoutedLifecycle<'_> {
+    async fn collect(&mut self) -> gofin_domain::Result<()> {
+        self.inner.collect().await
+    }
+    fn evaluate(&mut self) -> gofin_domain::Result<()> {
+        self.inner.evaluate()
+    }
+    async fn prepare(&mut self) -> gofin_domain::Result<()> {
+        self.inner.prepare().await
+    }
+    async fn simulate(
+        &mut self,
+    ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>> {
+        let result = self.inner.simulate().await?;
+        if let gofin_domain::operation_lifecycle::CandidateResult::Write(candidate) = &result {
+            self.check(candidate)?;
+        }
+        Ok(result)
+    }
+    fn authorize(
+        &mut self,
+        authorized: gofin_domain::operation_lifecycle::AuthorizedOperation,
+    ) -> gofin_domain::Result<()> {
+        self.check(authorized.prepared())?;
+        self.inner.authorize(authorized)
+    }
+    async fn execute(&mut self) -> gofin_domain::Result<Submission> {
+        self.inner.execute().await
+    }
+    async fn observe(&mut self, record: &OperationRecord) -> gofin_domain::Result<()> {
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("The original preview is missing."))?;
+        self.check(prepared)?;
+        self.inner.observe(record).await
+    }
+    fn evaluate_observation(
+        &mut self,
+        record: &OperationRecord,
+    ) -> gofin_domain::Result<gofin_domain::Reconciliation> {
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("The original preview is missing."))?;
+        self.check(prepared)?;
+        self.inner.evaluate_observation(record)
+    }
+}
+
 #[async_trait]
 impl Adapter for WalletFamilyRouter {
+    fn operation_lifecycle<'a>(
+        &'a self,
+        operation: &str,
+        input: &Value,
+        context: Option<&PreparationContext>,
+    ) -> gofin_domain::Result<
+        Option<Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>>,
+    > {
+        let Ok(adapter) = self.route(input) else {
+            return Ok(None);
+        };
+        Ok(adapter
+            .operation_lifecycle(operation, input, context)?
+            .map(|inner| {
+                Box::new(RoutedLifecycle {
+                    router: self,
+                    adapter,
+                    inner,
+                }) as Box<dyn gofin_domain::operation_lifecycle::LifecycleSession>
+            }))
+    }
+
     fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
         self.prepared(prepared)
             .is_ok_and(|adapter| adapter.supports_independent_submission(prepared))
@@ -659,8 +747,64 @@ mod tests {
         revalidated_submits: Arc<AtomicUsize>,
     }
 
+    struct TestLifecycle {
+        candidate: PreparedOperation,
+    }
+    #[async_trait]
+    impl gofin_domain::operation_lifecycle::LifecycleSession for TestLifecycle {
+        async fn collect(&mut self) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+        fn evaluate(&mut self) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+        async fn prepare(&mut self) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+        async fn simulate(
+            &mut self,
+        ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>>
+        {
+            Ok(gofin_domain::operation_lifecycle::CandidateResult::Write(
+                Box::new(self.candidate.clone()),
+            ))
+        }
+        fn authorize(
+            &mut self,
+            _: gofin_domain::operation_lifecycle::AuthorizedOperation,
+        ) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+        async fn execute(&mut self) -> gofin_domain::Result<Submission> {
+            Err(GoFinError::validation("not used"))
+        }
+        async fn observe(&mut self, _: &OperationRecord) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+        fn evaluate_observation(
+            &mut self,
+            _: &OperationRecord,
+        ) -> gofin_domain::Result<Reconciliation> {
+            Err(GoFinError::validation("not used"))
+        }
+    }
     #[async_trait]
     impl Adapter for RoutedAdapter {
+        fn operation_lifecycle<'a>(
+            &'a self,
+            operation: &str,
+            input: &Value,
+            _: Option<&PreparationContext>,
+        ) -> gofin_domain::Result<
+            Option<Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>>,
+        > {
+            if operation != "test.lifecycle" {
+                return Ok(None);
+            }
+            let mut candidate = prepared("ethereum");
+            candidate.input = input.clone();
+            Ok(Some(Box::new(TestLifecycle { candidate })))
+        }
         fn definitions(&self) -> Vec<Definition> {
             Vec::new()
         }
@@ -897,6 +1041,35 @@ mod tests {
         let reconciliation = router.reconcile(&record).await.unwrap();
         assert_eq!(reconciliation.evidence["routed"], "evm");
         assert_eq!(reconciles.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_router_delegates_and_rejects_changed_wallet_family() {
+        let evm: Arc<dyn Adapter> = Arc::new(RoutedAdapter {
+            reconciles: Arc::new(AtomicUsize::new(0)),
+            snapshots: Arc::new(AtomicUsize::new(0)),
+            revalidated_submits: Arc::new(AtomicUsize::new(0)),
+        });
+        let router = WalletFamilyRouter::new(Some(evm), BTreeMap::new());
+        let input = json!({"network":"ethereum", "wallet":"saved-wallet"});
+        let mut session = router
+            .operation_lifecycle("test.lifecycle", &input, None)
+            .unwrap()
+            .unwrap();
+        session.collect().await.unwrap();
+        session.evaluate().unwrap();
+        session.prepare().await.unwrap();
+        assert!(matches!(
+            session.simulate().await.unwrap(),
+            gofin_domain::operation_lifecycle::CandidateResult::Write(_)
+        ));
+        let wrong_family = prepared("solana");
+        let authority = gofin_domain::operation_lifecycle::AuthorizedOperation::new(
+            wrong_family,
+            Arc::new(TestJournal),
+        )
+        .unwrap();
+        assert!(session.authorize(authority).is_err());
     }
 
     #[tokio::test]

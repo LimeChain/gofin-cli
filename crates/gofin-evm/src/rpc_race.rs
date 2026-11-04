@@ -76,6 +76,9 @@ impl HttpRpc {
                 });
             }
             let mut next = 0;
+            let mut hedge_ready = false;
+            let hedge = tokio::time::sleep(Duration::from_millis(25));
+            tokio::pin!(hedge);
             let mut pending = Vec::<Attempt<'_>>::new();
             let mut missing = false;
             let mut failure = error(
@@ -84,7 +87,7 @@ impl HttpRpc {
                 "No configured RPC returned a usable response.",
             );
             loop {
-                while pending.len() < 2 && next < eligible.len() {
+                while pending.len() < if hedge_ready { 2 } else { 1 } && next < eligible.len() {
                     let (index, url) = eligible[next];
                     let request = params.clone();
                     let anchor = &anchor;
@@ -105,7 +108,9 @@ impl HttpRpc {
                 }
                 // Poll both attempts before choosing a completed one. No spawned
                 // task outlives this read or caller cancellation.
-                let completed = poll_fn(|context| {
+                let completed = tokio::select! {
+                    biased;
+                    completed = poll_fn(|context| {
                     let mut completed = Vec::new();
                     for attempt in &mut pending {
                         if let Some(future) = &mut attempt.future
@@ -120,8 +125,12 @@ impl HttpRpc {
                     } else {
                         Poll::Ready(completed)
                     }
-                })
-                .await;
+                    }) => completed,
+                    _ = &mut hedge, if !hedge_ready && next < eligible.len() => {
+                        hedge_ready = true;
+                        continue;
+                    }
+                };
                 // Record the whole completed batch before picking a winner.
                 // A semantic rejection already observed in the same poll must
                 // not be hidden by another ready result's configured order.
@@ -147,6 +156,8 @@ impl HttpRpc {
                 }) {
                     return Err(rejection.error.clone());
                 }
+                // On a completed failure or missing result, start fallback immediately.
+                hedge_ready = true;
                 for (index, result) in completed {
                     pending.retain(|attempt| attempt.index != index);
                     match result {

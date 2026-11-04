@@ -1876,8 +1876,16 @@ settlement evidence. Legacy reward distributors are excluded.
 
 ## Aave V3 markets and positions
 
-Discover reviewed deployments before enrollment with `gofin schema aave.markets --json`.
-Read current compatibility, reserves and positions through an enrolled wallet:
+For market discovery, exploratory position inspection and estimated planning,
+start with the informational MCP reads discovered by `gofin capabilities --json`
+and `gofin read aave.mcp.tools --input '{}' --json`. Inspect each selected tool with
+`explain` and `schema`; upstream tools and arguments can change. These reads do
+not require an enrolled signer. Preserve their provenance, coverage and warnings.
+
+Use native RPC reads for exact checks of a selected market and reserve. Discover
+reviewed deployments with `gofin schema aave.markets --json`. Supply `tokens` when
+checking known reserves: omitting it can scan the entire selected market. Read
+compatibility, reserves and positions through an enrolled wallet:
 
 ```sh
 gofin read aave.markets --input '{"wallet":"wallet","network":"evm","chain_id":1}' --json
@@ -1938,6 +1946,12 @@ builders and mutation tools, and validates arguments locally before calling
 the fixed official endpoint. New eligible reads are discovered without adding
 individual command implementations. Discovery failure leaves the bundled
 catalog available.
+
+MCP planning previews are estimates: upstream API data can lag and aggregate USD
+values can be rounded ([upstream conventions](https://www.aave.com/docs/mcp/tools)).
+A preview does not simulate GoFin's frozen transaction or
+satisfy its accounting checks. GoFin independently validates selected reserves,
+amounts, permissions and risk bounds, then simulates the exact transaction.
 
 MCP read results are labelled `unverified_official_mcp`. Their coverage,
 pagination, warnings and error indicators remain visible; an empty or partial

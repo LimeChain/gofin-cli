@@ -255,8 +255,97 @@ impl EvmNetworkRouter {
         self.route(&prepared.input)
     }
 }
+struct RoutedLifecycle<'a> {
+    router: &'a EvmNetworkRouter,
+    chain_id: u64,
+    inner: Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>,
+}
+impl RoutedLifecycle<'_> {
+    fn check(&self, prepared: &PreparedOperation) -> gofin_domain::Result<()> {
+        if prepared.input["chain_id"].as_u64() != Some(self.chain_id) {
+            return Err(GoFinError::validation(
+                "Lifecycle candidate changed EVM chain identity.",
+            ));
+        }
+        self.router.prepared(prepared)?;
+        Ok(())
+    }
+}
+#[async_trait]
+impl gofin_domain::operation_lifecycle::LifecycleSession for RoutedLifecycle<'_> {
+    async fn collect(&mut self) -> gofin_domain::Result<()> {
+        self.inner.collect().await
+    }
+    fn evaluate(&mut self) -> gofin_domain::Result<()> {
+        self.inner.evaluate()
+    }
+    async fn prepare(&mut self) -> gofin_domain::Result<()> {
+        self.inner.prepare().await
+    }
+    async fn simulate(
+        &mut self,
+    ) -> gofin_domain::Result<gofin_domain::operation_lifecycle::CandidateResult<Value>> {
+        let result = self.inner.simulate().await?;
+        if let gofin_domain::operation_lifecycle::CandidateResult::Write(candidate) = &result {
+            self.check(candidate)?;
+        }
+        Ok(result)
+    }
+    fn authorize(
+        &mut self,
+        authorized: gofin_domain::operation_lifecycle::AuthorizedOperation,
+    ) -> gofin_domain::Result<()> {
+        self.check(authorized.prepared())?;
+        self.inner.authorize(authorized)
+    }
+    async fn execute(&mut self) -> gofin_domain::Result<Submission> {
+        self.inner.execute().await
+    }
+    async fn observe(&mut self, record: &OperationRecord) -> gofin_domain::Result<()> {
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("The original preview is missing."))?;
+        self.check(prepared)?;
+        self.inner.observe(record).await
+    }
+    fn evaluate_observation(
+        &mut self,
+        record: &OperationRecord,
+    ) -> gofin_domain::Result<gofin_domain::Reconciliation> {
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("The original preview is missing."))?;
+        self.check(prepared)?;
+        self.inner.evaluate_observation(record)
+    }
+}
+
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
+    fn operation_lifecycle<'a>(
+        &'a self,
+        operation: &str,
+        input: &Value,
+        context: Option<&PreparationContext>,
+    ) -> gofin_domain::Result<
+        Option<Box<dyn gofin_domain::operation_lifecycle::LifecycleSession + 'a>>,
+    > {
+        let Ok(adapter) = self.route(input) else {
+            return Ok(None);
+        };
+        Ok(adapter
+            .operation_lifecycle(operation, input, context)?
+            .map(|inner| {
+                Box::new(RoutedLifecycle {
+                    router: self,
+                    chain_id: adapter.config.chain_id,
+                    inner,
+                }) as Box<dyn gofin_domain::operation_lifecycle::LifecycleSession>
+            }))
+    }
+
     fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
         record
             .preview

@@ -4,7 +4,6 @@ use gofin_evm::alloy::{
     primitives::{
         B256,
         aliases::{U24, U160},
-        keccak256,
     },
     sol_types::{SolCall, SolValue},
 };
@@ -144,63 +143,6 @@ pub(crate) struct ProtocolQuoteRequest<'a> {
 }
 
 impl EthereumAdapter {
-    /// Observe the configured Pool's EIP-1967 proxy implementation and both
-    /// deployed bytecode hashes. The official provider relationship and
-    /// Pool revision checks remain separate protocol compatibility evidence.
-    pub(crate) async fn aave_proxy_identity(&self) -> Result<String> {
-        let pool = address(&self.aave()?.pool)?;
-        const IMPLEMENTATION_SLOT: &str =
-            "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-        let slot_response = self
-            .runtime
-            .rpc
-            .request(
-                "eth_getStorageAt",
-                json!([lower_address(pool), IMPLEMENTATION_SLOT, "latest"]),
-            )
-            .await?;
-        let slot = rpc_bytes(&slot_response)?;
-        require(
-            slot.len() == 32,
-            "AAVE_IMPLEMENTATION_UNKNOWN",
-            "Selected Aave Pool did not expose a valid EIP-1967 implementation slot.",
-        )?;
-        let implementation = Address::from_slice(&slot[12..]);
-        require(
-            implementation != Address::ZERO,
-            "AAVE_IMPLEMENTATION_UNKNOWN",
-            "Selected Pool has no EIP-1967 implementation or uses an unsupported proxy layout.",
-        )?;
-        let proxy_code = rpc_bytes(
-            &self
-                .runtime
-                .rpc
-                .request("eth_getCode", json!([lower_address(pool), "latest"]))
-                .await?,
-        )?;
-        let implementation_code = rpc_bytes(
-            &self
-                .runtime
-                .rpc
-                .request(
-                    "eth_getCode",
-                    json!([lower_address(implementation), "latest"]),
-                )
-                .await?,
-        )?;
-        require(
-            !proxy_code.is_empty() && !implementation_code.is_empty(),
-            "AAVE_IMPLEMENTATION_UNKNOWN",
-            "Selected Pool proxy or implementation has no deployed code.",
-        )?;
-        Ok(format!(
-            "{}:{}:{}",
-            lower_address(implementation),
-            keccak256(&proxy_code),
-            keccak256(&implementation_code)
-        ))
-    }
-
     async fn wallet_usd_valuation_metadata(&self, token: &Token) -> Value {
         let asset = token.asset(self);
         let asset_value = json!(asset);
@@ -548,6 +490,19 @@ impl EthereumAdapter {
         Ok(())
     }
     pub async fn token(&self, reference: &str, block: Option<u64>) -> Result<Token> {
+        self.token_metadata(reference, block, true).await
+    }
+
+    pub(crate) async fn aave_token(&self, reference: &str, block: Option<u64>) -> Result<Token> {
+        self.token_metadata(reference, block, false).await
+    }
+
+    async fn token_metadata(
+        &self,
+        reference: &str,
+        block: Option<u64>,
+        verify_code: bool,
+    ) -> Result<Token> {
         if reference == "native" {
             return Ok(Token {
                 reference: "native".into(),
@@ -564,7 +519,13 @@ impl EthereumAdapter {
             "Token identity must be a deployed nonzero address.",
         )?;
         let (_, decimals, symbol) = tokio::try_join!(
-            self.runtime.code_at(a, block),
+            async {
+                if verify_code {
+                    self.runtime.code_at(a, block).await
+                } else {
+                    Ok(())
+                }
+            },
             self.runtime.call(a, &Erc20::decimalsCall {}, block),
             self.token_symbol(a, block),
         )?;
@@ -641,16 +602,93 @@ impl EthereumAdapter {
             )
             .await
     }
+    /// Same reviewed market binding as `data_provider`, using the capture's
+    /// fact collector so later rounds reuse each relationship exactly once.
+    pub(crate) async fn data_provider_with_collector(
+        &self,
+        block: u64,
+        collector: &mut crate::collection::ReadCollector,
+    ) -> Result<Address> {
+        use crate::collection::ReadCall;
+        require(
+            collector.block() == block,
+            "AAVE_READ_CHANGED",
+            "Provider collector block differs.",
+        )?;
+        let pool = address(&self.aave()?.pool)?;
+        let oracle = address(&self.aave()?.oracle)?;
+        let provider = collector
+            .call(pool, &Pool::ADDRESSES_PROVIDERCall {})
+            .await?;
+        if let Some(profile) = aave::reviewed_markets(self.config.chain_id)
+            .into_iter()
+            .find(|p| p.pool == self.aave().map(|a| a.pool.as_str()).unwrap_or(""))
+        {
+            require(
+                provider == address(&profile.addresses_provider)?,
+                "DEPLOYMENT_IDENTITY_MISMATCH",
+                "Pool provider differs from the reviewed market identity.",
+            )?;
+        }
+        let mut values = collector
+            .collect(vec![
+                ReadCall::new(provider, &AddressesProvider::getPoolCall {}),
+                ReadCall::new(provider, &AddressesProvider::getPriceOracleCall {}),
+                ReadCall::new(provider, &AddressesProvider::getPoolDataProviderCall {}),
+            ])
+            .await
+            .into_iter();
+        let decode = |raw: Option<Result<Vec<u8>>>| {
+            raw.ok_or_else(|| {
+                error(
+                    "MULTICALL_INCOMPLETE",
+                    "read",
+                    "Provider relationship is missing.",
+                )
+            })?
+        };
+        let observed_pool = AddressesProvider::getPoolCall::abi_decode_returns(&decode(
+            values.next(),
+        )?)
+        .map_err(|_| {
+            error(
+                "CONTRACT_DATA_INVALID",
+                "read",
+                "Invalid Pool relationship.",
+            )
+        })?;
+        let observed_oracle =
+            AddressesProvider::getPriceOracleCall::abi_decode_returns(&decode(values.next())?)
+                .map_err(|_| {
+                    error(
+                        "CONTRACT_DATA_INVALID",
+                        "read",
+                        "Invalid oracle relationship.",
+                    )
+                })?;
+        let data =
+            AddressesProvider::getPoolDataProviderCall::abi_decode_returns(&decode(values.next())?)
+                .map_err(|_| {
+                    error(
+                        "CONTRACT_DATA_INVALID",
+                        "read",
+                        "Invalid data-provider relationship.",
+                    )
+                })?;
+        require(
+            observed_pool == pool && observed_oracle == oracle,
+            "DEPLOYMENT_IDENTITY_MISMATCH",
+            "Aave provider disagrees with configured pool or oracle.",
+        )?;
+        Ok(data)
+    }
     pub(crate) async fn data_provider(&self, block: Option<u64>) -> Result<Address> {
         let pool = address(&self.aave()?.pool)?;
         let oracle = address(&self.aave()?.oracle)?;
-        self.runtime.code_at(pool, block).await?;
-        self.runtime.code_at(oracle, block).await?;
         let provider = self
             .runtime
             .call(pool, &Pool::ADDRESSES_PROVIDERCall {}, block)
             .await?;
-        self.runtime.code_at(provider, block).await?;
         if let Some(profile) = aave::reviewed_markets(self.config.chain_id)
             .into_iter()
             .find(|p| p.pool == self.aave().map(|a| a.pool.as_str()).unwrap_or(""))
@@ -682,11 +720,10 @@ impl EthereumAdapter {
                 block,
             )
             .await?;
-        self.runtime.code_at(data, block).await?;
         Ok(data)
     }
     pub(crate) async fn reserve(&self, reference: &str, block: Option<u64>) -> Result<Reserve> {
-        let token = self.token(reference, block).await?;
+        let token = self.aave_token(reference, block).await?;
         require(
             token.reference != "native",
             "AAVE_NATIVE_UNSUPPORTED",
@@ -721,15 +758,6 @@ impl EthereumAdapter {
             "RESERVE_UNAVAILABLE",
             "Aave reserve has no supplied/debt representation.",
         )?;
-        self.runtime.code_at(receipts.aTokenAddress, block).await?;
-        self.runtime
-            .code_at(receipts.variableDebtTokenAddress, block)
-            .await?;
-        if receipts.stableDebtTokenAddress != Address::ZERO {
-            self.runtime
-                .code_at(receipts.stableDebtTokenAddress, block)
-                .await?;
-        }
         let caps = self
             .runtime
             .call(data, &DataProvider::getReserveCapsCall { asset }, block)
@@ -1113,9 +1141,28 @@ impl EthereumAdapter {
         reference: &str,
         units: Quantity,
     ) -> Result<(Quantity, String)> {
-        let token = self.token(reference, None).await?;
+        self.quote_protocol_usd_with_code_check(reference, units, true)
+            .await
+    }
+    pub(crate) async fn quote_aave_protocol_usd(
+        &self,
+        reference: &str,
+        units: Quantity,
+    ) -> Result<(Quantity, String)> {
+        self.quote_protocol_usd_with_code_check(reference, units, false)
+            .await
+    }
+    async fn quote_protocol_usd_with_code_check(
+        &self,
+        reference: &str,
+        units: Quantity,
+        verify_code: bool,
+    ) -> Result<(Quantity, String)> {
+        let token = self.token_metadata(reference, None, verify_code).await?;
         let oracle = address(&self.aave()?.oracle)?;
-        self.runtime.code(oracle).await?;
+        if verify_code {
+            self.runtime.code(oracle).await?;
+        }
         require(
             self.runtime
                 .call(oracle, &Oracle::BASE_CURRENCYCall {}, None)
@@ -1130,7 +1177,11 @@ impl EthereumAdapter {
             "USD valuation requires the reviewed Aave USD base currency and unit.",
         )?;
         let reference = if token.reference == "native" {
-            address(&self.resolved_weth(None).await?)?
+            address(
+                &self
+                    .resolved_weth_with_code_check(None, verify_code)
+                    .await?,
+            )?
         } else {
             address(&token.reference)?
         };
@@ -1155,7 +1206,9 @@ impl EthereumAdapter {
                 None,
             )
             .await?;
-        self.runtime.code(source).await?;
+        if verify_code {
+            self.runtime.code(source).await?;
+        }
         let (feed, round) = match self
             .runtime
             .call(source, &PriceFeed::latestRoundDataCall {}, None)
@@ -1167,7 +1220,9 @@ impl EthereumAdapter {
                     .runtime
                     .call(source, &PriceFeed::ASSET_TO_USD_AGGREGATORCall {}, None)
                     .await?;
-                self.runtime.code(feed).await?;
+                if verify_code {
+                    self.runtime.code(feed).await?;
+                }
                 (
                     feed,
                     self.runtime
@@ -1177,7 +1232,12 @@ impl EthereumAdapter {
             }
         };
         let current = U256::from(self.oracle_clock.unix_seconds().await?);
-        let heartbeat = if reference == address(&self.resolved_weth(None).await?)? {
+        let heartbeat = if reference
+            == address(
+                &self
+                    .resolved_weth_with_code_check(None, verify_code)
+                    .await?,
+            )? {
             7200
         } else {
             86400
