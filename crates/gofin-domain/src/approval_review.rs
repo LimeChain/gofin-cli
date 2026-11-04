@@ -1028,12 +1028,9 @@ mod tests {
         assert!(review.other_details.unwrap().contains("Health ≥: 1.5"));
         p.operation_version = 2;
         let current = approval_review(&p).unwrap();
-        assert!(
-            current
-                .other_details
-                .unwrap()
-                .contains("Preapproval Health ≥: 1.5")
-        );
+        let details = current.other_details.unwrap();
+        assert!(details.contains("Health ≥: 1.5"));
+        assert!(!details.contains("Preapproval"));
         let risk = current
             .terms
             .iter()

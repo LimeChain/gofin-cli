@@ -120,7 +120,12 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
                     "min_health_factor" | "max_debt_usd" | "max_debt_to_collateral_bps"
                 )
             {
-                details.push(format!("Preapproval {label}: {value}"));
+                let display_label = if prepared.operation == "aave.borrow" {
+                    label.to_owned()
+                } else {
+                    format!("Preapproval {label}")
+                };
+                details.push(format!("{display_label}: {value}"));
                 review.terms.push(ApprovalTerm {
                     label: format!("Preapproval {label}"),
                     value: format!("{value}; assessed before approval only, not rechecked at submission or enforced by the Pool call"),

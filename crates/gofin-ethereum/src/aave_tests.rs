@@ -85,6 +85,7 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
         ] {
             assert!(reason.contains(term), "missing {term}: {reason}");
         }
+        assert!(!reason.to_lowercase().contains("preapproval"), "{reason}");
         assert!(!reason.to_lowercase().contains("fee"), "{reason}");
     }
     a.validate_boundary_candidate(&scope.spec, &prepared)
