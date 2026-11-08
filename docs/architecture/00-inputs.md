@@ -39,8 +39,8 @@ Humans and agents submit the same intents. They differ in authority: only a huma
 
 | Actor | Who | What they do with GoFin | Primary use, for optimization |
 | --- | --- | --- | --- |
-| Agent | An AI agent acting for the human | Submits information and execution intents and non-elevated system intents; observes operations and continues the task. Cannot authorize execution, cannot submit elevated system intents, never sees secrets. | **Primary user** of information and execution intents. |
-| Human user | The person who owns the accounts and funds | Can submit intents of every kind. Authorizes execution intents or enables Yolo. Submits elevated system intents: connections, Yolo, install, update, human-only venue configuration. Acts at a venue when the venue requires it (e.g. confirming a withdrawal in an exchange app). | **Primary user** of system intents and authorization. Direct use of information and execution intents is supported but not optimized for. |
+| Agent | An AI agent acting for the human | Submits information and execution intents and system intents that need no elevated privileges; observes operations and continues the task. Cannot authorize execution, cannot submit system intents that need elevated privileges, never sees secrets. | **Primary user** of information and execution intents. |
+| Human user | The person who owns the accounts and funds | Can submit intents of every kind. Authorizes execution intents or enables Yolo. Submits system intents that need elevated privileges: connections, Yolo, install, update, human-only venue configuration. Acts at a venue when the venue requires it (e.g. confirming a withdrawal in an exchange app). | **Primary user** of system intents and authorization. Direct use of information and execution intents is supported but not optimized for. |
 | Developer | A human or agent building and testing GoFin | Uses the development environment with disposable credentials and automatic development approval. Never touches the protected installation. | Development and verification. |
 
 ## 3. External systems
@@ -51,10 +51,10 @@ Humans and agents submit the same intents. They differ in authority: only a huma
 | E2 | Exchanges | Binance, Coinbase (Advanced, Exchange, International), Kraken (Spot, Futures), Hyperliquid | Reads, orders, transfers, withdrawals and deposits, account configuration | Maximize use of CCXT. |
 | E3 | Non-blockchain APIs | Quoting services (Jupiter, Uniswap API / UniswapX, bridge quote APIs); app and protocol APIs and MCPs (e.g. Aave MCP, bridge status and attestation APIs); market data (price sources, token lists and metadata) | Quotes and provider-built transactions or orders, protocol and bridge state, best-effort USD display, token identity and decimals | Like blockchain RPCs, these are building-block integrations for fulfilling an intent. |
 | E4 | Analytics service | GoFin's analytics endpoint | Optional anonymous usage and error reporting | |
-| E5 | Releases directory | Where GoFin's releases are published | Discovering and downloading new versions for update | |
+| E5a | Release site | The stable install URL (today GitHub Pages) | First install: the bootstrap install script, which carries GoFin's release public key. Update discovery: one "latest release" pointer per major version | For first installs the bootstrap script is trusted only through HTTPS; for updates the pointer is a hint. |
+| E5b | Release artifacts | Where release files are published (today GitHub Releases) | The signed manifest, its signature and the per-platform archives | Never trusted for content: everything is verified against the manifest signature. |
 | E6 | Execution authentication provider | macOS biometric authentication (Touch ID) | The human authorizing execution intents | Other providers are a backlog item (B4). |
-| E7 | Protected secrets storage | macOS protected credential storage (Keychain) | Storing connection credentials and signing keys outside the agent's reach | Other storage providers are a backlog item (B5). |
-| E8 | Operating system (macOS) | sudo, terminal and SSH session identity, launchd service management | Elevated human authentication and human-presence checks for system intents; running the protected service | |
+| E8 | Operating system (macOS) | sudo, terminal and SSH session identity, launchd service management, file-system permissions | Elevated human authentication and human-presence checks for system intents; running the protected service; protecting GoFin's root-only state, including secrets | Secrets are stored by GoFin itself in its root-only store; external secrets storage providers (e.g. Keychain, 1Password) are a backlog item (B5). |
 
 ## 4. Capabilities
 

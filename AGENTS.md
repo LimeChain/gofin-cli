@@ -72,6 +72,16 @@ make dev-env-stop
 - Treat `--json` as a stable execution contract: no terminal input, animation, color or human chatter; keep structured results, errors and exit behavior consistent. It does not bypass required authorization.
 - For changed terminal paths, test relevant TTY, redirected, machine-output, cancellation and expiry behavior using temporary homes and fixtures.
 
+## Architecture documentation
+
+The target architecture lives in [docs/architecture](docs/architecture/README.md), following the C4 model. When writing or changing it:
+
+- Keep it concise: one Markdown file per C4 level, split into a few files only where a level needs it (one per container at level 3; level 4 only for crucial, unintuitive or tricky parts). No separate decision records: agreed decisions are one-line entries in a "Decisions" section of the level document they shape. Flows and lifecycles live in the level document they belong to.
+- Tables are the source of truth and diagrams are views; diagrams are Mermaid in Markdown and must agree with the tables.
+- Diagram node IDs match table IDs, and an element keeps its ID across levels.
+- Never convey meaning only through color, line style, grouping or position; state it in a table or prose.
+- Do not commit rendered images; review renders belong in ignored `.context/`.
+
 ## Completion and documentation
 
 Report what changed, exact relevant checks and their outcomes, and remaining limitations. Distinguish synthetic, fork, live-read, live-write and native-approval evidence; do not claim unobserved cases passed. Keep progress updates brief and explain concrete blockers.

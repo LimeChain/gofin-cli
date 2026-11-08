@@ -1,6 +1,6 @@
 # C4 level 1: system context
 
-- Status: agreed
+- Status: agreed (amended 2026-11-07: secrets storage is GoFin-owned, not external)
 - Date: 2026-11-06
 
 GoFin as one system, the people who use it and the external systems it depends on. Inputs: [actors, external systems and capabilities](00-inputs.md).
@@ -27,10 +27,10 @@ flowchart LR
     exchanges["<b>Exchanges</b><br/>Binance, Coinbase, Kraken,<br/>Hyperliquid"]:::external
     apis["<b>Non-blockchain APIs</b><br/>Quoting services, app and<br/>protocol APIs and MCPs,<br/>market data"]:::external
     analytics["<b>Analytics service</b>"]:::external
-    releases["<b>Releases directory</b>"]:::external
-    secrets["<b>Protected secrets storage</b><br/>Keychain"]:::external
+    release_site["<b>Release site</b><br/>Install script, latest pointer"]:::external
+    release_artifacts["<b>Release artifacts</b><br/>Signed manifests, archives"]:::external
     auth["<b>Execution authentication<br/>provider</b><br/>Touch ID"]:::external
-    os["<b>Operating system</b><br/>sudo, session identity,<br/>launchd"]:::external
+    os["<b>Operating system</b><br/>sudo, session identity,<br/>launchd, file permissions"]:::external
   end
 
   agent -- "Intents / outcomes" --> gofin
@@ -40,13 +40,14 @@ flowchart LR
   gofin -- "Reads, orders, transfers,<br/>observation" --> exchanges
   gofin -- "Quotes, protocol state,<br/>market data" --> apis
   gofin -- "Usage and errors<br/>(when allowed)" --> analytics
-  gofin -- "Update discovery<br/>and download" --> releases
-  gofin -- "Stores and reads secrets" --> secrets
+  gofin -- "Latest-release pointer" --> release_site
+  gofin -- "Manifests, signatures,<br/>archives" --> release_artifacts
   gofin -- "Requests execution<br/>authorization" --> auth
-  gofin -- "Elevated authentication,<br/>session checks, service" --> os
+  gofin -- "Elevated authentication,<br/>session checks, service,<br/>root-only file protection" --> os
 
   human -. "Approves execution intents" .-> auth
   human -. "Authenticates system intents (sudo)" .-> os
+  human -. "Downloads the bootstrap<br/>installer (first install)" .-> release_site
 ```
 
 Dashed lines are interactions the human performs directly with an external system, outside GoFin. They are what the agent cannot fake.
@@ -62,10 +63,10 @@ Dashed lines are interactions the human performs directly with an external syste
 | `exchanges` | External system | Exchanges | Binance, Coinbase, Kraken, Hyperliquid. | E2 |
 | `apis` | External system | Non-blockchain APIs | Quoting services, app and protocol APIs and MCPs, market data. | E3 |
 | `analytics` | External system | Analytics service | Receives optional anonymous usage and error reports. | E4 |
-| `releases` | External system | Releases directory | Publishes GoFin releases for update. | E5 |
+| `release_site` | External system | Release site | Stable install URL serving the bootstrap install script and the latest-release pointer per major version (today GitHub Pages). | E5a |
+| `release_artifacts` | External system | Release artifacts | Hosts each release's signed manifest, signature and archives (today GitHub Releases). | E5b |
 | `auth` | External system | Execution authentication provider | Touch ID. | E6 |
-| `secrets` | External system | Protected secrets storage | Keychain. | E7 |
-| `os` | External system | Operating system | sudo, terminal and SSH session identity, launchd. | E8 |
+| `os` | External system | Operating system | sudo, terminal and SSH session identity, launchd, file-system permissions. GoFin keeps its secrets in its own root-only store, protected by the operating system. | E8 |
 
 ## Relationships
 
@@ -79,12 +80,13 @@ Dashed lines are interactions the human performs directly with an external syste
 | R4 | `gofin` | `exchanges` | Through GoFin | Authenticated reads and requests (orders, transfers, configuration) | Account state, order and transfer status | The exchange is authoritative for its own ledger. Results are correlated to the request's identity. |
 | R5 | `gofin` | `apis` | Through GoFin | Quote, state and data requests | Quotes, provider-built transactions or orders, protocol state, prices, token metadata | Not trusted. Quotes and provider-built transactions are checked against the intent's bounds before authorization; market data is best-effort. |
 | R6 | `gofin` | `analytics` | Through GoFin | Anonymous usage and error reports, only when the human allows it | — | Receives no secrets and nothing that identifies accounts or funds. |
-| R7 | `gofin` | `releases` | Through GoFin | Version and download requests | Release metadata and binaries | A release is verified before it is installed. |
-| R8 | `gofin` | `secrets` | Through GoFin | Secrets to store, read requests | Secrets | Trusted storage. Secrets read from it never leave GoFin's protected boundary. |
+| R7a | `gofin` | `release_site` | Through GoFin | Pointer request | The latest release for the installed major version | A hint only; nothing is trusted because of it. |
+| R7b | `gofin` | `release_artifacts` | Through GoFin | Download requests | Manifest, signature, archives | Not trusted for content: nothing from a release runs until its manifest signature verifies against the public key GoFin carries. |
 | R9 | `gofin` | `auth` | Through GoFin | An authorization request with a summary written by GoFin, never by the agent | The human's decision | Trusted. |
-| R10 | `gofin` | `os` | Through GoFin | Elevated-authentication and session checks, service management | Results | Trusted. |
+| R10 | `gofin` | `os` | Through GoFin | Elevated-authentication and session checks, service management, root-only file protection for GoFin's state and secrets | Results | Trusted. Secrets never leave GoFin's protected boundary. |
 | R11 | `human` | `auth` | Direct | Biometric approval of an execution intent | — | The human's own act; the agent cannot perform it. |
 | R12 | `human` | `os` | Direct | sudo password and terminal confirmation for a system intent | — | The human's own act; the agent cannot perform it. |
+| R13 | `human` | `release_site` | Direct | Download of the bootstrap install script for a first install | The script, carrying the release public key | Trusted only through HTTPS; this is the trust anchor for a first install. |
 
 ## Development context
 
@@ -137,4 +139,4 @@ flowchart LR
 | D4 | `gofin_dev` | `chains`, `exchanges`, `apis` | As in R3–R5 | As in R3–R5 | As in R3–R5, with disposable funds and accounts only. |
 | D5 | `gofin_dev` | `gofin` | — | — | No relationship: the development environment never reads or changes the protected installation's state, credentials or service. |
 
-Deliberately absent from the development context: the execution authentication provider (approval is automatic), protected secrets storage (disposable credentials use a development-only store), operating-system elevation and service management, analytics (development builds never report), and the releases directory.
+Deliberately absent from the development context: the execution authentication provider (approval is automatic), protected secrets storage (disposable credentials use a development-only store), operating-system elevation and service management, analytics (development builds never report), the release site and release artifacts.
