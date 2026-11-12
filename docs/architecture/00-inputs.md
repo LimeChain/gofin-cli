@@ -42,6 +42,7 @@ Humans and agents submit the same intents. They differ in authority: only a huma
 | Agent | An AI agent acting for the human | Submits information and execution intents and system intents that need no elevated privileges; observes operations and continues the task. Cannot authorize execution, cannot submit system intents that need elevated privileges, never sees secrets. | **Primary user** of information and execution intents. |
 | Human user | The person who owns the accounts and funds | Can submit intents of every kind. Authorizes execution intents or enables Yolo. Submits system intents that need elevated privileges: connections, Yolo, install, update, human-only venue configuration. Acts at a venue when the venue requires it (e.g. confirming a withdrawal in an exchange app). | **Primary user** of system intents and authorization. Direct use of information and execution intents is supported but not optimized for. |
 | Developer | A human or agent building and testing GoFin | Uses the development environment with disposable credentials and automatic development approval. Never touches the protected installation. | Development and verification. |
+| Maintainer | A human who releases GoFin | Starts releases, which then run automatically; holds the root key and performs key ceremonies (generating keys, certifying release keys, revoking keys): once to set up release trust, and afterwards only to rotate or revoke a key; never per release. | Releases and release trust. |
 
 ## 3. External systems
 
@@ -51,10 +52,12 @@ Humans and agents submit the same intents. They differ in authority: only a huma
 | E2 | Exchanges | Binance, Coinbase (Advanced, Exchange, International), Kraken (Spot, Futures), Hyperliquid | Reads, orders, transfers, withdrawals and deposits, account configuration | Maximize use of CCXT. |
 | E3 | Non-blockchain APIs | Quoting services (Jupiter, Uniswap API / UniswapX, bridge quote APIs); app and protocol APIs and MCPs (e.g. Aave MCP, bridge status and attestation APIs); market data (price sources, token lists and metadata) | Quotes and provider-built transactions or orders, protocol and bridge state, best-effort USD display, token identity and decimals | Like blockchain RPCs, these are building-block integrations for fulfilling an intent. |
 | E4 | Analytics service | GoFin's analytics endpoint | Optional anonymous usage and error reporting | |
-| E5a | Release site | The stable install URL (today GitHub Pages) | First install: the bootstrap install script, which carries GoFin's release public key. Update discovery: one "latest release" pointer per major version | For first installs the bootstrap script is trusted only through HTTPS; for updates the pointer is a hint. |
-| E5b | Release artifacts | Where release files are published (today GitHub Releases) | The signed manifest, its signature and the per-platform archives | Never trusted for content: everything is verified against the manifest signature. |
+| E5a | Release site | The stable install URL (today GitHub Pages) | First install: the bootstrap install script, which carries the hash of each platform's archive. Update discovery: one "latest release" pointer per major version, and the revocation list | For first installs the bootstrap script is trusted only through HTTPS; for updates the pointer is a hint. |
+| E5b | Release artifacts | Where release files are published (today GitHub Releases) | The signed manifest, its signature, the release-key certificate and the per-platform archives | Never trusted for content: everything is verified against the manifest signature. |
 | E6 | Execution authentication provider | macOS biometric authentication (Touch ID) | The human authorizing execution intents | Other providers are a backlog item (B4). |
 | E8 | Operating system (macOS) | sudo, terminal and SSH session identity, launchd service management, file-system permissions | Elevated human authentication and human-presence checks for system intents; running the protected service; protecting GoFin's root-only state, including secrets | Secrets are stored by GoFin itself in its root-only store; external secrets storage providers (e.g. Keychain, 1Password) are a backlog item (B5). |
+| E9 | GitHub | Source repository and CI (GitHub Actions) | Holds the code and the public release-trust files (root public keys, release-key certificates, revocation lists); builds releases; holds the release key as a CI secret | Also hosts the release site and release artifacts today; those are listed separately by role. |
+| E10 | Secret manager | The maintainer's secret manager, with a command-line tool | Holds the root and release private keys; receives a new key through a pipe; injects a key as an environment variable into one signing tool command; the maintainer loads the CI secret from it | Only the maintainer has access; it is never made available to CI. |
 
 ## 4. Capabilities
 
@@ -90,6 +93,17 @@ Grouped by intent kind. Each intent also declares the privilege it needs (sectio
 | S7 | Companion skill: install, refresh and remove. |
 | S8 | Development environment: start, stop and reset; import disposable credentials; owned forks and fixtures. |
 | S9 | System reads: connection lists and status, mode status, readiness and configuration status. |
+
+### Maintainer capabilities
+
+Not intents: performed by the maintainer with GoFin's release tooling, outside any installation.
+
+| # | Capability |
+| --- | --- |
+| M1 | Release: build, describe, sign and publish a release. |
+| M2 | Rotate the release key. |
+| M3 | Revoke a release key; the revocation is published with the next release, signed by a new release key. |
+| M4 | Rotate the root key. |
 
 ## 5. Quality goals
 

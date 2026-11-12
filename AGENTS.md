@@ -79,6 +79,11 @@ The target architecture lives in [docs/architecture](docs/architecture/README.md
 - Keep it concise: one Markdown file per C4 level, split into a few files only where a level needs it (one per container at level 3; level 4 only for crucial, unintuitive or tricky parts). No separate decision records: agreed decisions are one-line entries in a "Decisions" section of the level document they shape. Flows and lifecycles live in the level document they belong to.
 - Tables are the source of truth and diagrams are views; diagrams are Mermaid in Markdown and must agree with the tables.
 - Diagram node IDs match table IDs, and an element keeps its ID across levels.
+- Number relationships in the order data moves through the main flows, so a reader can follow a flow through the diagram by its numbers; where a diagram shows several independent flows, number one flow after another.
+- At level 3, a container's elements table lists its components plus any element first introduced at that level; elements defined at levels 1 and 2 appear in diagrams without rows.
+- Shared libraries are code built into components, not components: do not draw them in level 3 diagrams. List them in a "Libraries" table (named "<job> library", ID `lib_*`) and name the library in the relationships and flow steps that use it.
+- A level 4 document describes one module's contract only: its types, functions and file formats, the flows of its main uses, and its decisions. Types have a Type, Purpose and Fields table; functions have a Function, Purpose, Inputs, Output and Used in table; flows are sequence diagrams of the functions a caller triggers, in order, leaving their purpose to the table. Describe inputs and outputs, never how callers obtain or store them; that belongs to levels 2 and 3.
+- Name components after the job they do, like a Rust trait: an agent noun such as "Service manager" or "Downloader", not a topic such as "Service registration". The ID follows the name (`in_service_manager`).
 - Never convey meaning only through color, line style, grouping or position; state it in a table or prose.
 - Do not commit rendered images; review renders belong in ignored `.context/`.
 

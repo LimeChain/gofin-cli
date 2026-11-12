@@ -13,3 +13,4 @@ The architecture is built as an MVP foundation whose fundamental building blocks
 | B7 | Linux support | Likely changes the execution authentication provider, protected secrets storage and operating system integrations. |
 | B8 | Personal limits | Optional personal limits (e.g. USD budgets) designed so they never cause bricking. |
 | B9 | Homebrew installation | Install and update GoFin through Homebrew in addition to the bootstrap installer; must keep release signature verification and the installer's role in privileged setup. |
+| B10 | Release verification before publishing | The release builder checks a signed release the way an up-to-date installation would, before upload: the installer's `update` rules (certificate, key serial and revocation, manifest signature, newer version, archive hashes) using the latest published release as the installation's state, then the `install` file checks against each archive's `release.json`. Any failure stops the release. |
