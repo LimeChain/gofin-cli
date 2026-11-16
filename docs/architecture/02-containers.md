@@ -141,7 +141,7 @@ flowchart LR
 | ID | Type | Name | Technology and runtime | Responsibility | Does not |
 | --- | --- | --- | --- | --- | --- |
 | `cli` | Container | CLI | `gofin`, Rust; runs as the human | Parses intents and renders results for humans or as `--json`. Answers discovery and help directly; dispatches information and execution intents to the broker; replaces itself through `exec sudo` with the admin binary or the installer for system intents that need elevated privileges. About once a day starts the installer's unprivileged update check (no sudo). | Hold secrets, sign, or change protected state. |
-| `user_state` | Data store | User-level state | Files in the human's home directory | Analytics settings and anonymous installation ID, the latest update notice, companion skill, shell completions. | Hold secrets or anything that protects funds. |
+| `user_state` | Data store | User-level state | The `.gofin` directory in the human's home directory, plus skill and completion files where agents and shells look for them | Analytics settings and anonymous installation ID, the latest update notice, companion skill, shell completions. Used only through the shared user-level state library. | Hold secrets or anything that protects funds. |
 | `broker` | Container | Broker service | `gofin-broker`, Rust; root; started by launchd when the CLI connects | Serves information and execution intents from the CLI over a socket only the human's user can reach. Holds secrets, signs, executes and observes operations through external integrations, and requests execution authorization. | Perform system intents that need elevated privileges, install or update GoFin, or migrate state. |
 | `admin` | Container | Admin | `gofin-admin`, Rust; root one-shot started through sudo | System intents that need elevated privileges, with a terminal review: secrets and connections (including venue subaccounts) and critical settings (Yolo). Works without a healthy broker. | Serve agent requests or execute financial operations. |
 | `installer` | Container | Installer | `gofin-installer`, Rust; root one-shot started through sudo, except `check`, which runs as the human without sudo | Owns the whole update lifecycle. `check` (unprivileged): discovers the latest release for the installed major version, verifies its manifest signature and records an update notice in user-level state. Root modes: install, update, repair and uninstall: verifies releases, swaps files, registers the broker service, migrates protected state, updates user-level state. Works without a healthy broker. | Serve intents or hold connection secrets in memory beyond migration. |
@@ -197,7 +197,7 @@ The development environment uses development builds of the CLI and the broker se
 | --- |
 | Privileged GoFin processes (the protected service and short-lived processes started through sudo) share the protected store directly, through a shared protected-store library: database transactions coordinate data, and OS file locks (released automatically when a process dies) coordinate maintenance windows. There is no handoff to the service: install, update, uninstall and disabling Yolo must work without a healthy service. |
 | The protected store is one root-only SQLite database holding operations, configuration, connections, secrets and Yolo state. Secrets are reached only through dedicated store-library functions and are never logged or exported. Yolo fails closed: if the store cannot be read, Yolo counts as off. |
-| The protected-store library is a shared component inside each container that uses it, not a separate service. It exposes operations (e.g. record a submission, enroll a connection with its secret), locks and migrations rather than raw tables; external secrets storage providers plug in behind it. |
+| The protected-store library is a shared component inside each container that uses it, not a separate service. It exposes domain types that persist and load themselves (e.g. a submission, a connection with its secret), locks and migrations rather than raw tables; external secrets storage providers plug in behind it. |
 | On update, the installed version discovers, downloads and verifies the new release; the new release's installer performs the installation. |
 | Every release has one signed manifest (version and, per file, name, size and hash), published with the release. Nothing from a release runs until code that is already trusted verifies it: the installed installer checks the manifest signature against a root public key it carries; for a first install, the bootstrap installer checks the archive against its pinned hash. Signatures are post-quantum where practical, produced automatically in CI as part of a release the maintainer started, with key rotation. |
 | Every platform archive carries its release file list (`release.json`) and the release-key certificate. The revocation list reaches installations two ways: it is published on the release site next to the pointer, where `check` and `update` fetch it, so installations reject a revoked release key at their next check, before updating; and it is built into every release's installer, which records it when installed. |
@@ -244,10 +244,8 @@ sequenceDiagram
   Old->>Artifacts: download manifest, signature and release-key certificate
   Old->>Old: verify certificate with the root key, serial not lower than accepted and not revoked, manifest signature, version not older
   Old->>Artifacts: download archive for this platform
-  Old->>Old: check archive hash against manifest, unpack into a new root-only directory
-  Old->>New: exec staged new installer (install mode)
-  New->>Human: terminal confirmation: version, changes, forward-only migrations
-  Human->>New: confirm
+  Old->>Old: check archive hash against manifest, unpack into a new version directory
+  Old->>New: exec the new version directory's installer (install mode)
   New->>Broker: stop the service, take the maintenance lock
   New->>New: switch to the new version's files, update service registration
   New->>New: migrate protected and user-level state (forward-only point)
@@ -259,7 +257,7 @@ sequenceDiagram
 2. Verification: the release-key certificate verifies against an embedded root public key (selected by root key ID); its key serial is not on the revocation list; the manifest signature verifies with the certified release key; the release version is not older than the installed one. Root modes also require the key serial to be not lower than the highest the installation has accepted; `check` keeps no trust state, since it only announces.
 3. Every command reads the notice, a local file. When it names a newer release, the CLI tells the caller: human output shows a one-line notice; `--json` responses carry a structured `update_available` field. The companion skill tells the agent to relay it to the human once, since only the human can run `gofin update`.
 4. `gofin update` replaces the CLI process with `sudo gofin-installer update`, the same elevation pattern as other system intents that need elevated privileges.
-5. The installed installer verifies the release before anything from it runs; the new release's installer asks for confirmation, because only it knows its migrations, and performs the installation and migrations.
+5. The installed installer verifies the release before anything from it runs; the new release's installer performs the installation and migrations.
 6. A failure before any migration switches back to the previous version; after that the update only moves forward.
 
 ### Release

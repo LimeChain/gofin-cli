@@ -33,21 +33,20 @@ flowchart LR
     os["<b>Operating system</b><br/>sudo, session identity,<br/>launchd, file permissions"]:::external
   end
 
-  agent -- "Intents / outcomes" --> gofin
-  human -- "Intents / outcomes" --> gofin
+  agent -- "R1 Intents / outcomes" --> gofin
+  human -- "R2 Intents / outcomes" --> gofin
 
-  gofin -- "Reads, transactions,<br/>observation" --> chains
-  gofin -- "Reads, orders, transfers,<br/>observation" --> exchanges
-  gofin -- "Quotes, protocol state,<br/>market data" --> apis
-  gofin -- "Usage and errors<br/>(when allowed)" --> analytics
-  gofin -- "Latest-release pointer,<br/>revocation list" --> release_site
-  gofin -- "Manifests, signatures,<br/>certificates, archives" --> release_artifacts
-  gofin -- "Requests execution<br/>authorization" --> auth
-  gofin -- "Elevated authentication,<br/>session checks, service,<br/>root-only file protection" --> os
-
-  human -. "Approves execution intents" .-> auth
-  human -. "Authenticates system intents (sudo)" .-> os
-  human -. "Downloads the bootstrap<br/>installer (first install)" .-> release_site
+  gofin -- "R3 Quotes, protocol state,<br/>market data" --> apis
+  gofin -- "R4 Requests execution<br/>authorization" --> auth
+  human -. "R5 Approves execution intents" .-> auth
+  gofin -- "R6 Reads, transactions,<br/>observation" --> chains
+  gofin -- "R7 Reads, orders, transfers,<br/>observation" --> exchanges
+  gofin -- "R8 Elevated authentication,<br/>session checks, service,<br/>root-only file protection" --> os
+  human -. "R9 Authenticates system intents (sudo)" .-> os
+  gofin -- "R10 Usage and errors<br/>(when allowed)" --> analytics
+  human -. "R11 Downloads the bootstrap<br/>installer (first install)" .-> release_site
+  gofin -- "R12 Latest-release pointer,<br/>revocation list" --> release_site
+  gofin -- "R13 Manifests, signatures,<br/>certificates, archives" --> release_artifacts
 ```
 
 Dashed lines are interactions the human performs directly with an external system, outside GoFin. They are what the agent cannot fake.

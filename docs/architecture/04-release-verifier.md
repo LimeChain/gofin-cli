@@ -23,9 +23,9 @@ Code-level view of the release verifier library (`lib_verifier`), the shared lib
 | `ManifestSignature` | The release key's signature over the manifest's exact bytes. | Signature |
 | `Release<State>` | One release as the installed installer handles it. `Unverified` as fetched; `Trusted` once verified under a policy; `Checked` once the downloaded archive matches the manifest. Only a checked release is unpacked and handed to the new release's install. | Manifest, manifest signature, certificate; the archive once checked |
 | `ReleaseFileList` | Describes what one archive contains, so unpacked files can be checked. Not signed: it is covered by its archive's hash in the manifest. | Release version, platform, source commit, files (name, size, hash) |
-| `UnpackedRelease<State>` | One release as the new release's install handles it. `Unchecked` as unpacked; `Checked` once the files are exactly those its release file list describes. Only a checked release updates the signing-key record. | Release file list, unpacked files, certificate |
+| `UnpackedRelease<State>` | One release as the new release's install handles it. `Unchecked` as unpacked; `Checked` once the files are exactly those its release file list describes. Only a checked release updates the release trust record. | Release file list, unpacked files, certificate |
 | `LatestVersion` | The latest-release pointer: names the latest release for one major version. Not signed: only a hint for which manifest to fetch. | Latest release version |
-| `SigningKeyRecord` | What an installation remembers about release keys between verifications, so it never goes back to an older or revoked key. | Highest accepted key serial, newest revocation list |
+| `ReleaseTrustRecord` | What an installation remembers about release keys between verifications, so it never goes back to an older or revoked key. | Highest accepted key serial, newest revocation list |
 
 A root public key file is UTF-8 text, one `name: value` line per field, in this order:
 
@@ -99,12 +99,12 @@ Every function takes its inputs as values and returns a result or a typed error;
 | --- | --- | --- | --- | --- |
 | `RevocationList<Unverified>::verify(self, ...)` | Checks the list's root signature, so it can be trusted and compared. | Trust anchor | `Result<RevocationList<Verified>, TrustError>` | [Update and repair](#update-and-repair), [Check](#check) |
 | `Ord` on `RevocationList<Verified>` | Picks the list to hold with `held.max(candidate)`: the higher list version wins, an equal version keeps the held list. | Two verified lists | The list to hold | [Update and repair](#update-and-repair), [Check](#check) |
-| `Release<Unverified>::verify(self, ...)` | Decides whether the release may be trusted under a policy: its certificate comes from a trusted root key, its key is not revoked or older than accepted, its manifest signature is valid, and its version fits the policy. | Policy, trust anchor, signing-key record (none for `announce`), verified revocation list, installed version | `Result<Release<Trusted>, TrustError>` | [Update and repair](#update-and-repair), [Check](#check) |
+| `Release<Unverified>::verify(self, ...)` | Decides whether the release may be trusted under a policy: its certificate comes from a trusted root key, its key is not revoked or older than accepted, its manifest signature is valid, and its version fits the policy. | Policy, trust anchor, release trust record (none for `announce`), verified revocation list, installed version | `Result<Release<Trusted>, TrustError>` | [Update and repair](#update-and-repair), [Check](#check) |
 | `Release<Trusted>::check(self, ...)` | Confirms the downloaded archive is the one the manifest lists for this platform. | Platform, archive bytes | `Result<Release<Checked>, ArchiveMismatch>` | [Update and repair](#update-and-repair) |
 | `UnpackedRelease<Unchecked>::check_files(self)` | Confirms the unpacked files are exactly those the release file list describes. | — | `Result<UnpackedRelease<Checked>, FileDifferences>`; the error lists the files that differ, are missing or are unexpected | [Update and repair](#update-and-repair) |
-| `UnpackedRelease<Checked>::record_install(&self, ...)` | Updates what the installation remembers once this release is installed: the serial of its certificate, if higher, and the newer of the record's and the trust anchor's revocation lists. | Signing-key record, trust anchor | The new `SigningKeyRecord` | [Update and repair](#update-and-repair) |
+| `UnpackedRelease<Checked>::record_install(&self, ...)` | Updates what the installation remembers once this release is installed: the serial of its certificate, if higher, and the newer of the record's and the trust anchor's revocation lists. | Release trust record, trust anchor | The new `ReleaseTrustRecord` | [Update and repair](#update-and-repair) |
 
-Policies: `announce` (no signing-key record: reports a newer verified release), `update` (a newer release) and `repair` (the installed version again).
+Policies: `announce` (no release trust record: reports a newer verified release), `update` (a newer release) and `repair` (the installed version again).
 
 ### Formats
 
@@ -144,15 +144,15 @@ sequenceDiagram
   installed->>lib: fetched_list.verify(trust anchor)
   lib-->>installed: RevocationList<Verified>, or TrustError
   installed->>installed: held.max(fetched), stored at once
-  installed->>lib: release.verify(update or repair, trust anchor, signing-key record, list, installed version)
+  installed->>lib: release.verify(update or repair, trust anchor, release trust record, list, installed version)
   lib-->>installed: Release<Trusted>, or TrustError
   installed->>lib: release.check(platform, archive)
   lib-->>installed: Release<Checked>, or ArchiveMismatch
   installed->>install: unpacked release
   install->>lib: unpacked.check_files()
   lib-->>install: UnpackedRelease<Checked>, or FileDifferences
-  install->>lib: unpacked.record_install(signing-key record, trust anchor)
-  lib-->>install: new SigningKeyRecord
+  install->>lib: unpacked.record_install(release trust record, trust anchor)
+  lib-->>install: new ReleaseTrustRecord
 ```
 
 1. The revocation list is verified and stored first, so a revocation takes effect even if the rest of the update fails.
@@ -174,7 +174,7 @@ sequenceDiagram
   lib-->>check: Release<Trusted> (a newer release), or TrustError
 ```
 
-1. With no signing-key record there is no serial floor; the root modes apply it when the human updates.
+1. With no release trust record there is no serial floor; the root modes apply it when the human updates.
 
 ### Certify and sign
 
@@ -215,7 +215,7 @@ sequenceDiagram
 | --- |
 | Release trust is root-certified: a root key signs certificates for release keys, and a release is a manifest, its signature by a release key and that key's certificate. Verifiers trust only the root public keys in their trust anchor, so rotating a release key changes no trust anchor; only rotating the root key does. |
 | Root and release keys both use SLH-DSA-SHA2-192s. |
-| Release-key certificates never expire and carry no dates. Each carries a monotonically increasing key serial; a signing-key record keeps the highest serial accepted, and lower serials are rejected. |
+| Release-key certificates never expire and carry no dates. Each carries a monotonically increasing key serial; a release trust record keeps the highest serial accepted, and lower serials are rejected. |
 | A release-key certificate contains: format version, purpose (`release`), key serial, algorithm, the release public key, the root key ID (fingerprint of the root public key that signed it) and the root signature over all of these. A trust anchor may hold more than one root public key during a root-key rotation; the root key ID selects which one verifies the certificate. |
 | A revocation list, signed with the root key, names key serials that are never valid. It carries a monotonically increasing list version and is accepted only if its version is not lower than the one held. |
 | A release file list (version, platform, source commit, and the name, size and hash of every file in one archive) is not signed: it is trusted through its archive's hash. The manifest says which archives make up a release; the release file list says what is inside each archive. |
