@@ -1,6 +1,6 @@
 # C4 level 3: installer components
 
-- Status: in review
+- Status: agreed
 - Date: 2026-11-09
 
 Components of the installer container (`installer` in [02-containers.md](02-containers.md)).
@@ -43,7 +43,7 @@ flowchart LR
   in_orchestrator -- "IN5 manifest, signature,<br/>certificate" --> release_artifacts
   in_orchestrator -- "IN6 download and check<br/>the archive" --> in_downloader
   in_downloader -- "IN7 archive" --> release_artifacts
-  in_orchestrator -- "IN8 uninstall<br/>confirmation" --> human
+  in_orchestrator -- "IN8 progress, result,<br/>uninstall confirmation" --> human
   in_orchestrator -- "IN9 register, start, stop,<br/>remove service" --> in_service_manager
   in_service_manager -- "IN10 launchd" --> os
   in_orchestrator -- "IN11 unpack, switch,<br/>remove files" --> in_stager
@@ -59,7 +59,7 @@ flowchart LR
 
 | ID | Type | Name | Responsibility |
 | --- | --- | --- | --- |
-| `in_orchestrator` | Component | Orchestrator | The binary's entry point: parses the mode and runs its flow, calling the other components in order. `check` runs as the human without root; `install`, `update`, `repair` and `uninstall` refuse to run without root. Holds the maintenance lock while a root mode changes the installation. Discovers and verifies releases, asks for confirmation before an uninstall and reports analytics through the libraries below. |
+| `in_orchestrator` | Component | Orchestrator | The binary's entry point: parses the mode and runs its flow, calling the other components in order. `check` runs as the human without root; `install`, `update`, `repair` and `uninstall` refuse to run without root. Holds the maintenance lock while a root mode changes the installation. Discovers and verifies releases, shows progress and results to the human, asks for confirmation before an uninstall and reports analytics through the libraries below. |
 | `in_downloader` | Component | Downloader | Downloads the archive for this platform into a new root-only directory and checks it against the verified manifest with the release verifier library. Used by `update` and `repair`; a bootstrap install arrives with its archive already downloaded and checked. |
 | `in_stager` | Component | Stager | Owns the installed layout and permissions: unpacks an archive straight into a new version directory (allowed entries only, fixed permissions), switches the active-version link to it (or back), puts the CLI on the human's `PATH`, and removes version directories. The active-version link is the only record of the active version: the Stager reads it from `release.json` in the directory the link points to. |
 | `in_service_manager` | Component | Service manager | Registers, starts, stops and removes the broker service with the OS service manager (launchd), and runs the readiness check after a start. |
@@ -73,6 +73,7 @@ Shared code built into the components above; not components themselves.
 | ID | Library | Used by | For |
 | --- | --- | --- | --- |
 | `lib_verifier` | Release verifier library | Orchestrator, Downloader | Reading the latest-release pointer and revocation list; verifying certificates, key serials, manifest signatures, versions and file hashes ([04-release-verifier.md](04-release-verifier.md)). |
+| `lib_presenter` | Terminal presenter library | Orchestrator | Color, the activity indicator and the layout of messages for what the human sees while a mode runs and when it ends, honoring `NO_COLOR`, `TERM=dumb` and redirection. Also used by the CLI and the admin binary, so all three look the same to the human. |
 | `lib_confirmer` | Terminal confirmer library | Orchestrator | Showing what an uninstall removes and collecting exact confirmation. Also used by the admin binary. |
 | `lib_store` | Protected store library | Orchestrator, State migrator | Typed access to the protected store, migrations and the maintenance lock ([04-protected-store.md](04-protected-store.md)). Also used by the broker and the admin binary. |
 | `lib_reporter` | Analytics reporter library | Orchestrator | Reporting usage and errors when the human allows it. Used by every binary. |
@@ -99,7 +100,7 @@ The installer's trust anchor for the [release verifier library](04-release-verif
 | IN5 | `in_orchestrator` | `release_artifacts` | Manifest, signature and release-key certificate, verified with the release verifier library before anything from the release runs |
 | IN6 | `in_orchestrator` | `in_downloader` | Download a verified release's archive and check it against the manifest |
 | IN7 | `in_downloader` | `release_artifacts` | Archive for this platform |
-| IN8 | `in_orchestrator` | `human` | What an uninstall removes and keeps, and one exact confirmation, through the terminal confirmer library |
+| IN8 | `in_orchestrator` | `human` | Progress and the result of each mode the human runs, through the terminal presenter library; what an uninstall removes and keeps, and one exact confirmation, through the terminal confirmer library |
 | IN9 | `in_orchestrator` | `in_service_manager` | Register, start, stop or remove the broker service |
 | IN10 | `in_service_manager` | `os` | launchd registration and control |
 | IN11 | `in_orchestrator` | `in_stager` | Read the active version; unpack an archive into a new version directory; switch, switch back or remove version directories |

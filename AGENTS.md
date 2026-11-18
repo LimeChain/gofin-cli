@@ -76,6 +76,8 @@ make dev-env-stop
 
 The target architecture lives in [docs/architecture](docs/architecture/README.md), following the C4 model. When writing or changing it:
 
+- Before writing or changing a level document, read [the inputs](docs/architecture/00-inputs.md) and every level above it in full, and the documents at its own level that share elements with it.
+- Use the inputs vocabulary exactly. Drafts and current code may use older terms: translate them before they reach a level document. A new term is added to the vocabulary before a level document uses it.
 - Keep it concise: one Markdown file per C4 level, split into a few files only where a level needs it (one per container at level 3; level 4 only for crucial, unintuitive or tricky parts). No separate decision records: agreed decisions are one-line entries in a "Decisions" section of the level document they shape. Flows and lifecycles live in the level document they belong to.
 - Tables are the source of truth and diagrams are views; diagrams are Mermaid in Markdown and must agree with the tables.
 - Diagram node IDs match table IDs, and an element keeps its ID across levels.

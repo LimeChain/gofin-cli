@@ -21,7 +21,7 @@ Everything GoFin ships and runs on the user's Mac. Everything else is an externa
 - Reads (information intents).
 - Single-operation writes.
 - Authorization: per-operation human approval, protected Yolo, development approval in the development environment.
-- Observation of operations to their outcomes.
+- Observation of submitted intents to their outcomes.
 - Discovery.
 - Connections and human-only configuration.
 - Installation, update and uninstall.
@@ -39,7 +39,7 @@ Humans and agents submit the same intents. They differ in authority: only a huma
 
 | Actor | Who | What they do with GoFin | Primary use, for optimization |
 | --- | --- | --- | --- |
-| Agent | An AI agent acting for the human | Submits information and execution intents and system intents that need no elevated privileges; observes operations and continues the task. Cannot authorize execution, cannot submit system intents that need elevated privileges, never sees secrets. | **Primary user** of information and execution intents. |
+| Agent | An AI agent acting for the human | Submits information and execution intents and system intents that need no elevated privileges; observes their outcomes and continues the task. Cannot authorize execution, cannot submit system intents that need elevated privileges, never sees secrets. | **Primary user** of information and execution intents. |
 | Human user | The person who owns the accounts and funds | Can submit intents of every kind. Authorizes execution intents or enables Yolo. Submits system intents that need elevated privileges: connections, Yolo, install, update, human-only venue configuration. Acts at a venue when the venue requires it (e.g. confirming a withdrawal in an exchange app). | **Primary user** of system intents and authorization. Direct use of information and execution intents is supported but not optimized for. |
 | Developer | A human or agent building and testing GoFin | Uses the development environment with disposable credentials and automatic development approval. Never touches the protected installation. | Development and verification. |
 | Maintainer | A human who releases GoFin | Starts releases, which then run automatically; holds the root key and performs key ceremonies (generating keys, certifying release keys, revoking keys): once to set up release trust, and afterwards only to rotate or revoke a key; never per release. | Releases and release trust. |
@@ -69,7 +69,7 @@ Grouped by intent kind. Each intent also declares the privilege it needs (sectio
 | --- | --- |
 | I1 | Discovery: list available actions; explain and show the schema of each, including its contract (required and optional bounds, what is checked before authorization, how outcomes are observed). |
 | I2 | Reads: account and venue state (balances, positions, open orders); market data and quotes; protocol state; a portfolio snapshot across accounts with explicit coverage and incomplete results. |
-| I3 | Observation: an operation's current outcome by its identity, bounded waiting for a change, both sides of a transfer, and listing open operations. |
+| I3 | Observation: a submitted intent's current outcome by its identity, bounded waiting for a change, both sides of a transfer, and listing the submitted intents that have not reached a final outcome. |
 
 ### Execution intents
 
@@ -77,8 +77,9 @@ Grouped by intent kind. Each intent also declares the privilege it needs (sectio
 | --- | --- |
 | X1 | Single-operation writes across the action families: withdraw, deposit, transfers between own accounts, swaps, spot orders, perpetual orders, lending (supply, withdraw, borrow, repay), vaults and yield, liquidity positions, claims, token approvals, cancels and edits, account settings. Families are examined in detail at the container and lower levels. |
 | X2 | Execution authorization: human approval through the execution authentication provider (Touch ID), Yolo (standing authorization granted beforehand by the human through a system intent, bounded by each action's terms), or development approval (automatic, present only in development builds, never in release binaries). |
-| X3 | Continuing an existing operation: execute invoked for an existing operation; the system decides between observing it and trying again. |
-| X4 | Dismissing an unconfirmed operation: changes how it is listed, never a financial fact. |
+| X3 | Continuing a submitted intent: the caller names an intent submitted earlier by its identity; the system decides between observing it and trying again. |
+| X4 | Dismissing a submitted intent whose outcome is unconfirmed: changes how it is listed, never a financial fact. |
+| X5 | Preview: an execution intent carried through every check before authorization and then stopped. Nothing is authorized or executed; the outcome states what would be authorized, with its fees and timing. Needs no privilege. |
 
 ### System intents
 
@@ -171,11 +172,14 @@ Followed by default, but weighed against the quality goals. Applying them must n
 | Term | Meaning |
 | --- | --- |
 | Intent | The input model of the system: what a user asks GoFin to do. Every intent has an `action` that identifies what is requested, a set of **required bounds** (the minimum the action needs) and optional **additional bounds**. All user requests are described as intents where possible. For design purposes intents fall into three kinds: **information** (reads, discovery), **execution** (withdraw, swap, …) and **system** (connections, Yolo, analytics, install, update, uninstall). The kinds are design vocabulary only and do not appear in the CLI interface. |
-| Action (`action`, action ID) | The identifier of what an intent requests, e.g. `swap` or `withdraw`. Used informally to mean an intent, never an operation. |
+| Action (`action`, action ID) | The identifier of what an intent requests, e.g. `uniswap.swap` or `binance.withdraw`. Used informally to mean an intent, never an operation. |
+| Intent definition | The one description of an intent GoFin supports: its `action`, its required and optional bounds, the commands it accepts, the privilege it needs and the shape of its outcome. The intent definitions together are the intents catalog. It does not say how the intent is carried out, or by which container. |
+| Responsible container | The container that carries out an intent and produces its outcome. Every intent has exactly one. The CLI knows which and gets the intent there; the responsible container alone knows which operations service the intent. |
+| Command | What the caller asks GoFin to do with an intent: `read` (answer an intent that changes nothing), `preview` (carry an execution intent through every check before authorization and stop), `execute` (carry out a new intent), `continue` (go on with an execution intent submitted earlier) or `observe` (report the current outcome of one). `continue` and `observe` name the intent by its `action` and its identity and carry no bounds. For reads and execution intents the caller writes the command first, before the `action`. Discovery and system intents each have exactly one command, so it is implied and not written. The command travels with the intent to the responsible container, which decides what it means for that intent. Each intent definition states the commands it accepts. |
 | Bounds | Constraints an intent places on how it may be serviced. Required bounds must be present; additional bounds are optional. |
-| Privilege | What an intent requires to be serviced: none, execution authorization, or system authorization. Declared per intent and independent of its kind. |
+| Privilege | What an intent requires to be executed: none, execution authorization, or system authorization. Declared per intent and independent of its kind. `execute` and `continue` need the intent's privilege; `read`, `preview` and `observe` need none. |
 | Operation | What the system actually executes to service an intent. In the MVP one intent is serviced by exactly one operation; multi-operation intents (backlog) allow several. In plans (backlog) some bounds may be set later, and creating a plan is itself an intent. |
-| Execute | The single entry point for carrying out an operation. Retrying an existing operation is another execute invocation that identifies the existing operation, not a separate concept. When execute is invoked for an existing operation, the system decides whether to observe it (a previous try may have reached the external system) or try again (evidence shows the previous try cannot execute). Each try keeps an internal durable record so a submitted payload is never sent twice. |
+| Execute | Carrying out an intent. `execute` always starts a new intent, with its bounds. `continue` goes on with an intent submitted earlier: the system decides whether to observe it (a previous try may have reached the external system) or try again (evidence shows the previous try cannot execute). Each try keeps an internal durable record so a submitted payload is never sent twice. |
 
 ## Notes for later levels
 

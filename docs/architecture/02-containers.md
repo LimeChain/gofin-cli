@@ -39,7 +39,7 @@ flowchart LR
 
   agent -- "C1 Intents / outcomes" --> cli
   human -- "C1 Intents / outcomes" --> cli
-  cli -- "C2 Information and execution<br/>intents (user socket)" --> broker
+  cli -- "C2 Information and execution intents,<br/>system reads (user socket)" --> broker
   os -- "C3 Starts on<br/>connection" --> broker
   broker -- "C4 Operations,<br/>config, secrets" --> store
   broker -- "C5 Approval request" --> approval_helper
@@ -156,7 +156,7 @@ flowchart LR
 | ID | From | To | What flows | Trust |
 | --- | --- | --- | --- | --- |
 | C1 | `agent`, `human` | `cli` | Intents in; outcomes out | As L1 R1 and R2. |
-| C2 | `cli` | `broker` | Information and execution intents; outcomes | The broker verifies the caller is the human's user and validates every intent itself. |
+| C2 | `cli` | `broker` | Information and execution intents and system reads; outcomes | The broker verifies the caller is the human's user and validates every intent itself. |
 | C3 | `os` | `broker` | Starts the service when the CLI connects | Trusted. |
 | C4 | `broker` | `store` | Operations, configuration, secrets, Yolo state, through the protected-store library | Shared with `admin` and `installer`; database transactions for data, OS locks for maintenance windows. |
 | C5 | `broker` | `approval_helper` | Approval request with a GoFin-written summary; the decision | The summary is never written by the agent. |
@@ -255,7 +255,7 @@ sequenceDiagram
 
 1. Discovery is unprivileged and asynchronous. When a command finishes and the last check is older than a day, the CLI spawns `gofin-installer check` as a detached process without sudo and does not wait for it. The check returns nothing to the CLI; its only output is the update notice in user-level state: the installed version, the latest release that passed verification, and when it checked.
 2. Verification: the release-key certificate verifies against an embedded root public key (selected by root key ID); its key serial is not on the revocation list; the manifest signature verifies with the certified release key; the release version is not older than the installed one. Root modes also require the key serial to be not lower than the highest the installation has accepted; `check` keeps no trust state, since it only announces.
-3. Every command reads the notice, a local file. When it names a newer release, the CLI tells the caller: human output shows a one-line notice; `--json` responses carry a structured `update_available` field. The companion skill tells the agent to relay it to the human once, since only the human can run `gofin update`.
+3. Every command that returns to the CLI reads the notice, a local file. A system intent that hands over to the admin binary or the installer through sudo does not. When it names a newer release, the CLI tells the caller: human output shows a one-line notice; `--json` responses carry a structured `update_available` field. The companion skill tells the agent to relay it to the human once, since only the human can run `gofin update`.
 4. `gofin update` replaces the CLI process with `sudo gofin-installer update`, the same elevation pattern as other system intents that need elevated privileges.
 5. The installed installer verifies the release before anything from it runs; the new release's installer performs the installation and migrations.
 6. A failure before any migration switches back to the previous version; after that the update only moves forward.

@@ -1,6 +1,6 @@
 # C4 level 4: protected store library
 
-- Status: in review
+- Status: agreed
 - Date: 2026-11-13
 
 Code-level view of the protected store library (`lib_store`), the only code that touches the protected store (`store` in [02-containers.md](02-containers.md)). This version covers the store's lifecycle and what the installer keeps in it; the tables and functions of the broker and the admin binary are added when their level 3 documents are written. Which components use the library is in each container's level 3 document, starting with the [installer](03-components-installer.md#libraries).

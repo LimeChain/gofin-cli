@@ -1,6 +1,6 @@
 # C4 level 3: bootstrap installer components
 
-- Status: in review
+- Status: agreed
 - Date: 2026-11-09
 
 Components of the bootstrap installer (`bootstrap` in [02-containers.md](02-containers.md)): a shell script served by the release site and run as the human with `curl … | sh`. It is regenerated for each release. The install it starts is the installer's install flow ([03-components-installer.md](03-components-installer.md#install)).

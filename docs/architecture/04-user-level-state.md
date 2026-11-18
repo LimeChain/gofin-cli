@@ -1,6 +1,6 @@
 # C4 level 4: user-level state library
 
-- Status: in review
+- Status: agreed
 - Date: 2026-11-13
 
 Code-level view of the user-level state library (`lib_user_state`), the only code that reads and writes GoFin's files in the human's home directory (`user_state` in [02-containers.md](02-containers.md)). This version covers the files the installer needs; files of the other binaries are added when their level 3 documents are written.

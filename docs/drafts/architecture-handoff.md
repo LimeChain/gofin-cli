@@ -12,13 +12,14 @@ The goal is a target architecture designed from required behavior and quality go
 | Part | State |
 | --- | --- |
 | Inputs, level 1, level 2 | Agreed |
-| Level 3: signing tool, release builder | Agreed |
-| Level 3: installer, bootstrap installer | Reviewed in detail and committed; the human has not yet said "agreed" |
+| Level 3: signing tool, release builder, installer, bootstrap installer | Agreed |
 | Level 4: release verifier library | Agreed |
-| Level 4: protected store library, user-level state library | Reviewed in detail and committed; the human has not yet said "agreed". Both cover only what the installer needs. |
-| Level 3: CLI, broker, admin, approval helper | Not started |
+| Level 4: protected store library, user-level state library | Agreed. Both cover only what the installer needs. |
+| Level 3: CLI | Agreed: components and flows. The caller contract and decisions are written after the broker's lifecycle and outcome. |
+| Level 4: intents library | Agreed: first version. The execution outcome's fields wait for the broker. |
+| Level 3: broker, admin, approval helper | Not started |
 
-Next, in order: the CLI (it defines the intent and outcome contract from the caller's side), the broker, the admin binary, the approval helper. Each one extends the two state-library documents with its own tables, files and functions.
+Next, in order: the broker (starting with the lifecycle of an execution intent and its outcome), the CLI's caller contract, the admin binary, the approval helper. Each one extends the two state-library documents with its own tables, files and functions.
 
 ## 2. How the human wants to work
 
@@ -53,6 +54,8 @@ From the human, 2026-11-01 to 2026-11-04. The first two are in the inputs as qua
 
 The CLI and broker levels have to place these. None of it is in `docs/architecture` yet.
 
+The notes below, the drafts they link and the current code use older terms: "logical action", and "operation" for what the caller submits and observes. The vocabulary in the [inputs](../architecture/00-inputs.md) wins. The caller submits an intent and observes that intent's outcome; operations are what the responsible container executes and are not part of the caller's contract. Translate before writing a level document.
+
 - **Typed lifecycle.** Every operation goes through the same stages: collect → evaluate → prepare → simulate → authorize → execute → observe. The intent is the input to collect. PR #69 introduced this as a proof of concept for one protocol; the human wants it for all operations.
 - **Outcome contract.** Every operation reports a top-level `outcome` object. Facts are stored; phase, replay safety and retry approval are computed when read. The full contract is section 4 of [execution-simplification.md](execution-simplification.md).
 - **Intent model.** An intent is an action plus required bounds plus optional bounds; an operation is what executes. Intents come in three kinds (information, execution, system), and privilege is a separate attribute. Per-operation schemas are in [intent-model.md](intent-model.md); it is paused, and the architecture must support intents for single operations first, then multi-operation intents, then plans.
@@ -75,7 +78,7 @@ These were discussed and accepted. The human declined to add mitigations for the
 
 Decisions that were deliberately left for later, and things not verified.
 
-- **Statuses.** Ask the human whether the installer, bootstrap installer, protected store library and user-level state library can be marked agreed.
+- **CLI caller contract.** Still to write: how intents and bounds are spelled on the command line, the `--json` document (it needs a place for the update notice and a shape for an error where no action was resolved), bounded waiting as an option of `observe`, and exit statuses.
 - **Locks beyond the maintenance lock** (per-action execution lease, auxiliary credential creation, Yolo gate). Decide at the broker and admin levels: a database transaction where the work is only data, a lock taken through the protected store library where it spans a call to an external system.
 - **Protected store.** A transaction handed to a closure, for "read, decide, write" in one step (for example nonce allocation), is to be added only if the broker needs it. `StoreRecord` may be split into separate load and persist traits if a type is only read or only written.
 - **Release file list.** `release.json` is used for the active version and for checking unpacked files. If the file check is judged not worth it, the file shrinks to version, platform and source commit.
